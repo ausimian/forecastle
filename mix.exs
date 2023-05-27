@@ -4,7 +4,7 @@ defmodule Forecastle.MixProject do
   def project do
     [
       app: :forecastle,
-      version: "0.1.0",
+      version: "0.1.1",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -37,7 +37,7 @@ defmodule Forecastle.MixProject do
       licenses: ["MIT"],
       links: %{
         "GitHub" => "https://github.com/ausimian/castle",
-        "Castle" => "https://hex.pm/castle"
+        "Castle" => "https://hex.pm/packages/castle"
       }
     ]
   end
