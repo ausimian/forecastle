@@ -102,10 +102,11 @@ defmodule Forecastle do
     File.rename(Path.join(vp, "sys.config"), Path.join(vp, "build.config"))
   end
 
-  defp restructure_bin_dir(%Mix.Release{name: name, path: path}) do
+  defp restructure_bin_dir(%Mix.Release{name: name, path: path} = release) do
     bin_path = Path.join(path, "bin")
     invoked  = Path.join(bin_path, "#{name}")
-    File.cp!(Path.join(:code.priv_dir(@app), "script.sh"), invoked)
+    template = Path.join(:code.priv_dir(@app), "script.sh")
+    File.write!(invoked, EEx.eval_file(template, release: release))
   end
 
   defp copy_runtime_exs(%Mix.Release{version_path: vp}) do
