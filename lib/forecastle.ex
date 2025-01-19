@@ -95,7 +95,7 @@ defmodule Forecastle do
         &Keyword.put(&1, :config_providers, provider_states)
       )
 
-    File.write!(sys_config_path, :io_lib.format('~tp.~n', [new_sys_config]))
+    File.write!(sys_config_path, :io_lib.format(~c"~tp.~n", [new_sys_config]))
   end
 
   defp rename_sys_config(%Mix.Release{version_path: vp}) do
