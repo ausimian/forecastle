@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3 - Jan 19, 2025
+
+- 1.18 fixes
+
 ## 0.1.2 - Jun 10, 2023
 
 - Fixes to bin script generation
