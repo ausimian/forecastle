@@ -3,13 +3,13 @@ defmodule Forecastle do
   Documentation for `Forecastle`.
   """
 
-  @app Mix.Project.config[:app]
+  @app Mix.Project.config()[:app]
 
   @spec steps(maybe_improper_list) :: maybe_improper_list
   def steps(tasks \\ [:assemble, :tar]) when is_list(tasks) do
     if idx = Enum.find_index(tasks, &match?(:assemble, &1)) do
       {pre, [:assemble | post]} = Enum.split(tasks, idx)
-      pre ++ [&pre_assemble/1, :assemble, &post_assemble/1 | post]
+      pre ++ [&pre_assemble/1, :assemble, (&post_assemble/1) | post]
     else
       tasks
     end
@@ -38,22 +38,21 @@ defmodule Forecastle do
   end
 
   defp remove_runtime_configuration(%Mix.Release{options: options, version: vsn} = release) do
-    runtime_exs = get_runtime_exs()
+    if File.exists?(get_runtime_exs()) and Keyword.get(options, :runtime_config_path, true) do
+      options =
+        options
+        |> Keyword.update(__MODULE__, [], &(&1 ++ [runtime_config_provider(vsn)]))
+        |> Keyword.put(:runtime_config_path, false)
 
-    if File.exists?(runtime_exs) do
-      if Keyword.get(options, :runtime_config_path, true) do
-        options =
-          Keyword.update(options, __MODULE__, [], fn providers ->
-            providers ++
-              [
-                {Config.Reader,
-                 path: {:system, "RELEASE_ROOT", "/releases/#{vsn}/runtime.exs"}, env: Mix.env()}
-              ]
-          end)
+      %Mix.Release{release | options: options}
+    else
+      release
+    end
+  end
 
-        %Mix.Release{release | options: Keyword.put(options, :runtime_config_path, false)}
-      end
-    end || release
+  defp runtime_config_provider(vsn) do
+    {Config.Reader,
+     path: {:system, "RELEASE_ROOT", "/releases/#{vsn}/runtime.exs"}, env: Mix.env()}
   end
 
   defp remove_config_providers(%Mix.Release{} = release) do
@@ -81,7 +80,7 @@ defmodule Forecastle do
   defp add_config_providers(%Mix.Release{options: options, version_path: vp}) do
     provider_states =
       for {mod, arg} <- Keyword.get(options, __MODULE__, []) do
-        {mod, apply(mod, :init, [arg])}
+        {mod, mod.init(arg)}
       end
 
     sys_config_path = Path.join(vp, "sys.config")
@@ -104,7 +103,7 @@ defmodule Forecastle do
 
   defp restructure_bin_dir(%Mix.Release{name: name, path: path} = release) do
     bin_path = Path.join(path, "bin")
-    invoked  = Path.join(bin_path, "#{name}")
+    invoked = Path.join(bin_path, "#{name}")
     template = Path.join(:code.priv_dir(@app), "script.sh")
     File.write!(invoked, EEx.eval_file(template, release: release))
   end
