@@ -1,17 +1,32 @@
 # Changelog
 
-## 0.1.3 - Jan 19, 2025
+All notable changes to this project are documented in this file.
 
-- 1.18 fixes
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.1.2 - Jun 10, 2023
+<!-- %% CHANGELOG_ENTRIES %% -->
 
-- Fixes to bin script generation
+## 0.1.3 - 2025-01-19
 
-## 0.1.1 - May 27, 2023
+### Fixed
 
-- Fix package url
+- Elixir 1.18 compatibility fixes.
 
-## 0.1.0 - May 27, 2023
+## 0.1.2 - 2023-06-10
 
-- Initial revision
+### Fixed
+
+- Corrected the release name used in the generated `bin` script.
+
+## 0.1.1 - 2023-05-27
+
+### Fixed
+
+- Corrected the package URL.
+
+## 0.1.0 - 2023-05-27
+
+### Added
+
+- Initial release.
