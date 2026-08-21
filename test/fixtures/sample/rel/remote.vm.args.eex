@@ -1,0 +1,5 @@
+## Distribution without epmd. Transient rpc/remote nodes must not listen,
+## otherwise they would collide with the running node on the same port.
+-start_epmd false
+-erl_epmd_port <%= System.get_env("SAMPLE_EPMD_PORT", "24601") %>
+-dist_listen false

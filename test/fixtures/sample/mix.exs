@@ -1,0 +1,60 @@
+defmodule Sample.MixProject do
+  use Mix.Project
+
+  @forecastle Path.expand("../../..", __DIR__)
+
+  def project do
+    [
+      app: :sample,
+      version: System.get_env("SAMPLE_VSN", "0.1.0"),
+      elixir: "~> 1.18",
+      appup: "appup.exs",
+      compilers: Mix.compilers() ++ [:appup],
+      deps: deps(),
+      releases: releases()
+    ]
+  end
+
+  def application do
+    [
+      extra_applications: [:logger],
+      mod: {Sample.Application, []}
+    ]
+  end
+
+  defp deps do
+    [
+      {:castle, "~> 0.3"},
+      {:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), override: true}
+    ]
+  end
+
+  defp releases do
+    [
+      sample: [
+        include_executables_for: executables(),
+        steps: steps()
+      ]
+    ]
+  end
+
+  # Switched by the test suite so that the warning about unsupported Windows
+  # executables can be provoked.
+  defp executables do
+    case System.get_env("SAMPLE_EXECUTABLES") do
+      "unix,windows" -> [:unix, :windows]
+      "windows" -> [:windows]
+      _ -> [:unix]
+    end
+  end
+
+  # Switched by the test suite so that the same fixture can be assembled both
+  # with and without Forecastle, and the two launchers compared.
+  defp steps do
+    if System.get_env("SAMPLE_STEPS") == "mix" do
+      [:assemble, :tar]
+    else
+      [&Forecastle.pre_assemble/1, :assemble, &Forecastle.post_assemble/1, :tar]
+    end
+  end
+end

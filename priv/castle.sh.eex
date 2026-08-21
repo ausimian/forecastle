@@ -1,0 +1,126 @@
+#!/bin/sh
+set -e
+
+readlink_f () {
+  cd "$(dirname "$1")" > /dev/null
+  filename="$(basename "$1")"
+  if [ -h "$filename" ]; then
+    readlink_f "$(readlink "$filename")"
+  else
+    echo "$(pwd -P)/$filename"
+  fi
+}
+
+SELF=$(readlink_f "$0")
+RELEASE_ROOT="$(CDPATH='' cd "$(dirname "$SELF")/.." && pwd -P)"
+export RELEASE_ROOT
+# Both the launcher and the release tarballs are named at build time. Neither
+# is affected by RELEASE_NAME, which names the node and is passed through the
+# environment to the launcher untouched.
+RELEASE_LAUNCHER="$RELEASE_ROOT/bin/<%= release.name %>"
+RELEASE_TARBALL_PREFIX="<%= release.name %>"
+
+NOTHING_TO_COMMIT="No release is awaiting commit. Pass a version explicitly."
+
+# Versions reach the running node as Elixir source, inside a ~s() sigil, so a
+# version able to end that sigil would have the remainder of it evaluated with
+# the release cookie's authority. Three things can do that - the bracket pair
+# that delimits it, the backslash that escapes within it, and the # that starts
+# an interpolation - and the path separator is refused alongside them because
+# the version also names a tarball. Everything else is inert inside the sigil
+# and is allowed: Mix does not constrain a release version, so refusing more
+# than this would reject versions that assemble and boot perfectly well.
+validate_vsn () {
+  case "$1" in
+    "" | *"("* | *")"* | *"#"* | *"\\"* | *"/"*)
+      echo "ERROR: $1 is not a usable release version" >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_vsn () {
+  if [ -z "$2" ]; then
+    echo "ERROR: $1 expects a version as argument" >&2
+    exit 1
+  fi
+
+  validate_vsn "$2"
+}
+
+castle_rpc () {
+  exec "$RELEASE_LAUNCHER" rpc "$1"
+}
+
+case $1 in
+  releases)
+    castle_rpc "Castle.releases()"
+    ;;
+
+  unpack)
+    require_vsn "$1" "$2"
+    castle_rpc "Castle.unpack(~s($RELEASE_TARBALL_PREFIX-$2))"
+    ;;
+
+  install|remove)
+    require_vsn "$1" "$2"
+    castle_rpc "Castle.$1(~s($2))"
+    ;;
+
+  commit)
+    if [ -n "$2" ]; then
+      validate_vsn "$2"
+      castle_rpc "Castle.commit(~s($2))"
+    else
+      # No version given: commit whichever release is currently running but not
+      # yet permanent. There is at most one such release at any time.
+      #
+      # Not exec'd, unlike the other commands, because having nothing to commit
+      # has to leave a non-zero status behind for whatever asked us to commit.
+      if commit_output=$("$RELEASE_LAUNCHER" rpc "case :release_handler.which_releases(:current) do
+                    [{_, vsn, _, _} | _] -> Castle.commit(to_string(vsn))
+                    [] -> IO.puts(~s($NOTHING_TO_COMMIT))
+                  end"); then
+        commit_status=0
+      else
+        commit_status=$?
+      fi
+
+      if [ -n "$commit_output" ]; then
+        echo "$commit_output"
+      fi
+
+      if [ "$commit_status" -ne 0 ]; then
+        exit "$commit_status"
+      fi
+
+      case $commit_output in
+        *"$NOTHING_TO_COMMIT"*)
+          exit 1
+          ;;
+      esac
+    fi
+    ;;
+
+  *)
+    echo "Usage: $(basename "$0") COMMAND [ARGS]
+
+Manages the releases known to a running system. The system itself is
+controlled through the standard launcher, bin/<%= release.name %>.
+
+The known commands are:
+
+    releases       Lists the releases currently known to the system, and their status
+    unpack \"VSN\"   Unpacks $RELEASE_TARBALL_PREFIX-<VSN>.tar.gz
+    install \"VSN\"  Installs VSN and makes it the version that is running now
+    commit [VSN]   Commits VSN, so that it becomes the version that runs on restart.
+                   Defaults to the version that is running now.
+    remove \"VSN\"   Uninstalls VSN from the system
+" >&2
+
+    if [ -n "$1" ]; then
+      echo "ERROR: Unknown command $1" >&2
+      exit 1
+    fi
+    ;;
+esac

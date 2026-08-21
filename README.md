@@ -7,7 +7,8 @@ upgrades. This includes:
 
   - Copying appup and relup files into place.
   - Organising the generated release structure so that it's ready for hot-code upgrades.
-  - Replacing the shell script with one that supports release unpacking and installtion
+  - Adding a `bin/castle` command for unpacking and installing releases, alongside
+    the standard Mix launcher.
 
 Additionally, `Forecastle` ships with a appup compiler and a mix task for relup generation.
 
@@ -78,11 +79,51 @@ In the post-assembly step:
 
   - The `sys.config` generated from build-time configuration is copied to 
     `build.config`.
-  - The shell-script in the `bin` folder is replaced with one that provides
-    additional commands to manage releases.
+  - A `bin/castle` command is added, providing the commands that manage releases.
+    The standard `bin/<release>` launcher that Mix generates is left untouched.
+  - The generated `env.sh` is extended, so that the configuration in
+    `build.config` is expanded into `sys.config` before the system boots. Any
+    `env.sh` the project supplies through `rel/env.sh.eex` is preserved, and
+    runs first.
   - Any `runtime.exs` is copied into the version path of the release.
   - The generated _name.rel_ is copied into the `releases` folder as _name-vsn.rel_.
   - Any `relup` file is copied into the version path of the release.
+
+## Managing Releases
+
+The release itself is controlled through the standard launcher that Mix generates,
+which `Forecastle` does not modify:
+
+```shell
+> myapp/bin/myapp start
+> myapp/bin/myapp remote
+> myapp/bin/myapp rpc "..."
+> myapp/bin/myapp stop
+```
+
+Moving the running system from one version to the next is done through `bin/castle`:
+
+```shell
+# List the releases the system knows about, and their status.
+> myapp/bin/castle releases
+
+# Unpack myapp-0.1.1.tar.gz, which you have placed in myapp/releases.
+> myapp/bin/castle unpack 0.1.1
+
+# Make 0.1.1 the version that is running now, without restarting the VM.
+> myapp/bin/castle install 0.1.1
+
+# Make it the version that runs on restart too. With no version given, this
+# commits whichever version is running.
+> myapp/bin/castle commit
+
+# Or, having decided against it, remove it again.
+> myapp/bin/castle remove 0.1.1
+```
+
+Version selection on restart needs nothing from `Forecastle`: OTP's
+`release_handler` records the committed version in `releases/start_erl.data`,
+which is exactly where the standard launcher reads it from.
 
 ## The Appup Compiler
 
