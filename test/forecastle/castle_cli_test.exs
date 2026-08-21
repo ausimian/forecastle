@@ -489,6 +489,86 @@ defmodule Forecastle.CastleCliTest do
       assert occurrences(err, "heard while confirming") == 1
     end
 
+    test "does not swallow what an attempt on the way there said either", context do
+      # An attempt that fails is not the last word, but it is the only chance to
+      # pass on anything it said: the next one truncates the capture. This one
+      # says something worth hearing alongside the ordinary diagnostic, and a
+      # later attempt confirms - so it used to be lost entirely.
+      stub_launcher!(context, """
+      n=$(cat "#{context.root}/n" 2>/dev/null || echo 0)
+      n=$((n + 1))
+      echo "$n" > "#{context.root}/n"
+      case $n in
+        1) echo 'Now running 0.1.1 (previously 0.1.0).'; exit 0 ;;
+        2) echo 'warning: a disk is filling up' >&2
+           echo '--rpc-eval : RPC failed with reason :noconnection' >&2
+           exit 1 ;;
+        *) exit 0 ;;
+      esac
+      """)
+
+      assert {out, err, 0} =
+               castle_streams(context, ["install", "0.1.1"], [
+                 {"CASTLE_INSTALL_TIMEOUT", "20"}
+               ])
+
+      assert occurrences(out, "Now running") == 1
+      assert occurrences(err, "a disk is filling up") == 1
+      # Selectively, though: the diagnostic that came with it is the sound of a
+      # node that is not back yet, and is not news between attempts.
+      assert occurrences(err, "RPC failed with reason :noconnection") == 0
+    end
+
+    test "does not repeat the expected diagnostic once per attempt", context do
+      # Every couple of seconds for the length of the wait, which is what
+      # replaying each attempt unconditionally would mean, buries anything that
+      # matters under the one line that never does.
+      stub_launcher!(context, """
+      n=$(cat "#{context.root}/n" 2>/dev/null || echo 0)
+      n=$((n + 1))
+      echo "$n" > "#{context.root}/n"
+      case $n in
+        1) echo 'Now running 0.1.1 (previously 0.1.0).'; exit 0 ;;
+        2|3) echo '--rpc-eval : RPC failed with reason :noconnection' >&2; exit 1 ;;
+        *) exit 0 ;;
+      esac
+      """)
+
+      assert {out, err, 0} =
+               castle_streams(context, ["install", "0.1.1"], [
+                 {"CASTLE_INSTALL_TIMEOUT", "20"}
+               ])
+
+      assert occurrences(out, "Now running") == 1
+      assert occurrences(err, "RPC failed with reason :noconnection") == 0
+    end
+
+    test "keeps the expected diagnostic when it is the last thing seen", context do
+      # Between attempts it is noise; as the last thing before giving up it is
+      # the finding, and tells "never came back" from "came back running
+      # something else". One attempt is intermediate here and one is final, so
+      # exactly one copy is both halves of that.
+      stub_launcher!(context, """
+      if [ -f "#{context.root}/installed" ]; then
+        echo '--rpc-eval : RPC failed with reason :noconnection' >&2
+        exit 1
+      fi
+      : > "#{context.root}/installed"
+      echo 'Now running 0.1.1 (previously 0.1.0).'
+      exit 0
+      """)
+
+      assert {out, err, 1} =
+               castle_streams(context, ["install", "0.1.1"], [
+                 {"CASTLE_INSTALL_TIMEOUT", "1"}
+               ])
+
+      assert out == ""
+      assert occurrences(err, "RPC failed with reason :noconnection") == 1
+      assert occurrences(err, "Now running") == 1
+      assert err =~ "is not the running release, 1s after installing it"
+    end
+
     test "leaves what the launcher wrote to standard error on standard error", context do
       # A merged capture cannot be unmerged, so on a confirmed install the
       # launcher's own standard error - the preboot integration's warnings, the

@@ -41,6 +41,15 @@ install_timeout_max=86400
 # not go through the launcher's env.sh to get it.
 CASTLE_TMP="${RELEASE_TMP:-$RELEASE_ROOT/tmp}"
 
+# The launcher's own diagnostic for a node it could not reach. install asks two
+# questions of it, and both are asked with this one pattern: whether a failed
+# install was the node going away rather than a refusal, and whether what an
+# attempt at confirmation wrote amounts to more than the sound of a node that is
+# not back yet. Matched as the whole diagnostic at the start of a line - not as
+# the word on its own, which is a usable release version and appears in the
+# messages that name a version that failed.
+lost_connection_line='^--rpc-eval .*RPC failed with reason :noconnection'
+
 # Versions reach the running node as Elixir source, inside a ~s() sigil, so a
 # version able to end that sigil would have the remainder of it evaluated with
 # the release cookie's authority. Three things can do that - the bracket pair
@@ -255,15 +264,11 @@ install_and_confirm () {
     # to decide. Any other failure has just been reported, and is final.
     #
     # Read from the standard error capture, which is where the launcher writes
-    # it, and recognised as the whole diagnostic at the start of a line - not as
-    # the word on its own. "noconnection" is a usable release version, and the
-    # version being installed is named in the messages that report a failure to
-    # install it, so a bare match would send a real failure off to be confirmed
-    # rather than reported: were that version already the one running, the
+    # it. A bare match on the word would send a real failure off to be confirmed
+    # rather than reported: were the version named already the one running, the
     # confirmation would succeed and this would exit 0 on a launcher that had
     # failed.
-    if ! printf '%s\n' "$install_stderr" |
-        grep -q '^--rpc-eval .*RPC failed with reason :noconnection'; then
+    if ! printf '%s\n' "$install_stderr" | grep -q "$lost_connection_line"; then
       exit "$install_status"
     fi
   fi
@@ -331,6 +336,10 @@ install_and_confirm () {
         echo "$confirm_stdout" >&2
       fi
 
+      # All of it, this time, the diagnostic for an unreachable node included.
+      # Between attempts that line is noise; as the last thing seen it is the
+      # finding - it is what tells "the node never came back" from "the node
+      # came back running something else", which are different problems.
       if [ -n "$confirm_stderr" ]; then
         echo "$confirm_stderr" >&2
       fi
@@ -338,6 +347,20 @@ install_and_confirm () {
       echo "ERROR: $1 is not the running release, ${install_timeout}s after" \
            "installing it" >&2
       exit 1
+    fi
+
+    # There is another attempt to come, so this one's standard error is not the
+    # last word - but it is the only chance to say anything it holds, since the
+    # next attempt truncates the capture. Everything except the launcher's
+    # diagnostic for a node it could not reach is passed on: that line is what a
+    # node part-way through a reboot looks like, and repeating it every couple
+    # of seconds for the length of the wait would bury whatever came with it.
+    # Anything else is unexpected by definition and goes straight out.
+    unexpected_stderr=$(printf '%s\n' "$confirm_stderr" |
+      grep -v "$lost_connection_line" || true)
+
+    if [ -n "$unexpected_stderr" ]; then
+      echo "$unexpected_stderr" >&2
     fi
 
     remaining=$(( deadline - now ))
