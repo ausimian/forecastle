@@ -5,6 +5,8 @@
   `remove`, and delegates to the running system through the standard launcher.
 - `bin/castle commit` may now be given no version, in which case it commits
   whichever release is currently running.
+- A test suite. It assembles a real release from a fixture application and, in
+  the `:e2e` suite, boots it and performs a hot upgrade.
 
 ### Changed
 

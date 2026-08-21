@@ -1,0 +1,3 @@
+## Distribution without epmd, so that the test suite needs no epmd daemon.
+-start_epmd false
+-erl_epmd_port <%= System.get_env("SAMPLE_EPMD_PORT", "24601") %>

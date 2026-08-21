@@ -44,12 +44,15 @@ around it composes instead:
 | `lib/mix/tasks/forecastle.relup.ex` | `mix forecastle.relup` — wraps `:systools.make_relup/4` |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
+| `test/fixtures/sample` | A real application, assembled by the test suite into a real release |
+| `test/support` | The workspace the fixture is built in, and the case template for tests that build it |
 
 ## Working on this project
 
 - Run `mix precommit` before committing. It is the single validation gate —
   `compile --warnings-as-errors`, `deps.unlock --unused`, `format`,
-  `credo --strict`, `test`. Do not run the individual checks piecemeal.
+  `credo --strict`, `test --include e2e`. Do not run the individual checks
+  piecemeal.
 - `@version` in `mix.exs` is the single source of truth for the version.
 - Add user-visible changes to `RELEASE.md` on the feature branch, using
   [Keep a Changelog](https://keepachangelog.com/) sections. Do not defer release
@@ -60,11 +63,26 @@ around it composes instead:
   a tag triggers `.github/workflows/publish.yml`, which publishes to Hex.
 - Never commit directly to `main`; work on a feature branch and open a PR.
 
+## Tests
+
+The suite works by building the fixture application in `test/fixtures/sample`
+into a real release, in a workspace under `_build/fixtures`. Delete that
+directory to start from a clean slate.
+
+| Suite | What it covers |
+| --- | --- |
+| `test/forecastle_test.exs` | The step functions, against a synthetic `Mix.Release` |
+| `test/forecastle/assembly_test.exs` | The assembled tree, including `bin/<name>` being byte-identical to the launcher plain Mix produces |
+| `test/forecastle/castle_cli_test.exs` | `bin/castle` as a shell script, against a launcher stub that records its arguments |
+| `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, tagged `:e2e` |
+
+The `:e2e` suite is excluded by default and included by `mix precommit`. Run it
+on its own with `mix test --include e2e`. It needs no epmd daemon: the fixture
+configures distribution without one.
+
 ## Compatibility
 
 Forecastle manipulates `Mix.Release` internals and the layout Mix generates, so
-it is sensitive to changes in Elixir's release tooling. The CI matrix builds
-across Elixir 1.18–1.20 and OTP 27–29 to catch that early. There is no test
-suite at present, so the matrix is effectively a compile check — treat a green
-CI run as weaker evidence than usual and verify release changes by building a
-real release.
+it is sensitive to changes in Elixir's release tooling. The CI matrix runs the
+whole suite, `:e2e` included, across Elixir 1.18–1.20 and OTP 27–29 to catch
+that early.

@@ -10,6 +10,10 @@ defmodule Forecastle.MixProject do
       description: "Build-Time Hot-Code Upgrade support for Elixir",
       version: System.get_env("VERSION_OVERRIDE", @version),
       elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
+      # The sample application under test/fixtures is a project in its own
+      # right, not a collection of test files. (Elixir 1.19 and later.)
+      test_ignore_filters: [~r"^test/fixtures/"],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
@@ -32,6 +36,9 @@ defmodule Forecastle.MixProject do
     ]
   end
 
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_env), do: ["lib"]
+
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
@@ -48,7 +55,7 @@ defmodule Forecastle.MixProject do
         "deps.unlock --unused",
         "format",
         "credo --strict",
-        "test"
+        "test --include e2e"
       ]
     ]
   end

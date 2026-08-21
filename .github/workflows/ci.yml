@@ -84,4 +84,7 @@ jobs:
       run: mix compile --warnings-as-errors
 
     - name: Run tests
-      run: mix test
+      # Includes the end-to-end suite, which boots a release and hot-upgrades
+      # it. That is the path most sensitive to Elixir and OTP release tooling,
+      # so it is worth running on every cell of the matrix.
+      run: mix test --include e2e
