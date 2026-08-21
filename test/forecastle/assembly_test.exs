@@ -185,6 +185,19 @@ defmodule Forecastle.AssemblyTest do
       assert output =~ "is an upgrade plan for 9.9.9"
     end
 
+    test "is refused when the version matches but the plan sections do not" do
+      # The version alone is not enough. release_handler reaches into these two
+      # lists with lists:keysearch/3, so an atom where a list belongs fails
+      # during the live upgrade - exactly what checking the relup is meant to
+      # stop. OTP applies this contract in systools_make:check_relup/1 when it
+      # packs a tarball itself; Mix packs its own, so nothing applied it here.
+      write_relup!(~s({"#{@vsn}", invalid, invalid}.\n))
+
+      output = assemble_failure!("rel-relup-malformed")
+
+      assert output =~ "is not an upgrade plan"
+    end
+
     test "is refused when it is not an upgrade plan at all" do
       # What an interrupted write leaves behind. Existence was the only check.
       write_relup!("%% placeholder\n")

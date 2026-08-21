@@ -184,17 +184,27 @@ defmodule Forecastle do
     wanted = to_charlist(vsn)
 
     case :file.consult(to_charlist(relup)) do
-      {:ok, [{^wanted, _up, _down}]} ->
+      # The outer contract `systools_make:check_relup/1` enforces when OTP packs
+      # a tarball: one term, a non-empty version string, and list-valued upgrade
+      # and downgrade sections. Mix packs its own tarball, so nothing applies
+      # that check on the way into a release, and `release_handler` reaches
+      # straight into those two lists during an upgrade. The pinned version is
+      # a non-empty charlist by construction, so matching it covers the rest.
+      {:ok, [{^wanted, up, down}]} when is_list(up) and is_list(down) ->
         :ok
 
-      {:ok, [{other, _up, _down}]} ->
+      {:ok, [{[_ | _] = other, up, down}]} when is_list(up) and is_list(down) ->
         Mix.raise(
           "#{relup} is an upgrade plan for #{other}, but this release is #{vsn}. " <>
             "Generate the relup for #{vsn} into the project root, or remove the stale one."
         )
 
       {:ok, terms} ->
-        Mix.raise("#{relup} is not an upgrade plan: #{inspect(terms)}")
+        Mix.raise(
+          "#{relup} is not an upgrade plan. Expected a single {version, upgrade, " <>
+            "downgrade} tuple with a version string and two lists, which is what " <>
+            "systools writes and release_handler reads, but got: #{inspect(terms)}"
+        )
 
       {:error, reason} ->
         Mix.raise("#{relup} could not be read as an upgrade plan: #{inspect(reason)}")

@@ -79,7 +79,11 @@
   remains of a write that was interrupted — was copied in and later applied by
   `release_handler` as this version's plan. The relup is now read and its
   target version checked against the release being assembled, and assembly
-  fails if it does not match or cannot be read as an upgrade plan at all. A
+  fails if it does not match, if the upgrade and downgrade sections are not
+  the lists `release_handler` will reach into, or if the file cannot be read
+  as an upgrade plan at all. That is the contract OTP applies in
+  `systools_make:check_relup/1` when it packs a tarball itself, plus the
+  version check; Mix packs its own tarball, so nothing was applying it. A
   build that was silently packaging the wrong plan will now stop instead.
 - `mix forecastle.relup` discarded arguments it did not recognise, so a
   mistyped switch, or a path given without one, generated a relup between
