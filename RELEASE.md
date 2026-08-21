@@ -16,18 +16,29 @@
   therefore taken to settle nothing either way, and `install` polls
   `Castle.running/1` until the version is running - exiting 0 only then, and
   non-zero on a real failure or if the version never becomes the running one.
-  What the install itself printed is held back until the version has been
-  confirmed. Only then does it go to standard output as the report of success it
-  is; if the version is never confirmed, it goes to standard error with the
-  rest of the diagnosis instead, so nothing on the success stream ever describes
-  an install that did not take effect.
+  What the install printed on standard output is held back until the version has
+  been confirmed. Only then does it go to standard output as the report of
+  success it is; if the version is never confirmed it goes to standard error
+  with the rest of the diagnosis instead, so nothing on the success stream ever
+  describes an install that did not take effect. What the launcher wrote to
+  standard error stays on standard error throughout: the two streams are
+  captured separately, so a warning from the VM or from the preboot integration
+  arrives where a pipeline watching that stream will find it.
+
+  Everything that could refuse to go on is settled before the install runs - the
+  timeout, the clock, and somewhere to capture what the launcher says. Past that
+  point the system is on another release, and stopping there would leave that
+  unsaid and unconfirmed.
 
   `CASTLE_INSTALL_TIMEOUT` sets how long it keeps asking, in seconds, and
   defaults to 300, with 86400 the most it accepts: how long a reboot takes is a
   property of the system being upgraded. It is a deadline in elapsed time
   rather than a count of attempts, so the time the attempts themselves take
   counts against it, and the clock is whole seconds, so the wait can come out
-  up to a second short of the number given.
+  up to a second short of the number given. It is the system clock, so a
+  correction to that clock while `install` is waiting moves the deadline with
+  it; there is no monotonic clock to be had from a POSIX shell, and elapsed
+  wall-clock time is what a number of seconds means to an operator anyway.
 
   It is a deadline for the *retrying*, not a limit on any single question.
   Nothing can interrupt one already in flight: `rpc` reaches the node through

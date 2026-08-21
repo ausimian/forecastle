@@ -28,9 +28,18 @@ NOTHING_TO_COMMIT="No release is awaiting commit. Pass a version explicitly."
 # runs the rest of the upgrade on the way back up, so how long that takes is a
 # property of the system being upgraded rather than of this script: hence
 # generous by default, and overridable.
+# The window is measured against the system clock, so a correction to that
+# clock while install is waiting moves the deadline with it. There is no
+# monotonic clock to be had from a POSIX shell, and elapsed wall-clock time is
+# what an operator means by a number of seconds anyway.
 CASTLE_INSTALL_TIMEOUT="${CASTLE_INSTALL_TIMEOUT:-300}"
 install_poll_interval=2
 install_timeout_max=86400
+
+# Where install captures what the launcher writes to standard error. The
+# launcher's own default for RELEASE_TMP, applied here because bin/castle does
+# not go through the launcher's env.sh to get it.
+CASTLE_TMP="${RELEASE_TMP:-$RELEASE_ROOT/tmp}"
 
 # Versions reach the running node as Elixir source, inside a ~s() sigil, so a
 # version able to end that sigil would have the remainder of it evaluated with
@@ -110,6 +119,54 @@ canonical_timeout () {
   echo "$seconds"
 }
 
+# The clock, as whole seconds since the epoch, or a complaint and a non-zero
+# return if it cannot be read as that.
+#
+# %s is not a conversion POSIX requires of date, so a system can have a date
+# that does not answer. Called once before the install for that reason: the
+# deadline is the first thing that needs the clock, and it is downstream of the
+# install, so a date that cannot answer would otherwise abort the script with
+# the system already moved to another release and nothing left to confirm it.
+clock_now () {
+  now=$(date +%s 2>/dev/null) || now=""
+
+  case $now in
+    "" | *[!0-9]*)
+      echo "ERROR: date +%s did not report the seconds since the epoch," \
+           "which install needs to time itself; got: $now" >&2
+      return 1
+      ;;
+  esac
+
+  echo "$now"
+}
+
+# A file to capture the launcher's standard error in, or a complaint and a
+# non-zero return if there is nowhere to put one.
+#
+# The capture has two readers - install decides whether a failure was a lost
+# connection by what the launcher said, and the caller has to receive it on the
+# stream it was written to - and a merged capture can only serve one of them.
+# Under RELEASE_TMP, defaulted as the launcher defaults it, because a release
+# root is not necessarily writable.
+scratch_file () {
+  if ! mkdir -p "$CASTLE_TMP" 2>/dev/null; then
+    echo "ERROR: cannot create $CASTLE_TMP, which install needs to capture" \
+         "what the system reports; set RELEASE_TMP somewhere writable" >&2
+    return 1
+  fi
+
+  file="$CASTLE_TMP/castle-install-$$"
+
+  if ! : > "$file" 2>/dev/null; then
+    echo "ERROR: cannot write $file, which install needs to capture what the" \
+         "system reports; set RELEASE_TMP somewhere writable" >&2
+    return 1
+  fi
+
+  echo "$file"
+}
+
 # Installs a version and then confirms that it is the one running.
 #
 # release_handler replies as soon as it has accepted an upgrade, and for a
@@ -125,15 +182,38 @@ canonical_timeout () {
 # Not exec'd, unlike the other commands, because there is something to do after
 # the install: the status this returns with is this function's to report.
 install_and_confirm () {
+  # Everything that can refuse to go on is asked first, before the launcher is
+  # invoked at all. Once the install has run, the system is on another release,
+  # and an abort from here on leaves that unconfirmed with nothing said about
+  # it: a timeout that turns out not to be a number, a date that cannot report
+  # the time, a temporary directory that cannot be written. None of those are
+  # discovered late.
   install_timeout=$(canonical_timeout "$CASTLE_INSTALL_TIMEOUT") || exit 1
+  clock_now > /dev/null || exit 1
+  install_stderr_file=$(scratch_file) || exit 1
 
-  # Whether the node went away has to be told apart from any other failure, and
-  # only what the launcher reports says which it was, so the output is captured
-  # rather than left to flow past.
-  if install_output=$("$RELEASE_LAUNCHER" rpc "Castle.install(~s($1))" 2>&1); then
+  trap 'rm -f "$install_stderr_file"' EXIT
+  trap 'rm -f "$install_stderr_file"; exit 130' HUP INT TERM
+
+  # The two streams are captured apart, because they are read for different
+  # things and merging them is not reversible. Standard output is what the
+  # install has to report, and is held until there is something to report it
+  # about. Standard error is where the launcher writes the diagnostic that says
+  # whether the node went away, and belongs to the caller's standard error
+  # whatever the outcome - a pipeline watching for it there would never see it
+  # if it arrived on standard output instead.
+  if install_stdout=$("$RELEASE_LAUNCHER" rpc "Castle.install(~s($1))" \
+      2> "$install_stderr_file"); then
     install_status=0
   else
     install_status=$?
+  fi
+
+  install_stderr=$(cat "$install_stderr_file")
+  rm -f "$install_stderr_file"
+
+  if [ -n "$install_stderr" ]; then
+    echo "$install_stderr" >&2
   fi
 
   held_output=""
@@ -143,12 +223,12 @@ install_and_confirm () {
     # the version has been seen running, and the confirmation below can still
     # find a rollback or run out of time - at which point a "Now running ..."
     # already on standard output would be a lie that automation reads.
-    held_output=$install_output
-  elif [ -n "$install_output" ]; then
-    # Nothing to hold back: whatever a failed install printed is not a report of
-    # success, so it is said now and on standard error, where a caller that
-    # redirects one stream and not the other looks for it.
-    echo "$install_output" >&2
+    held_output=$install_stdout
+  elif [ -n "$install_stdout" ]; then
+    # Nothing to hold back: what a failed install printed is not a report of
+    # success either, so it goes out now, and on standard error with the rest
+    # of the account of the failure.
+    echo "$install_stdout" >&2
   fi
 
   if [ "$install_status" -ne 0 ]; then
@@ -156,14 +236,15 @@ install_and_confirm () {
     # out here, so it settles nothing either way and the confirmation below has
     # to decide. Any other failure has just been reported, and is final.
     #
-    # Recognised as the whole diagnostic the launcher prints, at the start of a
-    # line - not as the word on its own. "noconnection" is a usable release
-    # version, and the version being installed is named in the messages that
-    # report a failure to install it, so a bare match would send a real failure
-    # off to be confirmed rather than reported: were that version already the
-    # one running, the confirmation would succeed and this would exit 0 on a
-    # launcher that had failed.
-    if ! printf '%s\n' "$install_output" |
+    # Read from the standard error capture, which is where the launcher writes
+    # it, and recognised as the whole diagnostic at the start of a line - not as
+    # the word on its own. "noconnection" is a usable release version, and the
+    # version being installed is named in the messages that report a failure to
+    # install it, so a bare match would send a real failure off to be confirmed
+    # rather than reported: were that version already the one running, the
+    # confirmation would succeed and this would exit 0 on a launcher that had
+    # failed.
+    if ! printf '%s\n' "$install_stderr" |
         grep -q '^--rpc-eval .*RPC failed with reason :noconnection'; then
       exit "$install_status"
     fi
@@ -183,12 +264,23 @@ install_and_confirm () {
   # happens before any of this. An operator who needs a hard bound has to
   # impose one from outside, with timeout(1) or whatever their scheduler
   # offers.
-  deadline=$(( $(date +%s) + install_timeout ))
+  #
+  # Timed from here rather than from before the install, so that an install that
+  # takes its time does not eat the window meant for confirming it. The clock
+  # has already answered once, in the preflight above, which is what makes
+  # asking it again here safe.
+  deadline=$(clock_now) || exit 1
+  deadline=$(( deadline + install_timeout ))
 
   # Each attempt says nothing while there is another one to come - a node that
   # is still rebooting is not news. What the last one saw is worth having,
   # though: it names the version that is running instead, or says the node never
   # came back.
+  #
+  # Both streams together here, unlike the install: everything an attempt
+  # produces is either discarded, when it succeeds, or repeated on standard
+  # error as part of the diagnosis, when the last one fails. Nothing it says can
+  # end up on the wrong stream because nothing it says reaches standard output.
   while :; do
     if confirm_output=$("$RELEASE_LAUNCHER" rpc "Castle.running(~s($1))" 2>&1); then
       # Only now is what the install said a report of success.
@@ -199,7 +291,7 @@ install_and_confirm () {
       return 0
     fi
 
-    now=$(date +%s)
+    now=$(clock_now) || exit 1
     if [ "$now" -ge "$deadline" ]; then
       # Held back until the outcome was known, and the outcome is failure, so
       # it goes out with the diagnosis rather than to the stream that says the

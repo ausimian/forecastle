@@ -40,16 +40,30 @@ around it composes instead:
   the bare word, which is a usable release version and turns up in the messages
   that name a version that failed — which is also why `validate_vsn` refuses
   control characters, since a version carrying a newline could otherwise forge
-  that line for itself. What the install printed is held until the confirmation
-  succeeds, so the success stream never carries a claim the confirmation goes on
-  to disprove. `CASTLE_INSTALL_TIMEOUT` bounds the retrying, as a deadline in
-  elapsed time rather than a count of attempts, and is canonicalised and
-  range-checked before the install is delegated — validating it later would
-  abort after the system had already moved to another release. It does not bound
-  an individual call: `:erpc` waits indefinitely, so a hard limit has to come
-  from outside. A wrong cookie or an already-dead node is indistinguishable from
-  a reboot and so is asked about until the deadline; that is deliberate, and
-  called out in the release notes.
+  that line for itself.
+
+  The install's two streams are captured apart, for different purposes: its
+  standard error is what the classifier reads and is passed through to standard
+  error, while its standard output is held until the confirmation succeeds. So
+  the success stream never carries a claim the confirmation goes on to disprove,
+  and a warning the launcher wrote never comes back out on the wrong stream. Do
+  not merge them again with `2>&1`; merging cannot be undone.
+
+  Everything able to stop the script is settled before the launcher is invoked:
+  the timeout, the clock (`date +%s` is not a conversion POSIX requires, so a
+  system can have a `date` that will not answer), and a writable `RELEASE_TMP`
+  to capture into. Keep that ordering — past the install the system is on
+  another release, so stopping from there leaves it unconfirmed with nothing
+  said about it. Three separate review findings have been that same shape.
+
+  `CASTLE_INSTALL_TIMEOUT` bounds the retrying, as a deadline in elapsed time
+  rather than a count of attempts, measured against the system clock — so a
+  correction to that clock mid-wait moves it, which is a footnote in the release
+  notes rather than something to engineer around; POSIX shell has no monotonic
+  clock. It does not bound an individual call: `:erpc` waits indefinitely, so a
+  hard limit has to come from outside. A wrong cookie or an already-dead node is
+  indistinguishable from a reboot and so is asked about until the deadline; that
+  is deliberate, and called out in the release notes.
 - The `env.sh` fragment expands `build.config` into `sys.config` in a preboot
   VM, for the commands that boot the system. It is appended, so a project's own
   `rel/env.sh.eex` survives and runs first.

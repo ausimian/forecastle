@@ -327,6 +327,50 @@ defmodule Forecastle.CastleCliTest do
     end
   end
 
+  describe "what install settles before installing anything" do
+    # Anything able to stop the script belongs ahead of the launcher. Past it,
+    # the system is on another release, and an abort says nothing about that
+    # while leaving nobody to confirm it.
+
+    test "refuses a clock that cannot tell it the time", context do
+      # `date +%s` is not a conversion POSIX requires of date, and the deadline
+      # is the first thing that needs it - which is downstream of the install.
+      for answer <- ["exit 1", "echo not-a-number", "echo"] do
+        stub_launcher!(context, "exit 0\n")
+        File.rm(context.record)
+
+        assert {output, status} =
+                 castle(context, ["install", "0.1.1"], shimmed_date(context, answer))
+
+        assert status != 0, "accepted a date that answers with: #{answer}"
+        assert output =~ "date +%s"
+        refute recorded?(context), "delegated with a date that answers with: #{answer}"
+      end
+    end
+
+    test "refuses a RELEASE_TMP it cannot write in", context do
+      stub_launcher!(context, "exit 0\n")
+
+      # bin/castle is a file, so nothing can be created underneath it.
+      assert {output, status} =
+               castle(context, ["install", "0.1.1"], [
+                 {"RELEASE_TMP", Path.join([context.root, "bin", "castle", "nowhere"])}
+               ])
+
+      assert status != 0
+      assert output =~ "RELEASE_TMP"
+      refute recorded?(context)
+    end
+
+    test "leaves nothing behind in RELEASE_TMP", context do
+      tmp = Path.join(context.root, "scratch")
+      stub_launcher!(context, "echo 'boom' >&2\nexit 3\n")
+
+      assert {_output, 3} = castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
+      assert File.ls!(tmp) == []
+    end
+  end
+
   describe "install's report of success" do
     # It is held until it is true. Printing what the install said on standard
     # output and only then failing to confirm would leave a success line on the
@@ -344,6 +388,28 @@ defmodule Forecastle.CastleCliTest do
 
       assert {out, err, 0} = castle_streams(context, ["install", "0.1.1"])
       assert occurrences(out, "Now running") == 1
+      assert occurrences(err, "Now running") == 0
+    end
+
+    test "leaves what the launcher wrote to standard error on standard error", context do
+      # A merged capture cannot be unmerged, so on a confirmed install the
+      # launcher's own standard error - the preboot integration's warnings, the
+      # VM's complaints - used to come back out on standard output. A pipeline
+      # alerting on one stream would never see it; one parsing the other would.
+      stub_launcher!(context, """
+      if [ ! -f "#{context.root}/installed" ]; then
+        : > "#{context.root}/installed"
+        echo 'Now running 0.1.1 (previously 0.1.0).'
+        echo 'warning: something the VM wanted to mention' >&2
+      fi
+      exit 0
+      """)
+
+      assert {out, err, 0} = castle_streams(context, ["install", "0.1.1"])
+
+      assert occurrences(out, "Now running") == 1
+      assert occurrences(out, "warning: something") == 0
+      assert occurrences(err, "warning: something") == 1
       assert occurrences(err, "Now running") == 0
     end
 
@@ -605,6 +671,18 @@ defmodule Forecastle.CastleCliTest do
   end
 
   defp quoted(argument), do: "'" <> String.replace(argument, "'", "'\\''") <> "'"
+
+  # An environment whose `date` answers with the given shell body, and whose
+  # PATH is otherwise the caller's, so that everything else bin/castle runs is
+  # found as usual.
+  defp shimmed_date(context, body) do
+    shims = Path.join(context.root, "shims")
+    File.mkdir_p!(shims)
+    File.write!(Path.join(shims, "date"), "#!/bin/sh\n#{body}\n")
+    File.chmod!(Path.join(shims, "date"), 0o755)
+
+    [{"PATH", shims <> ":" <> System.get_env("PATH")}]
+  end
 
   defp occurrences(text, needle), do: length(String.split(text, needle)) - 1
 
