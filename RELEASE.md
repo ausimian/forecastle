@@ -17,7 +17,19 @@
   `Castle.running/1` until the version is running - exiting 0 only then, and
   non-zero on a real failure or if the version never becomes the running one.
   `CASTLE_INSTALL_TIMEOUT` sets how long it waits, in seconds, and defaults to
-  300: how long a reboot takes is a property of the system being upgraded.
+  300: how long a reboot takes is a property of the system being upgraded. It
+  is a deadline in elapsed time rather than a count of attempts, so the time
+  the attempts themselves take counts against it. The clock is whole seconds,
+  so the wait can come out up to a second short of the number given - never
+  longer than it.
+
+  Worth knowing before it surprises anyone: a lost connection is exactly what a
+  successful restart looks like from out here, and so is a wrong cookie, or a
+  node that was already down. `install` polls those to the timeout and then
+  fails, rather than failing at once. That is honest - it genuinely cannot tell
+  whether the system is coming back - but with the default it means a
+  five-minute wait for a typo in `RELEASE_COOKIE`. Set `CASTLE_INSTALL_TIMEOUT`
+  low when driving a system that is known to be reachable.
 
   Nothing can build a relup that restarts the emulator until
   [#4](https://github.com/ausimian/forecastle/issues/4), so the restart

@@ -171,6 +171,35 @@ defmodule Forecastle.CastleCliTest do
       assert {_output, 3} = castle(context, ["install", "0.1.1"])
     end
 
+    test "does not read a failure that merely mentions the word as a restart", context do
+      # `noconnection` is a usable release version, so it appears in the message
+      # naming the version that could not be installed. Recognising it there
+      # would send a failed install off to be confirmed rather than reported -
+      # and confirmation succeeds here, so a bare match would exit 0 for a
+      # launcher that failed with 3.
+      stub_launcher!(context, """
+      if [ -f "#{context.root}/tried" ]; then exit 0; fi
+      : > "#{context.root}/tried"
+      echo '** (Castle.Error) Install of noconnection failed. {:no_such_release, noconnection}' >&2
+      exit 3
+      """)
+
+      assert {output, 3} = castle(context, ["install", "noconnection"])
+      assert output =~ "Install of noconnection failed."
+      assert calls(context) == ["rpc", "Castle.install(~s(noconnection))"]
+    end
+
+    test "confirms a version named noconnection like any other", context do
+      # The other half of that: the word in the version must not get in the way
+      # of the ordinary path either.
+      assert castle!(context, ["install", "noconnection"]) == [
+               "rpc",
+               "Castle.install(~s(noconnection))",
+               "rpc",
+               "Castle.running(~s(noconnection))"
+             ]
+    end
+
     test "fails when the version never becomes the one running", context do
       stub_launcher!(context, """
       if [ -f "#{context.root}/installed" ]; then
@@ -189,19 +218,30 @@ defmodule Forecastle.CastleCliTest do
       assert output =~ "0.1.1 is not the running release. 0.1.0 is."
     end
 
-    test "keeps asking until the version is running", context do
-      # The second confirmation is the one that succeeds, so this only passes if
-      # the first failure is retried rather than reported.
-      stub_launcher!(context, """
-      n=$(cat "#{context.root}/n" 2>/dev/null || echo 0)
-      n=$((n + 1))
-      echo "$n" > "#{context.root}/n"
-      if [ "$n" -eq 2 ]; then exit 1; fi
-      exit 0
-      """)
+    test "refuses a timeout that is not a number of seconds", context do
+      assert {output, status} =
+               castle(context, ["install", "0.1.1"], [{"CASTLE_INSTALL_TIMEOUT", "soon"}])
 
-      assert {_output, 0} =
-               castle(context, ["install", "0.1.1"], [{"CASTLE_INSTALL_TIMEOUT", "60"}])
+      assert status != 0
+      assert output =~ "CASTLE_INSTALL_TIMEOUT must be a whole number of seconds"
+      refute recorded?(context)
+    end
+  end
+
+  describe "the timeout install waits for" do
+    # It is a deadline in elapsed time, not a count of attempts: the operator
+    # gave seconds, and the time each attempt takes has to count against them
+    # as much as the sleeps do.
+
+    test "is waited out, rather than spent on a fixed number of attempts", context do
+      # Two seconds used to buy exactly one attempt, made immediately, so a
+      # confirmation that needed a second one never got it.
+      stub_confirmations!(context, 2)
+
+      {{_output, status}, elapsed} =
+        timed(fn -> install(context, "0.1.1", "2") end)
+
+      assert status == 0
 
       assert calls(context) == [
                "rpc",
@@ -211,15 +251,45 @@ defmodule Forecastle.CastleCliTest do
                "rpc",
                "Castle.running(~s(0.1.1))"
              ]
+
+      assert elapsed >= 2_000, "gave up #{elapsed}ms into a 2s timeout"
     end
 
-    test "refuses a timeout that is not a number of seconds", context do
-      assert {output, status} =
-               castle(context, ["install", "0.1.1"], [{"CASTLE_INSTALL_TIMEOUT", "soon"}])
+    test "is honoured when it is not a multiple of how often it looks", context do
+      stub_confirmations!(context, :never)
 
-      assert status != 0
-      assert output =~ "CASTLE_INSTALL_TIMEOUT must be a whole number of seconds"
-      refute recorded?(context)
+      {{output, status}, elapsed} = timed(fn -> install(context, "0.1.1", "3") end)
+
+      assert status == 1
+      assert output =~ "3s after installing it"
+      # At 0s and 2s, and a last one at the deadline itself, so a confirmation
+      # that arrives just as time runs out is not thrown away.
+      assert confirmations(context) == 3
+      assert elapsed >= 3_000, "gave up #{elapsed}ms into a 3s timeout"
+    end
+
+    test "still buys one attempt when there is no time to sleep in", context do
+      stub_confirmations!(context, :never)
+
+      # The clock is whole seconds, so a one-second deadline can be reached by
+      # the first attempt. What has to hold is that an attempt is always made,
+      # and that nothing waits longer than it was told to.
+      {{output, status}, elapsed} = timed(fn -> install(context, "0.1.1", "1") end)
+
+      assert status == 1
+      assert output =~ "1s after installing it"
+      assert confirmations(context) >= 1
+      assert elapsed < 5_000, "waited #{elapsed}ms for a 1s timeout"
+    end
+
+    test "asks once and gives up when it is zero", context do
+      stub_confirmations!(context, :never)
+
+      {{_output, status}, elapsed} = timed(fn -> install(context, "0.1.1", "0") end)
+
+      assert status == 1
+      assert confirmations(context) == 1
+      assert elapsed < 5_000, "waited #{elapsed}ms for a timeout of 0"
     end
   end
 
@@ -372,6 +442,34 @@ defmodule Forecastle.CastleCliTest do
     assert output == "", "expected no output from bin/castle, got: #{output}"
 
     calls(context)
+  end
+
+  defp install(context, vsn, timeout) do
+    castle(context, ["install", vsn], [{"CASTLE_INSTALL_TIMEOUT", timeout}])
+  end
+
+  defp timed(fun) do
+    started = System.monotonic_time(:millisecond)
+    result = fun.()
+    {result, System.monotonic_time(:millisecond) - started}
+  end
+
+  # A launcher that answers the install, then fails every confirmation up to the
+  # one numbered `confirms_on` - or all of them, for `:never`.
+  defp stub_confirmations!(context, confirms_on) do
+    succeeds_on = if confirms_on == :never, do: 0, else: confirms_on + 1
+
+    stub_launcher!(context, """
+    n=$(cat "#{context.root}/n" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "#{context.root}/n"
+    if [ "$n" -eq 1 ] || [ "$n" -eq #{succeeds_on} ]; then exit 0; fi
+    exit 1
+    """)
+  end
+
+  defp confirmations(context) do
+    Enum.count(calls(context), &String.starts_with?(&1, "Castle.running("))
   end
 
   # Every argument of every call the launcher stub was handed, in order.

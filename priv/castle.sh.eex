@@ -109,19 +109,26 @@ install_and_confirm () {
     # out here, so it settles nothing either way and the confirmation below has
     # to decide. Any other failure has just been reported, and is final.
     #
-    # Matched on the reason erpc gives rather than on the sentence Elixir wraps
-    # it in, which is not ours: a wording change would then cost a wait, not a
-    # wrong answer, since an install that really did fail cannot be confirmed.
-    case $install_output in
-      *noconnection*) ;;
-      *) exit "$install_status" ;;
-    esac
+    # Recognised as the whole diagnostic the launcher prints, at the start of a
+    # line - not as the word on its own. "noconnection" is a usable release
+    # version, and the version being installed is named in the messages that
+    # report a failure to install it, so a bare match would send a real failure
+    # off to be confirmed rather than reported: were that version already the
+    # one running, the confirmation would succeed and this would exit 0 on a
+    # launcher that had failed.
+    if ! printf '%s\n' "$install_output" |
+        grep -q '^--rpc-eval .*RPC failed with reason :noconnection'; then
+      exit "$install_status"
+    fi
   fi
 
-  attempts=$(( (CASTLE_INSTALL_TIMEOUT + install_poll_interval - 1) / install_poll_interval ))
-  if [ "$attempts" -lt 1 ]; then
-    attempts=1
-  fi
+  # A deadline in elapsed time, not a number of attempts: the operator gave a
+  # number of seconds, and the time each attempt itself takes has to count
+  # against it as much as the sleeps do. The first attempt is made straight
+  # away, and the last one at the deadline, so a confirmation that arrives just
+  # as time runs out still counts. The clock is whole seconds, so the wait can
+  # come out up to a second short of the number given - never longer than it.
+  deadline=$(( $(date +%s) + CASTLE_INSTALL_TIMEOUT ))
 
   # Each attempt says nothing while there is another one to come - a node that
   # is still rebooting is not news. What the last one saw is worth having,
@@ -132,8 +139,8 @@ install_and_confirm () {
       return 0
     fi
 
-    attempts=$((attempts - 1))
-    if [ "$attempts" -le 0 ]; then
+    now=$(date +%s)
+    if [ "$now" -ge "$deadline" ]; then
       if [ -n "$confirm_output" ]; then
         echo "$confirm_output" >&2
       fi
@@ -143,7 +150,12 @@ install_and_confirm () {
       exit 1
     fi
 
-    sleep "$install_poll_interval"
+    remaining=$(( deadline - now ))
+    if [ "$remaining" -lt "$install_poll_interval" ]; then
+      sleep "$remaining"
+    else
+      sleep "$install_poll_interval"
+    fi
   done
 }
 

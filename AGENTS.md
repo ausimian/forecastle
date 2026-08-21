@@ -35,8 +35,13 @@ around it composes instead:
   running: `release_handler` replies as soon as it has accepted an upgrade,
   which for a transition that restarts the emulator is before the upgrade has
   run, and the reply may not outlive the reboot it triggers. A lost connection
-  is therefore inconclusive rather than fatal, and `CASTLE_INSTALL_TIMEOUT`
-  bounds how long the confirmation is waited for.
+  is therefore inconclusive rather than fatal — recognised as the launcher's
+  whole `--rpc-eval … :noconnection` diagnostic at the start of a line, never as
+  the bare word, which is a usable release version and turns up in the messages
+  that name a version that failed. `CASTLE_INSTALL_TIMEOUT` bounds the wait, as
+  a deadline in elapsed time rather than a count of attempts. A wrong cookie or
+  an already-dead node is indistinguishable from a reboot and so polls to the
+  timeout; that is deliberate, and called out in the release notes.
 - The `env.sh` fragment expands `build.config` into `sys.config` in a preboot
   VM, for the commands that boot the system. It is appended, so a project's own
   `rel/env.sh.eex` survives and runs first.
