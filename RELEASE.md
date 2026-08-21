@@ -33,6 +33,18 @@
   it is done. Past that point the system is on another release, and stopping
   there would leave that unsaid and unconfirmed.
 
+  One of those checks is worth spelling out, because it can refuse a directory
+  that would have been used before: `RELEASE_TMP` must not be writable by
+  everyone unless it is sticky. Where it is, another user can rename the capture
+  directory and leave a symlink in its place, whatever mode it was created
+  with - renaming an entry is the parent directory's business, not the entry's -
+  so `install` says so and stops rather than racing it. Neither ordinary setting
+  is affected: the default is a `tmp` directory inside the release itself, and
+  `/tmp` is sticky on every mainstream Unix, which is exactly what the sticky bit
+  is for. A shared directory that is world-writable and *not* sticky is the one
+  case, and `chmod +t` on it, or a `RELEASE_TMP` of the operator's own, is what
+  the message asks for.
+
   `CASTLE_INSTALL_TIMEOUT` sets how long it keeps asking, in seconds, and
   defaults to 300, with 86400 the most it accepts: how long a reboot takes is a
   property of the system being upgraded. It is a deadline in elapsed time

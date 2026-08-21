@@ -60,7 +60,17 @@ around it composes instead:
   the name, and private, so nothing inside can be swapped between one open and
   the next. Keep that ordering — past the install the system is on another
   release, so stopping from there leaves it unconfirmed with nothing said about
-  it. Four separate review findings have been that same shape.
+  it. Five separate review findings have been that same shape.
+
+  Claiming the name says nothing about who may *rename* it, which belongs to the
+  parent, so the parent is checked too: a `RELEASE_TMP` that anyone may write to
+  and that is not sticky is refused, since there the directory can be moved
+  aside and a symlink left behind it whatever mode it was created with. Refuse
+  the parent rather than re-checking the path on the way to each redirection —
+  that narrows a race instead of removing it. `test -k` for sticky and
+  `find -L … -prune -perm -0002` for the other-write bit, both of which follow a
+  `RELEASE_TMP` that is itself a symlink. Nothing ordinary is refused: the
+  default lives inside the release, and `/tmp` is sticky.
 
   `CASTLE_INSTALL_TIMEOUT` bounds the retrying, as a deadline in elapsed time
   rather than a count of attempts, measured against the system clock — so a

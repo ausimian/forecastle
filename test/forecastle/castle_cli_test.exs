@@ -369,6 +369,56 @@ defmodule Forecastle.CastleCliTest do
       refute recorded?(context)
     end
 
+    test "refuses a RELEASE_TMP anyone may write to unless it is sticky", context do
+      # Claiming the name settles who created the directory, not who may rename
+      # it afterwards: that is the parent's business. Where anyone may write and
+      # the sticky bit is not set, another user can move the directory aside and
+      # leave a symlink behind it, and mode 0700 on something no longer there
+      # protects nothing. So the parent is refused rather than the race narrowed.
+      tmp = Path.join(context.root, "shared")
+      File.mkdir_p!(tmp)
+      File.chmod!(tmp, 0o777)
+
+      stub_launcher!(context, "exit 0\n")
+
+      assert {output, status} = castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
+
+      assert status != 0
+      assert output =~ "can be written by anyone and is not sticky"
+      assert output =~ "chmod +t"
+      refute recorded?(context)
+      assert File.ls!(tmp) == []
+    end
+
+    test "accepts one anyone may write to when it is sticky", context do
+      # Which is to say: /tmp. The sticky bit is what makes a shared directory
+      # usable, and refusing it would condemn the most ordinary setting there is.
+      tmp = Path.join(context.root, "shared-sticky")
+      File.mkdir_p!(tmp)
+
+      # Through chmod(1): File.chmod/2 keeps only the permission bits, so it
+      # cannot set this one, and a fixture that quietly came out non-sticky
+      # would be testing the opposite of what it says.
+      {_, 0} = System.cmd("chmod", ["1777", tmp])
+      assert File.stat!(tmp).mode |> Integer.to_string(8) |> String.ends_with?("1777")
+
+      stub_launcher!(context, "exit 0\n")
+
+      assert {"", 0} = castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
+      assert File.ls!(tmp) == []
+    end
+
+    test "accepts one that is nobody else's business", context do
+      tmp = Path.join(context.root, "own")
+      File.mkdir_p!(tmp)
+      File.chmod!(tmp, 0o700)
+
+      stub_launcher!(context, "exit 0\n")
+
+      assert {"", 0} = castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
+      assert File.ls!(tmp) == []
+    end
+
     test "leaves nothing behind in RELEASE_TMP", context do
       tmp = Path.join(context.root, "scratch")
       stub_launcher!(context, "echo 'boom' >&2\nexit 3\n")

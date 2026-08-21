@@ -175,6 +175,28 @@ scratch_dir () {
     return 1
   fi
 
+  # Claiming the name atomically settles who created the directory; it says
+  # nothing about who can rename it afterwards. Renaming and removing entries is
+  # the parent directory's business, so in a directory anyone may write to,
+  # another user can move this one aside and leave a symlink in its place
+  # between one redirection and the next - and mode 0700 on a directory that is
+  # no longer there protects nothing. The sticky bit is what stops that, which
+  # is what it has always been for.
+  #
+  # So a parent that anyone can write to and that is not sticky is refused
+  # outright, here, before the install. Re-checking the path on the way to each
+  # redirection would only narrow the window rather than close it. Nothing
+  # realistic is turned away by this: the default is a tmp directory inside the
+  # release itself, and every mainstream Unix ships /tmp sticky.
+  if [ ! -k "$CASTLE_TMP" ] &&
+      [ -n "$(find -L "$CASTLE_TMP" -prune -perm -0002 2>/dev/null)" ]; then
+    echo "ERROR: $CASTLE_TMP can be written by anyone and is not sticky, so" \
+         "another user could replace what install captures into after it has" \
+         "been created. Set the sticky bit on it (chmod +t), or point" \
+         "RELEASE_TMP at a directory of your own" >&2
+    return 1
+  fi
+
   dir="$CASTLE_TMP/castle-install-$$"
 
   if ! (umask 077 && mkdir "$dir" 2>/dev/null); then
