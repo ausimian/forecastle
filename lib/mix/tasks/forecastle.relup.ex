@@ -33,7 +33,11 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
   use Mix.Task
 
-  @options [upfrom: :keep, downto: :keep, fromto: :keep, outdir: :string, target: :string]
+  # All `:keep`, including the two that may appear only once: `:string` would
+  # silently keep the last occurrence, and quietly generating from a different
+  # target than the one asked for is the failure this task's argument handling
+  # exists to prevent.
+  @options [upfrom: :keep, downto: :keep, fromto: :keep, outdir: :keep, target: :keep]
 
   @impl Mix.Task
   def run(command_line_args) do
@@ -77,9 +81,10 @@ defmodule Mix.Tasks.Forecastle.Relup do
   end
 
   defp fetch_target!(cmdline_args) do
-    case Keyword.fetch(cmdline_args, :target) do
-      {:ok, target} -> target
-      :error -> Mix.raise("--target is required: there is nothing to generate a relup for")
+    case Keyword.get_values(cmdline_args, :target) do
+      [target] -> target
+      [] -> Mix.raise("--target is required: there is nothing to generate a relup for")
+      many -> Mix.raise(repeated("--target", many))
     end
   end
 
@@ -95,10 +100,16 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # Creating it is deliberately not this task's job: a mistyped `--outdir` that
   # springs into existence is how a relup ends up somewhere nothing looks for it.
   defp get_outdir(cmdline_args) do
-    case Keyword.fetch(cmdline_args, :outdir) do
-      {:ok, outdir} -> [{:outdir, existing_dir!(outdir)}]
-      :error -> []
+    case Keyword.get_values(cmdline_args, :outdir) do
+      [] -> []
+      [outdir] -> [{:outdir, existing_dir!(outdir)}]
+      many -> Mix.raise(repeated("--outdir", many))
     end
+  end
+
+  defp repeated(switch, values) do
+    "#{switch} may be given once, but was given #{length(values)} times: " <>
+      Enum.map_join(values, ", ", &inspect/1)
   end
 
   defp existing_dir!(outdir) do

@@ -20,7 +20,19 @@ defmodule Forecastle.ReleaseCase do
   end
 
   setup_all do
-    {:ok, workspace: Fixture.workspace()}
+    workspace = Fixture.workspace()
+
+    # The workspace is memoised and shared by every suite that assembles, and a
+    # relup in it is now checked against the version being assembled rather than
+    # copied blindly. So one left behind by a suite whose setup failed part way
+    # through would fail an unrelated suite's assembly, with a version mismatch
+    # that says nothing about the real cause. Cleared here, and registered for
+    # clearing before anything has had the chance to assemble.
+    relup = Path.join(workspace, "relup")
+    on_exit(fn -> File.rm(relup) end)
+    File.rm(relup)
+
+    {:ok, workspace: workspace}
   end
 
   @doc """

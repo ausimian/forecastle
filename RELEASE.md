@@ -84,12 +84,17 @@
   as an upgrade plan at all. That is the contract OTP applies in
   `systools_make:check_relup/1` when it packs a tarball itself, plus the
   version check; Mix packs its own tarball, so nothing was applying it. A
-  build that was silently packaging the wrong plan will now stop instead.
+  build that was silently packaging the wrong plan will now stop instead —
+  before assembly begins, so a rejected relup leaves no half-built release
+  behind for a later build to stumble over.
 - `mix forecastle.relup` discarded arguments it did not recognise, so a
   mistyped switch, or a path given without one, generated a relup between
   releases the caller had not named instead of reporting the mistake. Omitting
   `--target` raised a `KeyError` from the middle of the task. Both are now
-  errors that say what is wrong.
+  errors that say what is wrong, as is repeating `--target` or `--outdir`,
+  which used to keep the last occurrence and generate from a target the
+  caller had not asked for. `--fromto`, `--upfrom` and `--downto` may still
+  be given more than once, as they always could.
 - Runtime configuration could not read the standard release variables.
   The launcher sources `env.sh`, and so runs the preboot VM that expands
   configuration, before it assigns `RELEASE_COOKIE`, `RELEASE_NODE`,

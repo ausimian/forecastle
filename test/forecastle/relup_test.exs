@@ -116,6 +116,32 @@ defmodule Forecastle.RelupTest do
       assert output =~ "Unrecognised arguments:"
     end
 
+    test "include a switch that may be given once, given twice", ctx do
+      # `:keep` for these two as well, so that a repeat is an error rather than
+      # OptionParser quietly keeping the last one and generating from a target
+      # the caller did not ask for.
+      {output, status} =
+        relup(
+          [
+            "--target",
+            rel(ctx.to, @to),
+            "--target",
+            rel(ctx.from, @from),
+            "--fromto",
+            rel(ctx.from, @from)
+          ],
+          @to
+        )
+
+      assert status != 0, "a repeated --target was accepted:\n\n#{output}"
+      assert output =~ "--target may be given once"
+
+      {output, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir, "--outdir", @outdir], @to)
+
+      assert status != 0, "a repeated --outdir was accepted:\n\n#{output}"
+      assert output =~ "--outdir may be given once"
+    end
+
     test "include no --target at all", ctx do
       {output, status} = relup(["--fromto", rel(ctx.from, @from)], @to)
 

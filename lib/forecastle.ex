@@ -18,6 +18,7 @@ defmodule Forecastle do
   def pre_assemble(%Mix.Release{} = release) do
     release
     |> initialize()
+    |> stage_relup()
     |> remove_runtime_configuration()
     |> remove_config_providers()
     |> create_preboot_scripts()
@@ -37,6 +38,30 @@ defmodule Forecastle do
 
   defp initialize(%Mix.Release{options: options} = release) do
     %Mix.Release{release | options: [{__MODULE__, []} | options]}
+  end
+
+  # Before `:assemble`, deliberately. Checking the relup afterwards meant a
+  # stale one failed the build only once the version directory existed, and Mix
+  # does not tidy up after a step of its own that raised. A corrected retry
+  # without `--overwrite` then finds that directory, declines to overwrite it,
+  # and exits 0 having assembled nothing - a worse outcome than the one the
+  # check exists to prevent. The checked bytes are carried through so that what
+  # lands in the release is exactly what was read and checked here.
+  defp stage_relup(%Mix.Release{version: vsn, options: options} = release) do
+    relup = project_relup()
+
+    if File.exists?(relup) do
+      %Mix.Release{
+        release
+        | options: Keyword.put(options, :forecastle_relup, verify_relup!(relup, vsn))
+      }
+    else
+      release
+    end
+  end
+
+  defp project_relup do
+    Mix.Project.project_file() |> Path.dirname() |> Path.join("relup")
   end
 
   defp remove_runtime_configuration(%Mix.Release{options: options, version: vsn} = release) do
@@ -161,15 +186,12 @@ defmodule Forecastle do
     File.cp!(Path.join(vp, "#{name}.rel"), Path.join([path, "releases", "#{name}-#{vsn}.rel"]))
   end
 
-  defp copy_relup(%Mix.Release{version: vsn, version_path: vp}) do
-    relup =
-      Mix.Project.project_file()
-      |> Path.dirname()
-      |> Path.join("relup")
-
-    if File.exists?(relup) do
-      verify_relup!(relup, vsn)
-      File.cp!(relup, Path.join(vp, "relup"))
+  # Checked in `pre_assemble/1`, before Mix has created anything, so all that is
+  # left here is to put the bytes that were checked into the release.
+  defp copy_relup(%Mix.Release{options: options, version_path: vp}) do
+    case Keyword.fetch(options, :forecastle_relup) do
+      {:ok, contents} -> File.write!(Path.join(vp, "relup"), contents)
+      :error -> :ok
     end
   end
 
@@ -191,7 +213,7 @@ defmodule Forecastle do
       # straight into those two lists during an upgrade. The pinned version is
       # a non-empty charlist by construction, so matching it covers the rest.
       {:ok, [{^wanted, up, down}]} when is_list(up) and is_list(down) ->
-        :ok
+        File.read!(relup)
 
       {:ok, [{[_ | _] = other, up, down}]} when is_list(up) and is_list(down) ->
         Mix.raise(

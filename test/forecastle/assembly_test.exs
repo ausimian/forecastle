@@ -206,9 +206,42 @@ defmodule Forecastle.AssemblyTest do
 
       assert output =~ "is not an upgrade plan"
     end
+
+    test "a corrected retry succeeds, having left nothing behind" do
+      # The relup is checked before `:assemble`, so a rejected one leaves no
+      # release on disk. Were it checked afterwards, Mix would have created the
+      # version directory first, and this retry - which deliberately does not
+      # pass --overwrite - would find it, decline to overwrite, and exit 0
+      # having assembled nothing at all.
+      path = Path.join(Forecastle.Fixture.workspace(), "rel-relup-retry")
+      File.rm_rf!(path)
+      on_exit(fn -> File.rm_rf!(path) end)
+
+      write_relup!(relup_for("9.9.9"))
+      {_output, status} = assemble_at(path)
+      assert status != 0
+
+      refute File.exists?(path), "a rejected relup left a partial release behind"
+
+      File.write!(Path.join(Forecastle.Fixture.workspace(), "relup"), relup_for(@vsn))
+      {output, status} = assemble_at(path)
+
+      assert status == 0, "the corrected retry failed:\n\n#{output}"
+      assert File.exists?(Path.join(path, "releases/#{@vsn}/relup"))
+    end
   end
 
   defp relup_for(vsn), do: ~s({"#{vsn}", [], []}.\n)
+
+  # No --overwrite, on purpose: whether a retry can assemble at all is the point.
+  defp assemble_at(path) do
+    workspace = Forecastle.Fixture.workspace()
+
+    mix(
+      ["release", "sample", "--path", path],
+      [{"SAMPLE_VSN", @vsn}, {"MIX_BUILD_ROOT", Path.join(workspace, "_build-#{@vsn}")}]
+    )
+  end
 
   # `mix/2` rather than `mix!/2`: assembly is meant to fail here, and what it
   # says while failing is the thing under test.
