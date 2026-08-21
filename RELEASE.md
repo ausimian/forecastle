@@ -51,3 +51,15 @@
   to manage its own releases.
 - The `GitHub` link in the Hex package metadata pointed at the Castle
   repository rather than Forecastle's.
+
+### Known limitations
+
+- Castle prints `release_handler` failures and returns normally, so a failed
+  `bin/castle unpack`/`install`/`commit`/`remove` still exits 0. Automation
+  cannot yet distinguish a failed release operation from a successful one.
+  Tracked in [castle#15](https://github.com/ausimian/castle/issues/15).
+- Configuration is expanded into the version directory's `sys.config`, so
+  concurrent `start`/`daemon`/`eval` invocations with differing environments can
+  race on it. Fixing this needs Castle to accept a destination path, also
+  tracked in [castle#15](https://github.com/ausimian/castle/issues/15).
+- Windows releases are not supported; see above.

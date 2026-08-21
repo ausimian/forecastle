@@ -80,6 +80,23 @@ The `:e2e` suite is excluded by default and included by `mix precommit`. Run it
 on its own with `mix test --include e2e`. It needs no epmd daemon: the fixture
 configures distribution without one.
 
+## Known limitations
+
+- **Windows is not supported.** Configuration is expanded at boot by the
+  `env.sh` integration and there is no `env.bat` counterpart, so a `.bat`
+  launcher looks for a `sys.config` nothing creates. Assembly warns. Real
+  support is a feature, not a fix.
+- **Failed Castle operations exit 0.** Castle catches `release_handler` errors
+  and returns `:ok`, and `rpc` only reports whether evaluation completed, so
+  `bin/castle` cannot surface them. Needs Castle to report failures —
+  [castle#15](https://github.com/ausimian/castle/issues/15).
+- **Concurrent boots race on `sys.config`.** `Castle.generate/1` hardcodes the
+  version directory, so per-invocation config files aren't reachable from here.
+  Same issue.
+
+Do not work the last two around in this repo: putting Castle's logic back into
+shell-embedded Elixir is the coupling `bin/castle` exists to remove.
+
 ## Compatibility
 
 Forecastle manipulates `Mix.Release` internals and the layout Mix generates, so
