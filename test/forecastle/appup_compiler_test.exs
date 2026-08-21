@@ -33,6 +33,20 @@ defmodule Forecastle.AppupCompilerTest do
       assert {:ok, [{~c"0.1.0", [], []}]} = :file.consult(to_charlist(ctx.appup))
     end
 
+    test "writes a term :file.consult can read back, non-ASCII included", ctx do
+      # A codepoint between 128 and 255 came out of the formatter as Unicode
+      # chardata and went in as a lone byte, so the build reported success and
+      # left behind an appup that neither :file.consult nor systools can parse.
+      replace_appup_source(
+        ~S<{~c"0.1.0", [{~c"0.0.9", [{:update, :café, {:advanced, []}}]}], []}>
+      )
+
+      compile!(ctx)
+
+      assert {:ok, [{~c"0.1.0", [{~c"0.0.9", [{:update, :café, {:advanced, []}}]}], []}]} =
+               :file.consult(to_charlist(ctx.appup))
+    end
+
     test "evaluates the source again on every build", ctx do
       compile!(ctx)
       compile!(ctx, [{"SAMPLE_VSN", "0.2.0"}])
@@ -102,10 +116,15 @@ defmodule Forecastle.AppupCompilerTest do
   # The workspace is memoised and shared with every other test in the run, so
   # this has to go back. Through `on_exit`, which runs even if the test times
   # out or the test process dies.
-  defp delete_appup_source do
+  defp delete_appup_source, do: with_restored_appup_source(&File.rm!/1)
+
+  defp replace_appup_source(contents),
+    do: with_restored_appup_source(&File.write!(&1, contents))
+
+  defp with_restored_appup_source(fun) do
     src = Path.join(Fixture.workspace(), "appup.exs")
-    contents = File.read!(src)
-    on_exit(fn -> File.write!(src, contents) end)
-    File.rm!(src)
+    original = File.read!(src)
+    on_exit(fn -> File.write!(src, original) end)
+    fun.(src)
   end
 end

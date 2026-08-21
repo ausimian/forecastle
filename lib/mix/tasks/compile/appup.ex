@@ -64,7 +64,22 @@ defmodule Mix.Tasks.Compile.Appup do
   defp write(src, dst) do
     {appup, []} = Code.eval_file(src)
 
-    case File.write(dst, :io_lib.format(~c"~tp.~n", [appup])) do
+    case encode(appup) do
+      bytes when is_binary(bytes) -> put(dst, bytes)
+      _not_encodable -> {:error, report(:error, "Could not encode the appup in #{src} as UTF-8")}
+    end
+  end
+
+  # `:io_lib.format` with `~tp` returns Unicode chardata, not iodata. A codepoint
+  # above 255 makes `File.write/2` fail outright; one between 128 and 255 is
+  # written as a lone byte that `:file.consult/1` - which reads UTF-8 - cannot
+  # read back, so the build reports success and ships an appup that `systools`
+  # will not parse. An appup that is not what the build thinks it is happens to
+  # be the whole failure this compiler exists to prevent.
+  defp encode(appup), do: :unicode.characters_to_binary(:io_lib.format(~c"~tp.~n", [appup]))
+
+  defp put(dst, bytes) do
+    case File.write(dst, bytes) do
       :ok ->
         :ok
 

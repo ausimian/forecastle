@@ -22,6 +22,15 @@
   later — in `:systools.make_relup/4`, or during the upgrade itself. Its
   messages also reach the shell now: diagnostics returned by a compiler are
   for editors to display inline, and nothing prints them on the command line.
+  A project that only has an appup in some environments should say so, rather
+  than name a file that is not there:
+
+  ```elixir
+  appup: if(Mix.env() == :prod, do: "appup.exs")
+  ```
+
+  A `nil` key is the supported off switch: it removes any output an earlier
+  build left and reports nothing further.
 - **Breaking:** the standard Mix launcher, `bin/<release>`, is no longer
   replaced. It keeps everything Mix gives it — cookie handling, distribution,
   `eval`/`rpc`/`remote`, daemon mode, version selection — and stays current with
@@ -84,6 +93,12 @@
   expects a list of them, so Mix discarded it and reported that the compiler
   had misbehaved instead of saying what was wrong. It also ignored the result
   of writing the appup, and so reported success when the write had failed.
+- The appup was written as the formatter produced it, which is Unicode
+  chardata rather than iodata. An appup containing a codepoint above 255 —
+  a module or term with a non-ASCII name — failed to write at all, and one
+  between 128 and 255 was written as a lone byte that `:file.consult/1`
+  cannot read back, so the build reported success and left behind an appup
+  that `systools` will not parse. It is encoded as UTF-8 now.
 
 ### Upgrading an existing deployment
 
