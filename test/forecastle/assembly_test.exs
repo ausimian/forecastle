@@ -165,13 +165,107 @@ defmodule Forecastle.AssemblyTest do
 
   describe "relup" do
     test "is copied into the version path when the project has one" do
-      relup = Path.join(Forecastle.Fixture.workspace(), "relup")
-      on_exit(fn -> File.rm(relup) end)
-      File.write!(relup, "%% placeholder\n")
+      write_relup!(relup_for(@vsn))
 
       release = assemble!(into: "rel-relup")
 
-      assert File.read!(Path.join(release, "releases/#{@vsn}/relup")) == "%% placeholder\n"
+      # The plan, not the bytes: it is re-emitted from the term that was
+      # checked rather than copied, so that what is packaged cannot be a
+      # later read of a file something else has since replaced.
+      assert {:ok, [{~c"0.1.0", [], []}]} =
+               :file.consult(to_charlist(Path.join(release, "releases/#{@vsn}/relup")))
     end
+
+    test "is refused when it is an upgrade plan for another version" do
+      # The relup comes from a separate `mix forecastle.relup` run, so a stale
+      # one can be sitting here - `--outdir` sends a successful generation
+      # somewhere else and leaves this one behind. Packaging it would hand
+      # `release_handler` the wrong version's instructions.
+      write_relup!(relup_for("9.9.9"))
+
+      output = assemble_failure!("rel-relup-stale")
+
+      assert output =~ "is an upgrade plan for 9.9.9"
+    end
+
+    test "is refused when the version matches but the plan sections do not" do
+      # The version alone is not enough. release_handler reaches into these two
+      # lists with lists:keysearch/3, so an atom where a list belongs fails
+      # during the live upgrade - exactly what checking the relup is meant to
+      # stop. OTP applies this contract in systools_make:check_relup/1 when it
+      # packs a tarball itself; Mix packs its own, so nothing applied it here.
+      write_relup!(~s({"#{@vsn}", invalid, invalid}.\n))
+
+      output = assemble_failure!("rel-relup-malformed")
+
+      assert output =~ "is not an upgrade plan"
+    end
+
+    test "is refused when it is not an upgrade plan at all" do
+      # What an interrupted write leaves behind. Existence was the only check.
+      write_relup!("%% placeholder\n")
+
+      output = assemble_failure!("rel-relup-partial")
+
+      assert output =~ "is not an upgrade plan"
+    end
+
+    test "a corrected retry succeeds, having left nothing behind" do
+      # The relup is checked before `:assemble`, so a rejected one leaves no
+      # release on disk. Were it checked afterwards, Mix would have created the
+      # version directory first, and this retry - which deliberately does not
+      # pass --overwrite - would find it, decline to overwrite, and exit 0
+      # having assembled nothing at all.
+      path = Path.join(Forecastle.Fixture.workspace(), "rel-relup-retry")
+      File.rm_rf!(path)
+      on_exit(fn -> File.rm_rf!(path) end)
+
+      write_relup!(relup_for("9.9.9"))
+      {_output, status} = assemble_at(path)
+      assert status != 0
+
+      refute File.exists?(path), "a rejected relup left a partial release behind"
+
+      File.write!(Path.join(Forecastle.Fixture.workspace(), "relup"), relup_for(@vsn))
+      {output, status} = assemble_at(path)
+
+      assert status == 0, "the corrected retry failed:\n\n#{output}"
+      assert File.exists?(Path.join(path, "releases/#{@vsn}/relup"))
+    end
+  end
+
+  defp relup_for(vsn), do: ~s({"#{vsn}", [], []}.\n)
+
+  # No --overwrite, on purpose: whether a retry can assemble at all is the point.
+  defp assemble_at(path) do
+    workspace = Forecastle.Fixture.workspace()
+
+    mix(
+      ["release", "sample", "--path", path],
+      [{"SAMPLE_VSN", @vsn}, {"MIX_BUILD_ROOT", Path.join(workspace, "_build-#{@vsn}")}]
+    )
+  end
+
+  # `mix/2` rather than `mix!/2`: assembly is meant to fail here, and what it
+  # says while failing is the thing under test.
+  defp assemble_failure!(into) do
+    workspace = Forecastle.Fixture.workspace()
+    path = Path.join(workspace, into)
+    File.rm_rf!(path)
+
+    {output, status} =
+      mix(
+        ["release", "sample", "--overwrite", "--path", path],
+        [{"SAMPLE_VSN", @vsn}, {"MIX_BUILD_ROOT", Path.join(workspace, "_build-#{@vsn}")}]
+      )
+
+    assert status != 0, "assembly was expected to fail:\n\n#{output}"
+    output
+  end
+
+  defp write_relup!(contents) do
+    relup = Path.join(Forecastle.Fixture.workspace(), "relup")
+    on_exit(fn -> File.rm(relup) end)
+    File.write!(relup, contents)
   end
 end

@@ -39,6 +39,28 @@ defmodule ForecastleTest do
       {:ok, release: Forecastle.pre_assemble(release)}
     end
 
+    test "refuses to carry a staged relup it did not stage itself" do
+      # Mix keeps release options it does not recognise, so without dropping
+      # this key first a project that had set it would have had its value
+      # written out as the release's upgrade plan, unchecked. A release of its
+      # own rather than the one from setup: what is under test is what
+      # pre_assemble does with an option it finds already there.
+      refute File.exists?(Path.join(File.cwd!(), "relup")),
+             "this test assumes the project has no relup of its own"
+
+      release = %Mix.Release{
+        name: :sample,
+        version: "1.2.3",
+        config_providers: [],
+        boot_scripts: %{start_clean: [kernel: :permanent, stdlib: :permanent]},
+        options: [forecastle_relup: "not a plan"]
+      }
+
+      options = release |> Forecastle.pre_assemble() |> Map.fetch!(:options)
+
+      assert Keyword.fetch(options, :forecastle_relup) == :error
+    end
+
     test "takes the config providers away from Mix", %{release: release} do
       assert release.config_providers == []
     end

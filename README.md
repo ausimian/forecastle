@@ -183,5 +183,16 @@ and you wish to generate a relup between them:
 > mix forecastle.relup --target myapp/releases/0.1.1/myapp --fromto myapp/releases/0.1.0/myapp
 ```
 
-If the generated file is in the project root, it will be copied during 
-post-assembly to the release.
+If the generated file is in the project root, it will be copied during
+post-assembly to the release. That is where the task writes it by default;
+`--outdir` sends it somewhere else, which post-assembly will not find, and a
+relative `--outdir` is resolved from the directory the task is run in rather
+than from the project root. The directory has to exist already: a mistyped one
+that sprang into existence is how a relup ends up somewhere nothing looks for.
+
+The task fails if it could not generate the relup, so a build pipeline can tell,
+and it leaves any earlier relup alone rather than half-replacing it. Assembly
+then checks the relup it is about to package really is this release's upgrade
+plan - the right target version, with the upgrade and downgrade sections
+`release_handler` will read - and fails if it is not. Between them, a build
+cannot quietly ship the previous version's plan.

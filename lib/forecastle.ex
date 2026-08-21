@@ -18,6 +18,7 @@ defmodule Forecastle do
   def pre_assemble(%Mix.Release{} = release) do
     release
     |> initialize()
+    |> stage_relup()
     |> remove_runtime_configuration()
     |> remove_config_providers()
     |> create_preboot_scripts()
@@ -37,6 +38,34 @@ defmodule Forecastle do
 
   defp initialize(%Mix.Release{options: options} = release) do
     %Mix.Release{release | options: [{__MODULE__, []} | options]}
+  end
+
+  # Before `:assemble`, deliberately. Checking the relup afterwards meant a
+  # stale one failed the build only once the version directory existed, and Mix
+  # does not tidy up after a step of its own that raised. A corrected retry
+  # without `--overwrite` then finds that directory, declines to overwrite it,
+  # and exits 0 having assembled nothing - a worse outcome than the one the
+  # check exists to prevent. The checked bytes are carried through so that what
+  # lands in the release is exactly what was read and checked here.
+  defp stage_relup(%Mix.Release{version: vsn, options: options} = release) do
+    relup = project_relup()
+
+    # Dropped unconditionally first. Mix keeps release options it does not
+    # recognise, so a project that had set this key - for whatever reason -
+    # would otherwise have its value written out as the release's upgrade plan
+    # without any of this having looked at it.
+    options = Keyword.delete(options, :forecastle_relup)
+
+    if File.exists?(relup) do
+      staged = relup |> verify_relup!(vsn) |> encode_relup()
+      %Mix.Release{release | options: Keyword.put(options, :forecastle_relup, staged)}
+    else
+      %Mix.Release{release | options: options}
+    end
+  end
+
+  defp project_relup do
+    Mix.Project.project_file() |> Path.dirname() |> Path.join("relup")
   end
 
   defp remove_runtime_configuration(%Mix.Release{options: options, version: vsn} = release) do
@@ -161,14 +190,63 @@ defmodule Forecastle do
     File.cp!(Path.join(vp, "#{name}.rel"), Path.join([path, "releases", "#{name}-#{vsn}.rel"]))
   end
 
-  defp copy_relup(%Mix.Release{version_path: vp}) do
-    relup =
-      Mix.Project.project_file()
-      |> Path.dirname()
-      |> Path.join("relup")
+  # Checked in `pre_assemble/1`, before Mix has created anything, so all that is
+  # left here is to put the bytes that were checked into the release.
+  # Re-emitted from the term that was checked rather than copied from the file
+  # again: `:file.consult/1` reopens the path, and a `mix forecastle.relup`
+  # running alongside the build can replace it in between, so a second read is
+  # not necessarily the bytes that were checked. The format is the one
+  # `systools` writes and `release_handler` reads - a UTF-8 coding comment and
+  # a single term.
+  defp encode_relup(plan) do
+    case :unicode.characters_to_binary(:io_lib.format(~c"%% coding: utf-8~n~tp.~n", [plan])) do
+      bytes when is_binary(bytes) -> bytes
+      _not_encodable -> Mix.raise("#{project_relup()} cannot be encoded as UTF-8")
+    end
+  end
 
-    if File.exists?(relup) do
-      File.cp!(relup, Path.join(vp, "relup"))
+  defp copy_relup(%Mix.Release{options: options, version_path: vp}) do
+    case Keyword.fetch(options, :forecastle_relup) do
+      {:ok, bytes} -> File.write!(Path.join(vp, "relup"), bytes)
+      :error -> :ok
+    end
+  end
+
+  # The relup is produced by a separate `mix forecastle.relup` run, so nothing
+  # about being here says it belongs to the release being assembled. Packaging
+  # one for another version is worse than packaging none at all: nothing checks
+  # it again, and `release_handler` applies it as this version's upgrade plan.
+  # `mix forecastle.relup --outdir` makes that reachable - generation succeeds
+  # elsewhere and an older relup is left sitting here - and so does a write
+  # interrupted partway through. Fail the build instead.
+  defp verify_relup!(relup, vsn) do
+    wanted = to_charlist(vsn)
+
+    case :file.consult(to_charlist(relup)) do
+      # The outer contract `systools_make:check_relup/1` enforces when OTP packs
+      # a tarball: one term, a non-empty version string, and list-valued upgrade
+      # and downgrade sections. Mix packs its own tarball, so nothing applies
+      # that check on the way into a release, and `release_handler` reaches
+      # straight into those two lists during an upgrade. The pinned version is
+      # a non-empty charlist by construction, so matching it covers the rest.
+      {:ok, [{^wanted, up, down} = plan]} when is_list(up) and is_list(down) ->
+        plan
+
+      {:ok, [{[_ | _] = other, up, down}]} when is_list(up) and is_list(down) ->
+        Mix.raise(
+          "#{relup} is an upgrade plan for #{other}, but this release is #{vsn}. " <>
+            "Generate the relup for #{vsn} into the project root, or remove the stale one."
+        )
+
+      {:ok, terms} ->
+        Mix.raise(
+          "#{relup} is not an upgrade plan. Expected a single {version, upgrade, " <>
+            "downgrade} tuple with a version string and two lists, which is what " <>
+            "systools writes and release_handler reads, but got: #{inspect(terms)}"
+        )
+
+      {:error, reason} ->
+        Mix.raise("#{relup} could not be read as an upgrade plan: #{inspect(reason)}")
     end
   end
 

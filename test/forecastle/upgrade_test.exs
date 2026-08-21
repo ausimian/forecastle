@@ -211,12 +211,11 @@ defmodule Forecastle.UpgradeTest do
   end
 
   defp make_relup!(from, to) do
-    # mix forecastle.relup returns :error on failure without a non-zero exit,
-    # so mix! cannot detect that. Clear any earlier relup first, or a stale one
-    # from a previous run would satisfy the assertion below and the upgrade
-    # would be built from an obsolete plan.
+    # No --outdir: the relup is wanted in the workspace, which is where
+    # post-assembly looks for one. The task exits non-zero if it could not
+    # generate it, so `mix!` raising is what rules out a relup left over from
+    # an earlier run satisfying the assertions below.
     relup = Path.join(Fixture.workspace(), "relup")
-    File.rm(relup)
 
     mix!(
       [

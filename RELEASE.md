@@ -59,6 +59,42 @@
 - `mix forecastle.relup` failed with `:systools is not available` in projects
   that do not themselves depend on `:sasl`, because Elixir prunes unused OTP
   applications from the build's code path.
+- `mix forecastle.relup` exited 0 when it had generated nothing.
+  `:systools.make_relup/4` reports ordinary failure by returning `:error`, and
+  Mix does not turn what a task returns into an exit status, so a build
+  pipeline could not tell that generation had failed. Nothing removes a relup
+  the task did not write, so the build then went on to package whatever plan an
+  earlier run had left in the project root, as this version's. The task now
+  says what `systools` could not do and fails. Warnings that `systools` used to
+  print for itself - an ERTS version change among them - are passed on rather
+  than swallowed.
+- `mix forecastle.relup --outdir` was accepted and then ignored, so the relup
+  was written to the current directory regardless, overwriting any unrelated
+  relup already there. The switch now decides where the file goes, and the
+  directory has to exist. Post-assembly still copies the relup it finds in the
+  project root, which is where the default puts it, so `--outdir` is for
+  generating a relup to look at or to keep - not for feeding one to a release.
+- Assembling a release checked only that a `relup` existed in the project
+  root before packaging it, so an upgrade plan for another version — or the
+  remains of a write that was interrupted — was copied in and later applied by
+  `release_handler` as this version's plan. The relup is now read and its
+  target version checked against the release being assembled, and assembly
+  fails if it does not match, if the upgrade and downgrade sections are not
+  the lists `release_handler` will reach into, or if the file cannot be read
+  as an upgrade plan at all. That is the contract OTP applies in
+  `systools_make:check_relup/1` when it packs a tarball itself, plus the
+  version check; Mix packs its own tarball, so nothing was applying it. A
+  build that was silently packaging the wrong plan will now stop instead —
+  before assembly begins, so a rejected relup leaves no half-built release
+  behind for a later build to stumble over.
+- `mix forecastle.relup` discarded arguments it did not recognise, so a
+  mistyped switch, or a path given without one, generated a relup between
+  releases the caller had not named instead of reporting the mistake. Omitting
+  `--target` raised a `KeyError` from the middle of the task. Both are now
+  errors that say what is wrong, as is repeating `--target` or `--outdir`,
+  which used to keep the last occurrence and generate from a target the
+  caller had not asked for. `--fromto`, `--upfrom` and `--downto` may still
+  be given more than once, as they always could.
 - Runtime configuration could not read the standard release variables.
   The launcher sources `env.sh`, and so runs the preboot VM that expands
   configuration, before it assigns `RELEASE_COOKIE`, `RELEASE_NODE`,
