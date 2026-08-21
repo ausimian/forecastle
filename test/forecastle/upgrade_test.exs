@@ -49,6 +49,7 @@ defmodule Forecastle.UpgradeTest do
     booted = %{
       greeting: rpc!(deploy, "IO.puts(Sample.greeting())"),
       env_marker: rpc!(deploy, "IO.puts(Sample.env_marker())"),
+      release_env: rpc!(deploy, "IO.puts(inspect(Sample.release_env()))"),
       counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
       os_pid: launcher!(deploy, ["pid"]),
       releases: castle!(deploy, ["releases"])
@@ -101,6 +102,19 @@ defmodule Forecastle.UpgradeTest do
          %{deploy: deploy} do
       # The launcher was invoked from the workspace, not the release root.
       assert File.exists?(Path.join(deploy, "releases/RELEASES"))
+    end
+
+    test "gives runtime.exs the release variables the launcher would have set",
+         %{booted: booted} do
+      # env.sh is sourced before the launcher assigns these, so the integration
+      # has to apply their defaults itself. runtime.exs fetches them with
+      # fetch_env!, so a regression here fails the boot outright - these
+      # assertions pin the values it should be seeing.
+      assert booted.release_env =~ ~s(release_node: "sample")
+      assert booted.release_env =~ "release_cookie_set: true"
+      assert booted.release_env =~ ~s(release_mode: "embedded")
+      assert booted.release_env =~ ~r/release_tmp: "[^"]+\/tmp"/
+      assert booted.release_env =~ ~r/release_vm_args: "[^"]+\/vm\.args"/
     end
 
     test "reports the release as permanent", %{booted: booted} do

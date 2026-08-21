@@ -120,6 +120,47 @@ defmodule Forecastle.CastleCliTest do
     end
   end
 
+  describe "version arguments" do
+    # Versions are interpolated into Elixir source that the running node
+    # evaluates. `1.2.3));System.stop(1)#` closes the ~s() sigil and the call,
+    # leaving the rest to run with the release cookie's authority, so nothing
+    # outside the character set a release version is built from may through.
+    @hostile [
+      ~S|1.2.3));System.stop(1)#|,
+      "1.2.3)",
+      "1.2.3#comment",
+      "1.2.3 4",
+      ~s(1.2.3'x),
+      ~s(1.2.3"x),
+      "1.2.3;x",
+      "1.2.3$(id)",
+      "1.2.3`id`",
+      "1.2.3\nSystem.stop()",
+      "../../etc/passwd"
+    ]
+
+    for {version, index} <- Enum.with_index(@hostile) do
+      test "#{index}: #{inspect(version)} is rejected rather than delegated", context do
+        for command <- ~w(unpack install commit remove) do
+          assert {output, status} = castle(context, [command, unquote(version)])
+
+          assert status != 0,
+                 "#{command} accepted #{inspect(unquote(version))}"
+
+          assert output =~ "is not a valid release version"
+          refute recorded?(context), "#{command} delegated #{inspect(unquote(version))}"
+        end
+      end
+    end
+
+    for version <- ~w(0.1.1 1.2.3-rc.1 1.0.0+build.5 0.1.0-alpha_2 20240101.1) do
+      test "#{version} is accepted", context do
+        assert ["rpc", expression] = castle!(context, ["install", unquote(version)])
+        assert expression == "Castle.install(~s(#{unquote(version)}))"
+      end
+    end
+  end
+
   describe "the generated scripts" do
     test "are valid POSIX shell", %{release: release} do
       for script <- ["bin/castle", "releases/0.1.0/env.sh"] do

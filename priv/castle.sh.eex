@@ -23,11 +23,26 @@ export RELEASE_NAME
 RELEASE_LAUNCHER="$RELEASE_ROOT/bin/$RELEASE_NAME"
 RELEASE_TARBALL_PREFIX="<%= release.name %>"
 
+# Versions reach the running node as Elixir source, so a version containing
+# the sigil terminator would close the call and have the remainder evaluated.
+# Reject anything outside the characters a release version can be built from,
+# rather than trying to escape it.
+validate_vsn () {
+  case "$1" in
+    *[!A-Za-z0-9.+_-]*)
+      echo "ERROR: $1 is not a valid release version" >&2
+      exit 1
+      ;;
+  esac
+}
+
 require_vsn () {
   if [ -z "$2" ]; then
     echo "ERROR: $1 expects a version as argument" >&2
     exit 1
   fi
+
+  validate_vsn "$2"
 }
 
 castle_rpc () {
@@ -51,6 +66,7 @@ case $1 in
 
   commit)
     if [ -n "$2" ]; then
+      validate_vsn "$2"
       castle_rpc "Castle.commit(~s($2))"
     else
       # No version given: commit whichever release is currently running but not
