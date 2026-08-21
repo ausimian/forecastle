@@ -184,4 +184,9 @@ and you wish to generate a relup between them:
 ```
 
 If the generated file is in the project root, it will be copied during 
-post-assembly to the release.
+post-assembly to the release. That is where the task writes it by default;
+`--outdir` sends it somewhere else, which post-assembly will not find.
+
+The task fails if it could not generate the relup, so a build pipeline can tell.
+It leaves an earlier relup alone, and that is exactly why: nothing else stops a
+failed build from packaging the previous version's upgrade plan.

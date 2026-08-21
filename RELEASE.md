@@ -59,6 +59,26 @@
 - `mix forecastle.relup` failed with `:systools is not available` in projects
   that do not themselves depend on `:sasl`, because Elixir prunes unused OTP
   applications from the build's code path.
+- `mix forecastle.relup` exited 0 when it had generated nothing.
+  `:systools.make_relup/4` reports ordinary failure by returning `:error`, and
+  Mix does not turn what a task returns into an exit status, so a build
+  pipeline could not tell that generation had failed. Nothing removes a relup
+  the task did not write, so the build then went on to package whatever plan an
+  earlier run had left in the project root, as this version's. The task now
+  says what `systools` could not do and fails. Warnings that `systools` used to
+  print for itself - an ERTS version change among them - are passed on rather
+  than swallowed.
+- `mix forecastle.relup --outdir` was accepted and then ignored, so the relup
+  was written to the current directory regardless, overwriting any unrelated
+  relup already there. The switch now decides where the file goes, and the
+  directory has to exist. Post-assembly still copies the relup it finds in the
+  project root, which is where the default puts it, so `--outdir` is for
+  generating a relup to look at or to keep - not for feeding one to a release.
+- `mix forecastle.relup` discarded arguments it did not recognise, so a
+  mistyped switch, or a path given without one, generated a relup between
+  releases the caller had not named instead of reporting the mistake. Omitting
+  `--target` raised a `KeyError` from the middle of the task. Both are now
+  errors that say what is wrong.
 - Runtime configuration could not read the standard release variables.
   The launcher sources `env.sh`, and so runs the preboot VM that expands
   configuration, before it assigns `RELEASE_COOKIE`, `RELEASE_NODE`,
