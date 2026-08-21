@@ -167,6 +167,12 @@ so that an incremental build cannot ship upgrade instructions belonging to an
 earlier version. Naming a file that does not exist is a compilation error: the
 project asked for an appup and cannot have one.
 
+That housekeeping only happens while the compiler is registered. To turn an appup
+off for some environments, leave `:appup` in `:compilers` and let the `:appup` key
+be `nil` - the output is removed and nothing further is reported. Taking the
+compiler out of `:compilers` instead stops it running, and an output an earlier
+build wrote stays where it is.
+
 ## Relup Generation
 
 Forecastle contains a mix task, `forecastle.relup`, that simplifies the generation of

@@ -63,17 +63,41 @@ defmodule Forecastle.AppupCompilerTest do
       compile!(ctx)
       assert File.exists?(ctx.appup)
 
-      output = compile!(ctx, [{"SAMPLE_APPUP", "none"}])
+      output = compile!(ctx, disabled(ctx))
 
       refute File.exists?(ctx.appup)
       assert File.exists?(Path.join(ctx.ebin, "Elixir.Sample.Counter.beam"))
-      assert output =~ "warning: No appup specified in project"
+      # Worth saying once, on the build where it actually happens: an appup
+      # that vanishes without explanation is its own debugging problem.
+      assert output =~ "Removed"
+    end
+
+    test "having opted out is not reported again on later builds", ctx do
+      compile!(ctx)
+      compile!(ctx, disabled(ctx))
+
+      # Steady state. Being opted out is not a problem to be told about on
+      # every compile, and the per-environment opt-out has to survive the
+      # strict compile the precommit convention prescribes - `mix!` raises on
+      # a non-zero exit, so getting here at all is the assertion.
+      output = Fixture.mix!(["compile", "--warnings-as-errors"], disabled(ctx))
+
+      # Deliberately any mention at all, case-insensitively: the point is that
+      # a project which has opted out hears nothing, and a narrower assertion
+      # would still pass against a build that announced itself differently.
+      refute output =~ ~r/appup/i
+      refute File.exists?(ctx.appup)
     end
   end
 
   defp compile!(ctx, extra \\ []), do: Fixture.mix!(["compile"], env(ctx, extra))
 
   defp env(%{build_root: build_root}, extra \\ []), do: [{"MIX_BUILD_ROOT", build_root} | extra]
+
+  # `nil` is as close as the fixture can get to dropping the `:appup` key; the
+  # compiler reads it through `Mix.Project.config()[:appup]`, which cannot tell
+  # an absent key from one set to `nil`.
+  defp disabled(ctx), do: env(ctx, [{"SAMPLE_APPUP", "none"}])
 
   # The workspace is memoised and shared with every other test in the run, so
   # this has to go back. Through `on_exit`, which runs even if the test times

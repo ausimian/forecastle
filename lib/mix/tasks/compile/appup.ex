@@ -15,6 +15,12 @@ defmodule Mix.Tasks.Compile.Appup do
   A configured but missing source is a compilation error: the project asked for
   an appup and cannot have one, and the alternative is a release that only fails
   later, in `:systools.make_relup/4` or during the upgrade itself.
+
+  Removal only happens while the compiler is registered. Taking `:appup` out of
+  `:compilers` stops it running at all, and whatever an earlier build wrote then
+  stays where it is - as it would for any Mix compiler dropped from the list. To
+  turn an appup off per environment, leave the compiler registered and let the
+  `:appup` key be `nil`: that path removes the output and says nothing further.
   """
   @shortdoc "Compiles appup files"
   use Mix.Task.Compiler
@@ -26,7 +32,7 @@ defmodule Mix.Tasks.Compile.Appup do
     dst = destination()
 
     case source() do
-      nil -> discard(dst, report(:warning, "No appup specified in project"))
+      nil -> discard(dst)
       src -> build(src, dst)
     end
   end
@@ -51,7 +57,7 @@ defmodule Mix.Tasks.Compile.Appup do
     if File.exists?(src) do
       write(src, dst)
     else
-      abort(discard(dst, report(:error, "Appup file not found: #{src}")))
+      discard(dst, report(:error, "Appup file not found: #{src}"))
     end
   end
 
@@ -67,28 +73,41 @@ defmodule Mix.Tasks.Compile.Appup do
     end
   end
 
-  # Removes an earlier build's output, carrying whatever diagnostic explains why
-  # the project no longer wants one. Leaving the output behind is the whole bug,
-  # so failing to remove it is a compilation error in its own right. `:noop`
-  # only when there was nothing there, so that a project which never had an
-  # appup does not report work on every compile.
-  defp discard(dst, diagnostics) do
-    case File.rm(dst) do
-      :ok ->
-        {:ok, diagnostics}
-
-      {:error, :enoent} ->
-        {:noop, diagnostics}
-
-      {:error, reason} ->
-        failure = report(:error, "Could not remove #{dst}: #{:file.format_error(reason)}")
-        {:error, diagnostics ++ failure}
+  # The project has opted out: `:appup` is unset. That is a legitimate state and
+  # not something to report on every compile, so say nothing unless there is an
+  # earlier build's output to take away - which happens on exactly one build.
+  defp discard(dst) do
+    case remove(dst) do
+      :removed -> {:ok, report(:information, "Removed #{dst}: no appup is specified")}
+      :absent -> :noop
+      {:error, diagnostics} -> {:error, diagnostics}
     end
   end
 
-  # The project asked for an appup and cannot have one, whatever removing the
-  # previous one had to say about it.
-  defp abort({_status, diagnostics}), do: {:error, diagnostics}
+  # The project asked for an appup and cannot have one. Take the previous one
+  # away regardless - leaving it behind is the whole bug - and fail with the
+  # diagnostic that explains why.
+  defp discard(dst, diagnostics) do
+    case remove(dst) do
+      {:error, extra} -> {:error, diagnostics ++ extra}
+      _removed_or_absent -> {:error, diagnostics}
+    end
+  end
+
+  # Failing to remove the output is a compilation error in its own right: a
+  # stale appup that could not be deleted is the bug still present.
+  defp remove(dst) do
+    case File.rm(dst) do
+      :ok ->
+        :removed
+
+      {:error, :enoent} ->
+        :absent
+
+      {:error, reason} ->
+        {:error, report(:error, "Could not remove #{dst}: #{:file.format_error(reason)}")}
+    end
+  end
 
   # Relative to the project file rather than the working directory. The compiler
   # is recursive, so Mix runs it from each umbrella child's own directory, but

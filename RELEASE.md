@@ -71,7 +71,11 @@
   anything. An incremental build — which is what a CI cache produces —
   therefore went on packaging upgrade instructions from an earlier version of
   the application, and `release_handler` applied that obsolete plan during a
-  hot upgrade. The stale output is now deleted instead.
+  hot upgrade. The stale output is now deleted instead. Leaving the `:appup`
+  key unset is a supported way to turn an appup off for an environment: the
+  earlier output is removed, and beyond saying so once, nothing is reported.
+  Removal needs the compiler to stay in `:compilers` — dropping it from the
+  list stops it running at all, as it would any Mix compiler.
 - The `:appup` project key is resolved relative to the project file, as the
   README has always said it is, rather than to whatever the working directory
   happens to be. That is what makes "the source is missing" a trustworthy
