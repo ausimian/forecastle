@@ -24,7 +24,9 @@ defmodule Sample.MixProject do
 
   defp deps do
     [
-      {:castle, "~> 0.3"},
+      # TEMPORARY for the 1.0.0 cycle: the fixture needs Castle's in-progress API.
+      # Flip back to {:castle, "~> 1.0"} before publishing.
+      {:castle, github: "ausimian/castle", branch: "release/1.0.0"},
       {:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), override: true}
     ]
   end
