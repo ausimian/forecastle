@@ -69,7 +69,8 @@ defmodule Forecastle.UpgradeTest do
       Map.merge(installed, %{
         counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
         os_pid: launcher!(deploy, ["pid"]),
-        greeting: rpc!(deploy, "IO.puts(Sample.greeting())")
+        greeting: rpc!(deploy, "IO.puts(Sample.greeting())"),
+        releases: castle!(deploy, ["releases"])
       })
 
     committed = %{output: castle!(deploy, ["commit"])}
@@ -173,6 +174,16 @@ defmodule Forecastle.UpgradeTest do
   describe "installing" do
     test "reports the version change", %{installed: installed} do
       assert installed.output =~ "Now running #{@to} (previously #{@from})."
+    end
+
+    test "leaves the new version as the one running", %{installed: installed} do
+      # What `Castle.running/1` looks for, and what `bin/castle install` waits
+      # to see before it reports success: the version installed is current, and
+      # the one it came from stays permanent until it is committed. `install`
+      # exiting 0 above already depended on this - asserted here so that a
+      # change in what a fresh install leaves behind says so.
+      assert installed.releases =~ ~r/#{@to}\s+current/
+      assert installed.releases =~ ~r/#{@from}\s+permanent/
     end
 
     test "loads the new code", %{installed: installed} do

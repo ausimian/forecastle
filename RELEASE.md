@@ -6,6 +6,28 @@
 - `bin/castle commit` may now be given no version, in which case it commits
   whichever release is currently running. It exits non-zero if there was no
   such release, so that automation can tell nothing was committed.
+- `bin/castle install` now confirms that the version it installed is the one
+  running before it reports success, rather than trusting what
+  `release_handler` replied. That reply says only that the upgrade was
+  accepted: a transition that restarts the emulator is replied to and *then*
+  reboots, so a successful upgrade can arrive back here as a lost connection,
+  and an upgrade that replaces the emulator finishes on the way back up, where
+  it can still fail and roll back. A reply that the node has gone away is
+  therefore taken to settle nothing either way, and `install` polls
+  `Castle.running/1` until the version is running - exiting 0 only then, and
+  non-zero on a real failure or if the version never becomes the running one.
+  `CASTLE_INSTALL_TIMEOUT` sets how long it waits, in seconds, and defaults to
+  300: how long a reboot takes is a property of the system being upgraded.
+
+  Nothing can build a relup that restarts the emulator until
+  [#4](https://github.com/ausimian/forecastle/issues/4), so the restart
+  transitions this exists for **cannot be exercised end to end yet**. What is
+  covered is the hot-upgrade path, by the `:e2e` suite, which now installs
+  *and* confirms; and every branch of the shell logic - inconclusive,
+  confirmed, failed, timed out - against a launcher stub, which is the only
+  place the restart shape can be simulated until #4 lands. A continuation that
+  fails and rolls back is left to the end-to-end coverage that #4 and
+  [castle#14](https://github.com/ausimian/castle/issues/14) bring.
 - A test suite. It assembles a real release from a fixture application and, in
   the `:e2e` suite, boots it and performs a hot upgrade.
 
@@ -155,12 +177,15 @@ Mix's own `bin/<release>` has always had.
 
 ### Known limitations
 
-- Castle prints `release_handler` failures and returns normally, so a failed
-  `bin/castle unpack`/`install`/`commit`/`remove` still exits 0. Automation
-  cannot yet distinguish a failed release operation from a successful one.
-  Tracked in [castle#15](https://github.com/ausimian/castle/issues/15).
+- A transition that restarts the emulator cannot be exercised end to end,
+  because nothing can build a relup that asks for one until
+  [#4](https://github.com/ausimian/forecastle/issues/4). `bin/castle install`
+  handles it, and each branch of that handling is tested against a stub, but
+  the real thing is unproven. See above.
 - Configuration is expanded into the version directory's `sys.config`, so
   concurrent `start`/`daemon`/`eval` invocations with differing environments can
-  race on it. Fixing this needs Castle to accept a destination path, also
-  tracked in [castle#15](https://github.com/ausimian/castle/issues/15).
+  race on it. Tracked in
+  [castle#13](https://github.com/ausimian/castle/issues/13), which materialises
+  the target release's configuration in a `:peer` running its own config
+  providers - not by having Castle accept a destination path.
 - Windows releases are not supported; see above.

@@ -27,7 +27,16 @@ around it composes instead:
 
 - `bin/castle` is a thin wrapper that shells back through
   `bin/<name> rpc "Castle.<command>(...)"`, so it inherits cookie handling,
-  distribution and node naming from the standard launcher.
+  distribution and node naming from the standard launcher. Most commands
+  `exec` the launcher and are done; `install` and the version-less `commit`
+  cannot, because they have something to do afterwards, so they capture the
+  output and propagate the status themselves. What `install` does afterwards is
+  confirm, through `Castle.running/1`, that the version it installed is the one
+  running: `release_handler` replies as soon as it has accepted an upgrade,
+  which for a transition that restarts the emulator is before the upgrade has
+  run, and the reply may not outlive the reboot it triggers. A lost connection
+  is therefore inconclusive rather than fatal, and `CASTLE_INSTALL_TIMEOUT`
+  bounds how long the confirmation is waited for.
 - The `env.sh` fragment expands `build.config` into `sys.config` in a preboot
   VM, for the commands that boot the system. It is appended, so a project's own
   `rel/env.sh.eex` survives and runs first.
@@ -92,15 +101,18 @@ configures distribution without one.
   migrating deployment gains `bin/castle`, but keeps its old launcher. Mix's own
   launcher has always behaved this way; do not add a dispatcher to work around
   it without deciding that question for `bin/<release>` too.
-- **Failed Castle operations exit 0.** Castle catches `release_handler` errors
-  and returns `:ok`, and `rpc` only reports whether evaluation completed, so
-  `bin/castle` cannot surface them. Needs Castle to report failures —
-  [castle#15](https://github.com/ausimian/castle/issues/15).
-- **Concurrent boots race on `sys.config`.** `Castle.generate/1` hardcodes the
-  version directory, so per-invocation config files aren't reachable from here.
-  Same issue.
+- **The emulator-restart transitions are unproven.** `bin/castle install`
+  handles them, and each branch of that handling is tested against a launcher
+  stub, but nothing can build a relup that asks for one until
+  [#4](https://github.com/ausimian/forecastle/issues/4), so the `:e2e` suite
+  only covers the hot-upgrade path.
+- **Concurrent boots race on `sys.config`.** `Castle.generate/1` writes into
+  the version directory, so per-invocation config files aren't reachable from
+  here. Fixed on Castle's side by
+  [castle#13](https://github.com/ausimian/castle/issues/13), which materialises
+  the target configuration in a `:peer`.
 
-Do not work the last two around in this repo: putting Castle's logic back into
+Do not work the last one around in this repo: putting Castle's logic back into
 shell-embedded Elixir is the coupling `bin/castle` exists to remove.
 
 ## Compatibility

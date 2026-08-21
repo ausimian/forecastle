@@ -4,7 +4,14 @@ defmodule Forecastle.CastleCliTest do
 
   The release launcher is replaced with a stub that records the arguments it was
   handed, so these tests pin down exactly what `bin/castle` delegates without
-  needing a running system.
+  needing a running system. Every call appends to the same record, so a command
+  that reaches the launcher more than once - `install`, which confirms what it
+  installed - reads back as one flat list of arguments in the order they were
+  passed.
+
+  Replacing that stub is also the only way to simulate a transition that
+  restarts the emulator: nothing can build a relup that asks for one until #4,
+  so the end-to-end suite cannot produce it.
   """
 
   use Forecastle.ReleaseCase
@@ -28,7 +35,7 @@ defmodule Forecastle.CastleCliTest do
 
     File.write!(
       stub,
-      ~s(#!/bin/sh\nprintf '%s\\0' "$@" > "#{record}"\nprintf '%s' "$CASTLE_STUB_OUTPUT"\n)
+      ~s(#!/bin/sh\nprintf '%s\\0' "$@" >> "#{record}"\nprintf '%s' "$CASTLE_STUB_OUTPUT"\n)
     )
 
     File.chmod!(stub, 0o755)
@@ -45,8 +52,13 @@ defmodule Forecastle.CastleCliTest do
       assert castle!(context, ["unpack", "0.1.1"]) == ["rpc", "Castle.unpack(~s(sample-0.1.1))"]
     end
 
-    test "install", context do
-      assert castle!(context, ["install", "0.1.1"]) == ["rpc", "Castle.install(~s(0.1.1))"]
+    test "install, and then the confirmation that it took effect", context do
+      assert castle!(context, ["install", "0.1.1"]) == [
+               "rpc",
+               "Castle.install(~s(0.1.1))",
+               "rpc",
+               "Castle.running(~s(0.1.1))"
+             ]
     end
 
     test "commit with an explicit version", context do
@@ -103,6 +115,114 @@ defmodule Forecastle.CastleCliTest do
     end
   end
 
+  describe "install" do
+    # release_handler replies as soon as it has accepted an upgrade. For a
+    # transition that restarts the emulator that is before the upgrade has run,
+    # and the reply may not even outlive the reboot it triggers - so the reply
+    # is not what decides the exit status here. Seeing the version running is.
+
+    test "reports what the install said, and exits zero once confirmed", context do
+      assert {output, 0} =
+               castle(context, ["install", "0.1.1"], [
+                 {"CASTLE_STUB_OUTPUT", "Now running 0.1.1 (previously 0.1.0)."}
+               ])
+
+      assert output =~ "Now running 0.1.1 (previously 0.1.0)."
+    end
+
+    test "treats a node that has gone away as inconclusive, not as a failure", context do
+      # A successful restart transition looks exactly like this from out here:
+      # the reply crosses distribution, and the reboot takes distribution down.
+      stub_launcher!(context, """
+      if [ -f "#{context.root}/rebooted" ]; then exit 0; fi
+      : > "#{context.root}/rebooted"
+      echo '--rpc-eval : RPC failed with reason :noconnection' >&2
+      exit 1
+      """)
+
+      assert {output, 0} = castle(context, ["install", "0.1.1"])
+      assert output =~ "noconnection"
+
+      assert calls(context) == [
+               "rpc",
+               "Castle.install(~s(0.1.1))",
+               "rpc",
+               "Castle.running(~s(0.1.1))"
+             ]
+    end
+
+    test "does not mistake an install that failed for a restart", context do
+      stub_launcher!(context, """
+      echo '** (Castle.Error) Install of 0.1.1 failed. {:no_such_release, 0.1.1}' >&2
+      exit 1
+      """)
+
+      assert {output, 1} = castle(context, ["install", "0.1.1"])
+      assert output =~ "Install of 0.1.1 failed."
+
+      # Nothing to wait for: the system said no. Polling would only delay the
+      # report by however long the timeout is.
+      assert calls(context) == ["rpc", "Castle.install(~s(0.1.1))"]
+    end
+
+    test "propagates a failing launcher exit status", context do
+      stub_launcher!(context, "echo 'rpc failed' >&2\nexit 3\n")
+
+      assert {_output, 3} = castle(context, ["install", "0.1.1"])
+    end
+
+    test "fails when the version never becomes the one running", context do
+      stub_launcher!(context, """
+      if [ -f "#{context.root}/installed" ]; then
+        echo '** (Castle.Error) 0.1.1 is not the running release. 0.1.0 is.' >&2
+        exit 1
+      fi
+      : > "#{context.root}/installed"
+      exit 0
+      """)
+
+      assert {output, 1} =
+               castle(context, ["install", "0.1.1"], [{"CASTLE_INSTALL_TIMEOUT", "1"}])
+
+      assert output =~ "0.1.1 is not the running release, 1s after installing it"
+      # And what the last attempt saw, which is what says where it went wrong.
+      assert output =~ "0.1.1 is not the running release. 0.1.0 is."
+    end
+
+    test "keeps asking until the version is running", context do
+      # The second confirmation is the one that succeeds, so this only passes if
+      # the first failure is retried rather than reported.
+      stub_launcher!(context, """
+      n=$(cat "#{context.root}/n" 2>/dev/null || echo 0)
+      n=$((n + 1))
+      echo "$n" > "#{context.root}/n"
+      if [ "$n" -eq 2 ]; then exit 1; fi
+      exit 0
+      """)
+
+      assert {_output, 0} =
+               castle(context, ["install", "0.1.1"], [{"CASTLE_INSTALL_TIMEOUT", "60"}])
+
+      assert calls(context) == [
+               "rpc",
+               "Castle.install(~s(0.1.1))",
+               "rpc",
+               "Castle.running(~s(0.1.1))",
+               "rpc",
+               "Castle.running(~s(0.1.1))"
+             ]
+    end
+
+    test "refuses a timeout that is not a number of seconds", context do
+      assert {output, status} =
+               castle(context, ["install", "0.1.1"], [{"CASTLE_INSTALL_TIMEOUT", "soon"}])
+
+      assert status != 0
+      assert output =~ "CASTLE_INSTALL_TIMEOUT must be a whole number of seconds"
+      refute recorded?(context)
+    end
+  end
+
   describe "RELEASE_NAME" do
     # RELEASE_NAME names the node. The launcher and the tarballs are named at
     # build time and do not move when it is set, so nothing here may depend on
@@ -144,6 +264,12 @@ defmodule Forecastle.CastleCliTest do
     test "documents that commit's version is optional", context do
       assert {output, 0} = castle(context, [])
       assert output =~ ~r/commit \[VSN\]/
+    end
+
+    test "documents the timeout install waits for, and its default", context do
+      assert {output, 0} = castle(context, [])
+      assert output =~ "CASTLE_INSTALL_TIMEOUT"
+      assert output =~ "300"
     end
 
     for command <- ~w(unpack install remove) do
@@ -208,15 +334,20 @@ defmodule Forecastle.CastleCliTest do
 
     for {version, index} <- Enum.with_index(@unusual_but_valid) do
       test "#{index}: #{inspect(version)} is passed through as itself", context do
-        assert ["rpc", expression] = castle!(context, ["install", unquote(version)])
+        assert ["rpc", installing, "rpc", confirming] =
+                 castle!(context, ["install", unquote(version)])
 
         # The real property is not the text of the expression but its meaning:
         # one call, to the function asked for, whose only argument is a literal
         # holding exactly this version. A single-element <<>> is what rules out
-        # an interpolation having been introduced.
-        assert {{:., _, [{:__aliases__, _, [:Castle]}, :install]}, _,
-                [{:sigil_s, _, [{:<<>>, _, [unquote(version)]}, []]}]} =
-                 Code.string_to_quoted!(expression)
+        # an interpolation having been introduced. Both calls are checked - the
+        # confirmation interpolates the same version into the same kind of
+        # sigil, so it is the same sink.
+        for {expression, fun} <- [{installing, :install}, {confirming, :running}] do
+          assert {{:., _, [{:__aliases__, _, [:Castle]}, ^fun]}, _,
+                  [{:sigil_s, _, [{:<<>>, _, [unquote(version)]}, []]}]} =
+                   Code.string_to_quoted!(expression)
+        end
       end
     end
   end
@@ -240,9 +371,28 @@ defmodule Forecastle.CastleCliTest do
     {output, 0} = castle(context, args, env)
     assert output == "", "expected no output from bin/castle, got: #{output}"
 
-    context.record
-    |> File.read!()
-    |> String.split(<<0>>, trim: true)
+    calls(context)
+  end
+
+  # Every argument of every call the launcher stub was handed, in order.
+  defp calls(context) do
+    case File.read(context.record) do
+      {:ok, recorded} -> String.split(recorded, <<0>>, trim: true)
+      {:error, :enoent} -> []
+    end
+  end
+
+  # Replaces the recording stub with one that behaves like a system in a
+  # particular state. The recording is kept: what was called still matters.
+  defp stub_launcher!(context, body) do
+    stub = Path.join([context.root, "bin", "sample"])
+
+    File.write!(
+      stub,
+      ~s(#!/bin/sh\nprintf '%s\\0' "$@" >> "#{context.record}"\n) <> body
+    )
+
+    File.chmod!(stub, 0o755)
   end
 
   defp recorded?(context), do: File.exists?(context.record)

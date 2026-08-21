@@ -22,6 +22,15 @@ RELEASE_TARBALL_PREFIX="<%= release.name %>"
 
 NOTHING_TO_COMMIT="No release is awaiting commit. Pass a version explicitly."
 
+# How long install waits for the version it installed to become the version
+# that is running, in seconds, and how often it looks. A transition that
+# restarts the emulator has to reboot the system, and an emulator upgrade then
+# runs the rest of the upgrade on the way back up, so how long that takes is a
+# property of the system being upgraded rather than of this script: hence
+# generous by default, and overridable.
+CASTLE_INSTALL_TIMEOUT="${CASTLE_INSTALL_TIMEOUT:-300}"
+install_poll_interval=2
+
 # Versions reach the running node as Elixir source, inside a ~s() sigil, so a
 # version able to end that sigil would have the remainder of it evaluated with
 # the release cookie's authority. Three things can do that - the bracket pair
@@ -52,6 +61,92 @@ castle_rpc () {
   exec "$RELEASE_LAUNCHER" rpc "$1"
 }
 
+# Installs a version and then confirms that it is the one running.
+#
+# release_handler replies as soon as it has accepted an upgrade, and for a
+# transition that restarts the emulator that is before the upgrade has run.
+# The reply has to cross distribution to reach the short-lived VM that carried
+# the request, and the reboot takes distribution down with it, so a successful
+# upgrade can arrive back here as a lost connection. An emulator upgrade goes
+# further and finishes on the way back up, where it can still fail the boot and
+# roll back. Nor does the reply say which kind of transition it was: OTP sends a
+# plain ok both for a completed hot upgrade and for one about to reboot. So the
+# reply decides nothing on its own - the version has to be seen running.
+#
+# Not exec'd, unlike the other commands, because there is something to do after
+# the install: the status this returns with is this function's to report.
+install_and_confirm () {
+  case $CASTLE_INSTALL_TIMEOUT in
+    "" | *[!0-9]*)
+      echo "ERROR: CASTLE_INSTALL_TIMEOUT must be a whole number of seconds," \
+           "got: $CASTLE_INSTALL_TIMEOUT" >&2
+      exit 1
+      ;;
+  esac
+
+  # Whether the node went away has to be told apart from any other failure, and
+  # only what the launcher reports says which it was, so the output is captured
+  # rather than left to flow past. It is put back on the stream that suits the
+  # outcome: what a successful install reports on standard output, and what a
+  # failed one has to say on standard error, where a caller that redirects one
+  # and not the other looks for it.
+  if install_output=$("$RELEASE_LAUNCHER" rpc "Castle.install(~s($1))" 2>&1); then
+    install_status=0
+  else
+    install_status=$?
+  fi
+
+  if [ -n "$install_output" ]; then
+    if [ "$install_status" -eq 0 ]; then
+      echo "$install_output"
+    else
+      echo "$install_output" >&2
+    fi
+  fi
+
+  if [ "$install_status" -ne 0 ]; then
+    # A node that has gone away is what a successful restart looks like from
+    # out here, so it settles nothing either way and the confirmation below has
+    # to decide. Any other failure has just been reported, and is final.
+    #
+    # Matched on the reason erpc gives rather than on the sentence Elixir wraps
+    # it in, which is not ours: a wording change would then cost a wait, not a
+    # wrong answer, since an install that really did fail cannot be confirmed.
+    case $install_output in
+      *noconnection*) ;;
+      *) exit "$install_status" ;;
+    esac
+  fi
+
+  attempts=$(( (CASTLE_INSTALL_TIMEOUT + install_poll_interval - 1) / install_poll_interval ))
+  if [ "$attempts" -lt 1 ]; then
+    attempts=1
+  fi
+
+  # Each attempt says nothing while there is another one to come - a node that
+  # is still rebooting is not news. What the last one saw is worth having,
+  # though: it names the version that is running instead, or says the node never
+  # came back.
+  while :; do
+    if confirm_output=$("$RELEASE_LAUNCHER" rpc "Castle.running(~s($1))" 2>&1); then
+      return 0
+    fi
+
+    attempts=$((attempts - 1))
+    if [ "$attempts" -le 0 ]; then
+      if [ -n "$confirm_output" ]; then
+        echo "$confirm_output" >&2
+      fi
+
+      echo "ERROR: $1 is not the running release, ${CASTLE_INSTALL_TIMEOUT}s after" \
+           "installing it" >&2
+      exit 1
+    fi
+
+    sleep "$install_poll_interval"
+  done
+}
+
 case $1 in
   releases)
     castle_rpc "Castle.releases()"
@@ -62,9 +157,14 @@ case $1 in
     castle_rpc "Castle.unpack(~s($RELEASE_TARBALL_PREFIX-$2))"
     ;;
 
-  install|remove)
+  install)
     require_vsn "$1" "$2"
-    castle_rpc "Castle.$1(~s($2))"
+    install_and_confirm "$2"
+    ;;
+
+  remove)
+    require_vsn "$1" "$2"
+    castle_rpc "Castle.remove(~s($2))"
     ;;
 
   commit)
@@ -112,10 +212,16 @@ The known commands are:
 
     releases       Lists the releases currently known to the system, and their status
     unpack \"VSN\"   Unpacks $RELEASE_TARBALL_PREFIX-<VSN>.tar.gz
-    install \"VSN\"  Installs VSN and makes it the version that is running now
+    install \"VSN\"  Installs VSN and waits until it is the version running now
     commit [VSN]   Commits VSN, so that it becomes the version that runs on restart.
                    Defaults to the version that is running now.
     remove \"VSN\"   Uninstalls VSN from the system
+
+An upgrade is not complete when the system accepts it: one that restarts the
+emulator is still to reboot, and one that replaces the emulator finishes on the
+way back up. So install waits for the version to become the one running, for up
+to CASTLE_INSTALL_TIMEOUT seconds ($CASTLE_INSTALL_TIMEOUT), and fails if it
+does not.
 " >&2
 
     if [ -n "$1" ]; then
