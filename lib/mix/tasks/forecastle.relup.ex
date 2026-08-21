@@ -29,6 +29,10 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
   @impl Mix.Task
   def run(command_line_args) do
+    # Elixir prunes unused OTP applications from the build's code path, which
+    # would otherwise leave :systools unavailable in projects that don't
+    # already depend on :sasl.
+    Mix.ensure_application!(:sasl)
     {:ok, _} = :application.ensure_all_started(:sasl)
 
     case OptionParser.parse(command_line_args, strict: @options) do
