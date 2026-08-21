@@ -54,6 +54,7 @@ defmodule Forecastle.ReleaseCase do
     into
   end
 
+  defdelegate mix(args, env \\ []), to: Fixture
   defdelegate mix!(args, env \\ []), to: Fixture
   defdelegate cmd!(exe, args, env \\ [], opts \\ []), to: Fixture
   defdelegate cmd(exe, args, env \\ [], opts \\ []), to: Fixture
