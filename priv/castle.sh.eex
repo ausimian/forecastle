@@ -22,14 +22,18 @@ RELEASE_TARBALL_PREFIX="<%= release.name %>"
 
 NOTHING_TO_COMMIT="No release is awaiting commit. Pass a version explicitly."
 
-# Versions reach the running node as Elixir source, so a version containing
-# the sigil terminator would close the call and have the remainder evaluated.
-# Reject anything outside the characters a release version can be built from,
-# rather than trying to escape it.
+# Versions reach the running node as Elixir source, inside a ~s() sigil, so a
+# version able to end that sigil would have the remainder of it evaluated with
+# the release cookie's authority. Three things can do that - the bracket pair
+# that delimits it, the backslash that escapes within it, and the # that starts
+# an interpolation - and the path separator is refused alongside them because
+# the version also names a tarball. Everything else is inert inside the sigil
+# and is allowed: Mix does not constrain a release version, so refusing more
+# than this would reject versions that assemble and boot perfectly well.
 validate_vsn () {
   case "$1" in
-    *[!A-Za-z0-9.+_-]*)
-      echo "ERROR: $1 is not a valid release version" >&2
+    "" | *"("* | *")"* | *"#"* | *"\\"* | *"/"*)
+      echo "ERROR: $1 is not a usable release version" >&2
       exit 1
       ;;
   esac

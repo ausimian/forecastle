@@ -159,41 +159,64 @@ defmodule Forecastle.CastleCliTest do
 
   describe "version arguments" do
     # Versions are interpolated into Elixir source that the running node
-    # evaluates. `1.2.3));System.stop(1)#` closes the ~s() sigil and the call,
-    # leaving the rest to run with the release cookie's authority, so nothing
-    # outside the character set a release version is built from may through.
-    @hostile [
+    # evaluates. `1.2.3));System.stop(1)#` ends the ~s() sigil and the call,
+    # leaving the rest to run with the release cookie's authority.
+    @dangerous [
       ~S|1.2.3));System.stop(1)#|,
       "1.2.3)",
+      "1.2.3(",
+      ~S|1.2.3#{System.stop()}|,
       "1.2.3#comment",
-      "1.2.3 4",
-      ~s(1.2.3'x),
-      ~s(1.2.3"x),
-      "1.2.3;x",
+      ~S|1.2.3\)|,
       "1.2.3$(id)",
-      "1.2.3`id`",
       "1.2.3\nSystem.stop()",
-      "../../etc/passwd"
+      "../../etc/passwd",
+      "sub/dir"
     ]
 
-    for {version, index} <- Enum.with_index(@hostile) do
-      test "#{index}: #{inspect(version)} is rejected rather than delegated", context do
+    for {version, index} <- Enum.with_index(@dangerous) do
+      test "#{index}: #{inspect(version)} is refused rather than delegated", context do
         for command <- ~w(unpack install commit remove) do
           assert {output, status} = castle(context, [command, unquote(version)])
 
-          assert status != 0,
-                 "#{command} accepted #{inspect(unquote(version))}"
-
-          assert output =~ "is not a valid release version"
+          assert status != 0, "#{command} accepted #{inspect(unquote(version))}"
+          assert output =~ "is not a usable release version"
           refute recorded?(context), "#{command} delegated #{inspect(unquote(version))}"
         end
       end
     end
 
-    for version <- ~w(0.1.1 1.2.3-rc.1 1.0.0+build.5 0.1.0-alpha_2 20240101.1) do
-      test "#{version} is accepted", context do
+    # Mix does not constrain a release version, so plenty of odd-looking ones
+    # assemble and boot. They are inert inside the sigil and must go through -
+    # refusing them would break management of a release that works.
+    @unusual_but_valid [
+      "0.1.1",
+      "1.2.3-rc.1",
+      "1.0.0+build.5",
+      "0.1.0-alpha_2",
+      "20240101.1",
+      "1.0~rc1",
+      "1.2.3 4",
+      ~s(1.2.3'x),
+      ~s(1.2.3"x),
+      "1.2.3;x",
+      "1.2.3`id`",
+      "1.2.3$HOME",
+      "1.2.3|x",
+      "1.2.3&x"
+    ]
+
+    for {version, index} <- Enum.with_index(@unusual_but_valid) do
+      test "#{index}: #{inspect(version)} is passed through as itself", context do
         assert ["rpc", expression] = castle!(context, ["install", unquote(version)])
-        assert expression == "Castle.install(~s(#{unquote(version)}))"
+
+        # The real property is not the text of the expression but its meaning:
+        # one call, to the function asked for, whose only argument is a literal
+        # holding exactly this version. A single-element <<>> is what rules out
+        # an interpolation having been introduced.
+        assert {{:., _, [{:__aliases__, _, [:Castle]}, :install]}, _,
+                [{:sigil_s, _, [{:<<>>, _, [unquote(version)]}, []]}]} =
+                 Code.string_to_quoted!(expression)
       end
     end
   end

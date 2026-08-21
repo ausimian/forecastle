@@ -32,8 +32,10 @@
 - `bin/castle` built its RPC expression by interpolating the version
   argument into Elixir source, so a version such as `1.2.3));System.stop(1)#`
   closed the sigil and ran arbitrary code on the node with the release
-  cookie's authority. Versions are now validated against the characters a
-  release version can be built from. The same sink existed in the launcher
+  cookie's authority. `bin/castle` now refuses the characters that can end
+  the sigil, escape within it, or start an interpolation, along with the
+  path separator. Everything else is passed through, since Mix does not
+  constrain a release version. The same sink existed in the launcher
   Forecastle used to generate.
 
 ### Fixed
