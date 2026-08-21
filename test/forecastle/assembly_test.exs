@@ -165,12 +165,15 @@ defmodule Forecastle.AssemblyTest do
 
   describe "relup" do
     test "is copied into the version path when the project has one" do
-      contents = relup_for(@vsn)
-      write_relup!(contents)
+      write_relup!(relup_for(@vsn))
 
       release = assemble!(into: "rel-relup")
 
-      assert File.read!(Path.join(release, "releases/#{@vsn}/relup")) == contents
+      # The plan, not the bytes: it is re-emitted from the term that was
+      # checked rather than copied, so that what is packaged cannot be a
+      # later read of a file something else has since replaced.
+      assert {:ok, [{~c"0.1.0", [], []}]} =
+               :file.consult(to_charlist(Path.join(release, "releases/#{@vsn}/relup")))
     end
 
     test "is refused when it is an upgrade plan for another version" do

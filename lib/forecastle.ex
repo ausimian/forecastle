@@ -50,13 +50,17 @@ defmodule Forecastle do
   defp stage_relup(%Mix.Release{version: vsn, options: options} = release) do
     relup = project_relup()
 
+    # Dropped unconditionally first. Mix keeps release options it does not
+    # recognise, so a project that had set this key - for whatever reason -
+    # would otherwise have its value written out as the release's upgrade plan
+    # without any of this having looked at it.
+    options = Keyword.delete(options, :forecastle_relup)
+
     if File.exists?(relup) do
-      %Mix.Release{
-        release
-        | options: Keyword.put(options, :forecastle_relup, verify_relup!(relup, vsn))
-      }
+      staged = relup |> verify_relup!(vsn) |> encode_relup()
+      %Mix.Release{release | options: Keyword.put(options, :forecastle_relup, staged)}
     else
-      release
+      %Mix.Release{release | options: options}
     end
   end
 
@@ -188,9 +192,22 @@ defmodule Forecastle do
 
   # Checked in `pre_assemble/1`, before Mix has created anything, so all that is
   # left here is to put the bytes that were checked into the release.
+  # Re-emitted from the term that was checked rather than copied from the file
+  # again: `:file.consult/1` reopens the path, and a `mix forecastle.relup`
+  # running alongside the build can replace it in between, so a second read is
+  # not necessarily the bytes that were checked. The format is the one
+  # `systools` writes and `release_handler` reads - a UTF-8 coding comment and
+  # a single term.
+  defp encode_relup(plan) do
+    case :unicode.characters_to_binary(:io_lib.format(~c"%% coding: utf-8~n~tp.~n", [plan])) do
+      bytes when is_binary(bytes) -> bytes
+      _not_encodable -> Mix.raise("#{project_relup()} cannot be encoded as UTF-8")
+    end
+  end
+
   defp copy_relup(%Mix.Release{options: options, version_path: vp}) do
     case Keyword.fetch(options, :forecastle_relup) do
-      {:ok, contents} -> File.write!(Path.join(vp, "relup"), contents)
+      {:ok, bytes} -> File.write!(Path.join(vp, "relup"), bytes)
       :error -> :ok
     end
   end
@@ -212,8 +229,8 @@ defmodule Forecastle do
       # that check on the way into a release, and `release_handler` reaches
       # straight into those two lists during an upgrade. The pinned version is
       # a non-empty charlist by construction, so matching it covers the rest.
-      {:ok, [{^wanted, up, down}]} when is_list(up) and is_list(down) ->
-        File.read!(relup)
+      {:ok, [{^wanted, up, down} = plan]} when is_list(up) and is_list(down) ->
+        plan
 
       {:ok, [{[_ | _] = other, up, down}]} when is_list(up) and is_list(down) ->
         Mix.raise(

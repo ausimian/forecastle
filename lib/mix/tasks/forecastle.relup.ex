@@ -24,7 +24,9 @@ defmodule Mix.Tasks.Forecastle.Relup do
   The task fails if the relup could not be generated, so that a build pipeline
   does not carry on and package whatever relup happened to be lying around.
 
-  `--outdir` must already exist, and only ever affects where this task writes.
+  `--outdir` must already exist, and a relative one is resolved from the
+  directory the task is run in, not from the project root. It only ever affects
+  where this task writes.
   Post-assembly copies the relup it finds in the project root, which is where
   the default puts it, so a relup destined for a release should be generated
   without `--outdir`.
