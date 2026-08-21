@@ -15,6 +15,22 @@
   will not boot. Configuration is expanded at boot by the `env.sh`
   integration, which has no `env.bat` counterpart. This has always been the
   case; it was previously silent.
+- **Breaking:** the `:appup` compiler now fails the build when the `:appup`
+  project key names a file that does not exist, rather than warning and
+  carrying on. The project asked for an appup and cannot have one, and the
+  alternative is a release whose missing upgrade instructions only surface
+  later — in `:systools.make_relup/4`, or during the upgrade itself. Its
+  messages also reach the shell now: diagnostics returned by a compiler are
+  for editors to display inline, and nothing prints them on the command line.
+  A project that only has an appup in some environments should say so, rather
+  than name a file that is not there:
+
+  ```elixir
+  appup: if(Mix.env() == :prod, do: "appup.exs")
+  ```
+
+  A `nil` key is the supported off switch: it removes any output an earlier
+  build left and reports nothing further.
 - **Breaking:** the standard Mix launcher, `bin/<release>`, is no longer
   replaced. It keeps everything Mix gives it — cookie handling, distribution,
   `eval`/`rpc`/`remote`, daemon mode, version selection — and stays current with
@@ -57,6 +73,32 @@
   to manage its own releases.
 - The `GitHub` link in the Hex package metadata pointed at the Castle
   repository rather than Forecastle's.
+- The `:appup` compiler left `<app>.appup` behind in `ebin` once the project
+  stopped asking for one, whether because the source file was deleted or
+  because the `:appup` key was removed. It only worked out where the output
+  went on its way to writing it, so neither of those cases could remove
+  anything. An incremental build — which is what a CI cache produces —
+  therefore went on packaging upgrade instructions from an earlier version of
+  the application, and `release_handler` applied that obsolete plan during a
+  hot upgrade. The stale output is now deleted instead. Leaving the `:appup`
+  key unset is a supported way to turn an appup off for an environment: the
+  earlier output is removed, and beyond saying so once, nothing is reported.
+  Removal needs the compiler to stay in `:compilers` — dropping it from the
+  list stops it running at all, as it would any Mix compiler.
+- The `:appup` project key is resolved relative to the project file, as the
+  README has always said it is, rather than to whatever the working directory
+  happens to be. That is what makes "the source is missing" a trustworthy
+  verdict, now that it deletes the output and fails the build.
+- The `:appup` compiler returned a bare diagnostic where `Mix.Task.Compiler`
+  expects a list of them, so Mix discarded it and reported that the compiler
+  had misbehaved instead of saying what was wrong. It also ignored the result
+  of writing the appup, and so reported success when the write had failed.
+- The appup was written as the formatter produced it, which is Unicode
+  chardata rather than iodata. An appup containing a codepoint above 255 —
+  a module or term with a non-ASCII name — failed to write at all, and one
+  between 128 and 255 was written as a lone byte that `:file.consult/1`
+  cannot read back, so the build reported success and left behind an appup
+  that `systools` will not parse. It is encoded as UTF-8 now.
 
 ### Upgrading an existing deployment
 
