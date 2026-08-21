@@ -74,6 +74,13 @@
   directory has to exist. Post-assembly still copies the relup it finds in the
   project root, which is where the default puts it, so `--outdir` is for
   generating a relup to look at or to keep - not for feeding one to a release.
+- Assembling a release checked only that a `relup` existed in the project
+  root before packaging it, so an upgrade plan for another version — or the
+  remains of a write that was interrupted — was copied in and later applied by
+  `release_handler` as this version's plan. The relup is now read and its
+  target version checked against the release being assembled, and assembly
+  fails if it does not match or cannot be read as an upgrade plan at all. A
+  build that was silently packaging the wrong plan will now stop instead.
 - `mix forecastle.relup` discarded arguments it did not recognise, so a
   mistyped switch, or a path given without one, generated a relup between
   releases the caller had not named instead of reporting the mistake. Omitting

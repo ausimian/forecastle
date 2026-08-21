@@ -161,14 +161,43 @@ defmodule Forecastle do
     File.cp!(Path.join(vp, "#{name}.rel"), Path.join([path, "releases", "#{name}-#{vsn}.rel"]))
   end
 
-  defp copy_relup(%Mix.Release{version_path: vp}) do
+  defp copy_relup(%Mix.Release{version: vsn, version_path: vp}) do
     relup =
       Mix.Project.project_file()
       |> Path.dirname()
       |> Path.join("relup")
 
     if File.exists?(relup) do
+      verify_relup!(relup, vsn)
       File.cp!(relup, Path.join(vp, "relup"))
+    end
+  end
+
+  # The relup is produced by a separate `mix forecastle.relup` run, so nothing
+  # about being here says it belongs to the release being assembled. Packaging
+  # one for another version is worse than packaging none at all: nothing checks
+  # it again, and `release_handler` applies it as this version's upgrade plan.
+  # `mix forecastle.relup --outdir` makes that reachable - generation succeeds
+  # elsewhere and an older relup is left sitting here - and so does a write
+  # interrupted partway through. Fail the build instead.
+  defp verify_relup!(relup, vsn) do
+    wanted = to_charlist(vsn)
+
+    case :file.consult(to_charlist(relup)) do
+      {:ok, [{^wanted, _up, _down}]} ->
+        :ok
+
+      {:ok, [{other, _up, _down}]} ->
+        Mix.raise(
+          "#{relup} is an upgrade plan for #{other}, but this release is #{vsn}. " <>
+            "Generate the relup for #{vsn} into the project root, or remove the stale one."
+        )
+
+      {:ok, terms} ->
+        Mix.raise("#{relup} is not an upgrade plan: #{inspect(terms)}")
+
+      {:error, reason} ->
+        Mix.raise("#{relup} could not be read as an upgrade plan: #{inspect(reason)}")
     end
   end
 

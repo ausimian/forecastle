@@ -165,13 +165,58 @@ defmodule Forecastle.AssemblyTest do
 
   describe "relup" do
     test "is copied into the version path when the project has one" do
-      relup = Path.join(Forecastle.Fixture.workspace(), "relup")
-      on_exit(fn -> File.rm(relup) end)
-      File.write!(relup, "%% placeholder\n")
+      contents = relup_for(@vsn)
+      write_relup!(contents)
 
       release = assemble!(into: "rel-relup")
 
-      assert File.read!(Path.join(release, "releases/#{@vsn}/relup")) == "%% placeholder\n"
+      assert File.read!(Path.join(release, "releases/#{@vsn}/relup")) == contents
     end
+
+    test "is refused when it is an upgrade plan for another version" do
+      # The relup comes from a separate `mix forecastle.relup` run, so a stale
+      # one can be sitting here - `--outdir` sends a successful generation
+      # somewhere else and leaves this one behind. Packaging it would hand
+      # `release_handler` the wrong version's instructions.
+      write_relup!(relup_for("9.9.9"))
+
+      output = assemble_failure!("rel-relup-stale")
+
+      assert output =~ "is an upgrade plan for 9.9.9"
+    end
+
+    test "is refused when it is not an upgrade plan at all" do
+      # What an interrupted write leaves behind. Existence was the only check.
+      write_relup!("%% placeholder\n")
+
+      output = assemble_failure!("rel-relup-partial")
+
+      assert output =~ "is not an upgrade plan"
+    end
+  end
+
+  defp relup_for(vsn), do: ~s({"#{vsn}", [], []}.\n)
+
+  # `mix/2` rather than `mix!/2`: assembly is meant to fail here, and what it
+  # says while failing is the thing under test.
+  defp assemble_failure!(into) do
+    workspace = Forecastle.Fixture.workspace()
+    path = Path.join(workspace, into)
+    File.rm_rf!(path)
+
+    {output, status} =
+      mix(
+        ["release", "sample", "--overwrite", "--path", path],
+        [{"SAMPLE_VSN", @vsn}, {"MIX_BUILD_ROOT", Path.join(workspace, "_build-#{@vsn}")}]
+      )
+
+    assert status != 0, "assembly was expected to fail:\n\n#{output}"
+    output
+  end
+
+  defp write_relup!(contents) do
+    relup = Path.join(Forecastle.Fixture.workspace(), "relup")
+    on_exit(fn -> File.rm(relup) end)
+    File.write!(relup, contents)
   end
 end
