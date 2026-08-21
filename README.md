@@ -160,7 +160,13 @@ for you. The steps are as follows:
      ]
    end
    ```
-   
+
+The compiler owns `<app>.appup` for the whole of its life. It rewrites it on every
+build, and deletes it again if the source goes away or the `:appup` key is dropped,
+so that an incremental build cannot ship upgrade instructions belonging to an
+earlier version. Naming a file that does not exist is a compilation error: the
+project asked for an appup and cannot have one.
+
 ## Relup Generation
 
 Forecastle contains a mix task, `forecastle.relup`, that simplifies the generation of

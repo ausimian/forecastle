@@ -15,6 +15,13 @@
   will not boot. Configuration is expanded at boot by the `env.sh`
   integration, which has no `env.bat` counterpart. This has always been the
   case; it was previously silent.
+- **Breaking:** the `:appup` compiler now fails the build when the `:appup`
+  project key names a file that does not exist, rather than warning and
+  carrying on. The project asked for an appup and cannot have one, and the
+  alternative is a release whose missing upgrade instructions only surface
+  later — in `:systools.make_relup/4`, or during the upgrade itself. Its
+  messages also reach the shell now: diagnostics returned by a compiler are
+  for editors to display inline, and nothing prints them on the command line.
 - **Breaking:** the standard Mix launcher, `bin/<release>`, is no longer
   replaced. It keeps everything Mix gives it — cookie handling, distribution,
   `eval`/`rpc`/`remote`, daemon mode, version selection — and stays current with
@@ -57,6 +64,22 @@
   to manage its own releases.
 - The `GitHub` link in the Hex package metadata pointed at the Castle
   repository rather than Forecastle's.
+- The `:appup` compiler left `<app>.appup` behind in `ebin` once the project
+  stopped asking for one, whether because the source file was deleted or
+  because the `:appup` key was removed. It only worked out where the output
+  went on its way to writing it, so neither of those cases could remove
+  anything. An incremental build — which is what a CI cache produces —
+  therefore went on packaging upgrade instructions from an earlier version of
+  the application, and `release_handler` applied that obsolete plan during a
+  hot upgrade. The stale output is now deleted instead.
+- The `:appup` project key is resolved relative to the project file, as the
+  README has always said it is, rather than to whatever the working directory
+  happens to be. That is what makes "the source is missing" a trustworthy
+  verdict, now that it deletes the output and fails the build.
+- The `:appup` compiler returned a bare diagnostic where `Mix.Task.Compiler`
+  expects a list of them, so Mix discarded it and reported that the compiler
+  had misbehaved instead of saying what was wrong. It also ignored the result
+  of writing the appup, and so reported success when the write had failed.
 
 ### Upgrading an existing deployment
 
