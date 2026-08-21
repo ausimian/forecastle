@@ -8,7 +8,7 @@ defmodule Sample.MixProject do
       app: :sample,
       version: System.get_env("SAMPLE_VSN", "0.1.0"),
       elixir: "~> 1.18",
-      appup: "appup.exs",
+      appup: appup(),
       compilers: Mix.compilers() ++ [:appup],
       deps: deps(),
       releases: releases()
@@ -38,6 +38,19 @@ defmodule Sample.MixProject do
         steps: steps()
       ]
     ]
+  end
+
+  # Switched by the test suite so that the fixture can be built as a project
+  # that does not ask for an appup at all. "none" rather than an empty value,
+  # which `System.cmd/3` cannot pass: it unsets the variable instead. `nil` is
+  # as close as this can get to dropping the key, and it is close enough - the
+  # compiler reads it through `Mix.Project.config()[:appup]`, which cannot tell
+  # the two apart.
+  defp appup do
+    case System.get_env("SAMPLE_APPUP", "appup.exs") do
+      "none" -> nil
+      path -> path
+    end
   end
 
   # Switched by the test suite so that the warning about unsupported Windows

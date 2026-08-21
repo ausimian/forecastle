@@ -39,7 +39,16 @@ defmodule Forecastle.Fixture do
 
   @doc "Runs `mix` in the workspace, raising on failure."
   def mix!(args, env \\ []) do
-    cmd!(System.find_executable("mix") || "mix", args, env)
+    cmd!(mix_executable(), args, env)
+  end
+
+  @doc """
+  Runs `mix` in the workspace, returning `{output, status}`.
+
+  For the cases where a non-zero exit is the thing under test.
+  """
+  def mix(args, env \\ []) do
+    cmd(mix_executable(), args, env)
   end
 
   @doc "Runs a command in the workspace, raising on a non-zero exit."
@@ -62,6 +71,8 @@ defmodule Forecastle.Fixture do
     opts = Keyword.merge([cd: workspace(), stderr_to_stdout: true, env: env(env)], opts)
     System.cmd(exe, args, opts)
   end
+
+  defp mix_executable, do: System.find_executable("mix") || "mix"
 
   defp ensure_prepared(nil) do
     File.mkdir_p!(@workspace)
