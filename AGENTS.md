@@ -86,6 +86,12 @@ configures distribution without one.
   `env.sh` integration and there is no `env.bat` counterpart, so a `.bat`
   launcher looks for a `sys.config` nothing creates. Assembly warns. Real
   support is a feature, not a fix.
+- **Root scripts do not update through a hot upgrade.** `release_handler`
+  extracts with `keep_old_files`, so `bin/<release>` and `bin/castle` are
+  whatever the deployment was first built with. New files do appear, so a
+  migrating deployment gains `bin/castle`, but keeps its old launcher. Mix's own
+  launcher has always behaved this way; do not add a dispatcher to work around
+  it without deciding that question for `bin/<release>` too.
 - **Failed Castle operations exit 0.** Castle catches `release_handler` errors
   and returns `:ok`, and `rpc` only reports whether evaluation completed, so
   `bin/castle` cannot surface them. Needs Castle to report failures —

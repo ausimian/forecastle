@@ -52,6 +52,23 @@
 - The `GitHub` link in the Hex package metadata pointed at the Castle
   repository rather than Forecastle's.
 
+### Upgrading an existing deployment
+
+OTP's `release_handler` extracts release tarballs with `keep_old_files`, so a
+hot upgrade never replaces files that already exist at the top level. Upgrading
+a deployment that was built by an earlier Forecastle therefore leaves its old
+`bin/<release>` in place: the upgrade succeeds and `bin/castle` appears, since
+that file is new, but the old launcher and its release management commands
+remain until they are replaced out of band.
+
+Replace the contents of `bin` from the new release when migrating, or the
+deployment keeps running the launcher Forecastle used to generate - including
+the version argument handling fixed in this release.
+
+This applies to `bin/castle` too: once installed, later changes to it will not
+reach an existing deployment through a hot upgrade. That is the same property
+Mix's own `bin/<release>` has always had.
+
 ### Known limitations
 
 - Castle prints `release_handler` failures and returns normally, so a failed

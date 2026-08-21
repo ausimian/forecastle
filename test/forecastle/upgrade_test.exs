@@ -178,6 +178,13 @@ defmodule Forecastle.UpgradeTest do
   end
 
   defp make_relup!(from, to) do
+    # mix forecastle.relup returns :error on failure without a non-zero exit,
+    # so mix! cannot detect that. Clear any earlier relup first, or a stale one
+    # from a previous run would satisfy the assertion below and the upgrade
+    # would be built from an obsolete plan.
+    relup = Path.join(Fixture.workspace(), "relup")
+    File.rm(relup)
+
     mix!(
       [
         "forecastle.relup",
@@ -189,8 +196,12 @@ defmodule Forecastle.UpgradeTest do
       [{"SAMPLE_VSN", @to}, {"MIX_BUILD_ROOT", Path.join(Fixture.workspace(), "_build-#{@to}")}]
     )
 
-    assert File.exists?(Path.join(Fixture.workspace(), "relup")),
-           "mix forecastle.relup did not produce a relup"
+    assert File.exists?(relup), "mix forecastle.relup did not produce a relup"
+
+    # And that it is a plan between these two versions, not merely a file.
+    contents = File.read!(relup)
+    assert contents =~ ~s("#{@to}"), "relup does not target #{@to}:\n\n#{contents}"
+    assert contents =~ ~s("#{@from}"), "relup has no path from #{@from}:\n\n#{contents}"
   end
 
   defp start!(deploy) do
