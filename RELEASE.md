@@ -16,18 +16,32 @@
   therefore taken to settle nothing either way, and `install` polls
   `Castle.running/1` until the version is running - exiting 0 only then, and
   non-zero on a real failure or if the version never becomes the running one.
-  `CASTLE_INSTALL_TIMEOUT` sets how long it waits, in seconds, and defaults to
-  300: how long a reboot takes is a property of the system being upgraded. It
-  is a deadline in elapsed time rather than a count of attempts, so the time
-  the attempts themselves take counts against it. The clock is whole seconds,
-  so the wait can come out up to a second short of the number given - never
-  longer than it.
+  What the install itself printed is held back until the version has been
+  confirmed. Only then does it go to standard output as the report of success it
+  is; if the version is never confirmed, it goes to standard error with the
+  rest of the diagnosis instead, so nothing on the success stream ever describes
+  an install that did not take effect.
+
+  `CASTLE_INSTALL_TIMEOUT` sets how long it keeps asking, in seconds, and
+  defaults to 300, with 86400 the most it accepts: how long a reboot takes is a
+  property of the system being upgraded. It is a deadline in elapsed time
+  rather than a count of attempts, so the time the attempts themselves take
+  counts against it, and the clock is whole seconds, so the wait can come out
+  up to a second short of the number given.
+
+  It is a deadline for the *retrying*, not a limit on any single question.
+  Nothing can interrupt one already in flight: `rpc` reaches the node through
+  `:erpc`, which waits indefinitely, so a node that holds the connection open
+  without answering holds the attempt with it - as it would hold the install
+  itself, which happens before the deadline exists at all. An operator who
+  needs a hard bound has to impose one from outside, with `timeout(1)` or
+  whatever runs the deployment.
 
   Worth knowing before it surprises anyone: a lost connection is exactly what a
   successful restart looks like from out here, and so is a wrong cookie, or a
-  node that was already down. `install` polls those to the timeout and then
-  fails, rather than failing at once. That is honest - it genuinely cannot tell
-  whether the system is coming back - but with the default it means a
+  node that was already down. `install` asks about those until the deadline and
+  then fails, rather than failing at once. That is honest - it genuinely cannot
+  tell whether the system is coming back - but with the default it means a
   five-minute wait for a typo in `RELEASE_COOKIE`. Set `CASTLE_INSTALL_TIMEOUT`
   low when driving a system that is known to be reachable.
 
@@ -84,9 +98,14 @@
   closed the sigil and ran arbitrary code on the node with the release
   cookie's authority. `bin/castle` now refuses the characters that can end
   the sigil, escape within it, or start an interpolation, along with the
-  path separator. Everything else is passed through, since Mix does not
-  constrain a release version. The same sink existed in the launcher
-  Forecastle used to generate.
+  path separator, and control characters: a version is echoed back in the
+  messages that report a failure to act on it, so one carrying a newline can
+  add a whole line of its own to that output - including a forgery of the
+  launcher's disconnect diagnostic, which `install` reads to decide whether a
+  failure was really a reboot, and which would have it confirm and report a
+  success for an install that had failed. Everything else is passed through,
+  since Mix does not constrain a release version. The same sink existed in the
+  launcher Forecastle used to generate.
 
 ### Fixed
 

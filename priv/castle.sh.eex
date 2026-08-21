@@ -30,18 +30,27 @@ NOTHING_TO_COMMIT="No release is awaiting commit. Pass a version explicitly."
 # generous by default, and overridable.
 CASTLE_INSTALL_TIMEOUT="${CASTLE_INSTALL_TIMEOUT:-300}"
 install_poll_interval=2
+install_timeout_max=86400
 
 # Versions reach the running node as Elixir source, inside a ~s() sigil, so a
 # version able to end that sigil would have the remainder of it evaluated with
 # the release cookie's authority. Three things can do that - the bracket pair
 # that delimits it, the backslash that escapes within it, and the # that starts
 # an interpolation - and the path separator is refused alongside them because
-# the version also names a tarball. Everything else is inert inside the sigil
-# and is allowed: Mix does not constrain a release version, so refusing more
-# than this would reject versions that assemble and boot perfectly well.
+# the version also names a tarball.
+#
+# Control characters are refused for a second reason: the version is echoed
+# back inside the messages that report a failure to act on it, so one carrying
+# a newline can add a whole line of its own to that output - including a
+# forgery of the launcher's disconnect diagnostic, which install reads to decide
+# whether a failure was really a reboot. Nothing legitimate needs them.
+#
+# Everything else is inert inside the sigil and is allowed: Mix does not
+# constrain a release version, so refusing more than this would reject versions
+# that assemble and boot perfectly well.
 validate_vsn () {
   case "$1" in
-    "" | *"("* | *")"* | *"#"* | *"\\"* | *"/"*)
+    "" | *"("* | *")"* | *"#"* | *"\\"* | *"/"* | *[[:cntrl:]]*)
       echo "ERROR: $1 is not a usable release version" >&2
       exit 1
       ;;
@@ -61,6 +70,46 @@ castle_rpc () {
   exec "$RELEASE_LAUNCHER" rpc "$1"
 }
 
+# The timeout as a plain decimal number of seconds, or a complaint and a
+# non-zero return if it is not one that can be worked with.
+#
+# Called before anything reaches the launcher. Arithmetic on the raw value
+# would otherwise be the first thing to notice a problem, and by then the
+# install would have run and changed which release the system is on, with the
+# script aborting before anything could confirm it.
+#
+# Leading zeros are stripped because shell arithmetic reads them as octal: 060
+# would quietly mean 48 seconds, and 08 is not a number at all in either sh or
+# dash. A value too long to be an integer is refused rather than left to
+# overflow into a deadline already past, or a negative one.
+canonical_timeout () {
+  case $1 in
+    "" | *[!0-9]*)
+      echo "ERROR: CASTLE_INSTALL_TIMEOUT must be a whole number of seconds," \
+           "got: $1" >&2
+      return 1
+      ;;
+  esac
+
+  seconds=$1
+  while :; do
+    case $seconds in
+      0[0-9]*) seconds=${seconds#0} ;;
+      *) break ;;
+    esac
+  done
+
+  # The length test keeps the comparison itself away from anything that could
+  # overflow; the comparison is what applies the limit.
+  if [ "${#seconds}" -gt 9 ] || [ "$seconds" -gt "$install_timeout_max" ]; then
+    echo "ERROR: CASTLE_INSTALL_TIMEOUT must be at most" \
+         "${install_timeout_max}s, got: $1" >&2
+    return 1
+  fi
+
+  echo "$seconds"
+}
+
 # Installs a version and then confirms that it is the one running.
 #
 # release_handler replies as soon as it has accepted an upgrade, and for a
@@ -76,32 +125,30 @@ castle_rpc () {
 # Not exec'd, unlike the other commands, because there is something to do after
 # the install: the status this returns with is this function's to report.
 install_and_confirm () {
-  case $CASTLE_INSTALL_TIMEOUT in
-    "" | *[!0-9]*)
-      echo "ERROR: CASTLE_INSTALL_TIMEOUT must be a whole number of seconds," \
-           "got: $CASTLE_INSTALL_TIMEOUT" >&2
-      exit 1
-      ;;
-  esac
+  install_timeout=$(canonical_timeout "$CASTLE_INSTALL_TIMEOUT") || exit 1
 
   # Whether the node went away has to be told apart from any other failure, and
   # only what the launcher reports says which it was, so the output is captured
-  # rather than left to flow past. It is put back on the stream that suits the
-  # outcome: what a successful install reports on standard output, and what a
-  # failed one has to say on standard error, where a caller that redirects one
-  # and not the other looks for it.
+  # rather than left to flow past.
   if install_output=$("$RELEASE_LAUNCHER" rpc "Castle.install(~s($1))" 2>&1); then
     install_status=0
   else
     install_status=$?
   fi
 
-  if [ -n "$install_output" ]; then
-    if [ "$install_status" -eq 0 ]; then
-      echo "$install_output"
-    else
-      echo "$install_output" >&2
-    fi
+  held_output=""
+
+  if [ "$install_status" -eq 0 ]; then
+    # Held, not printed. What the install said is only a report of success once
+    # the version has been seen running, and the confirmation below can still
+    # find a rollback or run out of time - at which point a "Now running ..."
+    # already on standard output would be a lie that automation reads.
+    held_output=$install_output
+  elif [ -n "$install_output" ]; then
+    # Nothing to hold back: whatever a failed install printed is not a report of
+    # success, so it is said now and on standard error, where a caller that
+    # redirects one stream and not the other looks for it.
+    echo "$install_output" >&2
   fi
 
   if [ "$install_status" -ne 0 ]; then
@@ -122,13 +169,21 @@ install_and_confirm () {
     fi
   fi
 
-  # A deadline in elapsed time, not a number of attempts: the operator gave a
-  # number of seconds, and the time each attempt itself takes has to count
-  # against it as much as the sleeps do. The first attempt is made straight
-  # away, and the last one at the deadline, so a confirmation that arrives just
-  # as time runs out still counts. The clock is whole seconds, so the wait can
-  # come out up to a second short of the number given - never longer than it.
-  deadline=$(( $(date +%s) + CASTLE_INSTALL_TIMEOUT ))
+  # A deadline for when to stop retrying, in elapsed time rather than a number
+  # of attempts: the operator gave seconds, and the time each attempt itself
+  # takes has to count against them as much as the sleeps do. The first attempt
+  # is made straight away and the last at the deadline, so a confirmation that
+  # arrives just as time runs out still counts. The clock is whole seconds, so
+  # the wait can come out up to a second short of the number given.
+  #
+  # It bounds the retrying, not any single call. Nothing here can interrupt an
+  # attempt already in flight: rpc reaches the node through :erpc, which waits
+  # indefinitely, so a node that holds the connection open without answering
+  # holds the attempt with it - as it would hold the install itself, which
+  # happens before any of this. An operator who needs a hard bound has to
+  # impose one from outside, with timeout(1) or whatever their scheduler
+  # offers.
+  deadline=$(( $(date +%s) + install_timeout ))
 
   # Each attempt says nothing while there is another one to come - a node that
   # is still rebooting is not news. What the last one saw is worth having,
@@ -136,16 +191,28 @@ install_and_confirm () {
   # came back.
   while :; do
     if confirm_output=$("$RELEASE_LAUNCHER" rpc "Castle.running(~s($1))" 2>&1); then
+      # Only now is what the install said a report of success.
+      if [ -n "$held_output" ]; then
+        echo "$held_output"
+      fi
+
       return 0
     fi
 
     now=$(date +%s)
     if [ "$now" -ge "$deadline" ]; then
+      # Held back until the outcome was known, and the outcome is failure, so
+      # it goes out with the diagnosis rather than to the stream that says the
+      # install worked.
+      if [ -n "$held_output" ]; then
+        echo "$held_output" >&2
+      fi
+
       if [ -n "$confirm_output" ]; then
         echo "$confirm_output" >&2
       fi
 
-      echo "ERROR: $1 is not the running release, ${CASTLE_INSTALL_TIMEOUT}s after" \
+      echo "ERROR: $1 is not the running release, ${install_timeout}s after" \
            "installing it" >&2
       exit 1
     fi
@@ -231,9 +298,14 @@ The known commands are:
 
 An upgrade is not complete when the system accepts it: one that restarts the
 emulator is still to reboot, and one that replaces the emulator finishes on the
-way back up. So install waits for the version to become the one running, for up
-to CASTLE_INSTALL_TIMEOUT seconds ($CASTLE_INSTALL_TIMEOUT), and fails if it
-does not.
+way back up. So install asks the system what it is running until it answers
+with the version installed, and fails if it never does.
+
+CASTLE_INSTALL_TIMEOUT is how long it keeps asking, in seconds
+($CASTLE_INSTALL_TIMEOUT, at most ${install_timeout_max}). It bounds the
+asking, not an individual question: a node that keeps the connection open
+without answering is waited on indefinitely, so a hard limit has to come from
+outside, from timeout(1) or whatever runs this.
 " >&2
 
     if [ -n "$1" ]; then

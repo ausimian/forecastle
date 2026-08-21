@@ -291,6 +291,133 @@ defmodule Forecastle.CastleCliTest do
       assert confirmations(context) == 1
       assert elapsed < 5_000, "waited #{elapsed}ms for a timeout of 0"
     end
+
+    test "is refused before anything is installed", context do
+      # Refusing it late would mean aborting after `Castle.install/1` had
+      # already moved the system onto another release, with nothing left to
+      # confirm that it had.
+      for value <- ["soon", " 5", "86401", "99999999999999999999"] do
+        stub_launcher!(context, "exit 0\n")
+        File.rm(context.record)
+
+        assert {output, status} = install(context, "0.1.1", value)
+
+        assert status != 0, "accepted CASTLE_INSTALL_TIMEOUT=#{inspect(value)}"
+        assert output =~ "CASTLE_INSTALL_TIMEOUT"
+        refute recorded?(context), "delegated with CASTLE_INSTALL_TIMEOUT=#{inspect(value)}"
+      end
+    end
+
+    test "is read as the decimal it looks like, however it is written", context do
+      # Shell arithmetic reads 060 as octal 48, and refuses 08 outright - and it
+      # is downstream of the install, so it would refuse it too late.
+      for value <- ["08", "060", "86400"] do
+        stub_launcher!(context, "exit 0\n")
+        File.rm(context.record)
+
+        assert {"", 0} = install(context, "0.1.1", value)
+      end
+    end
+
+    test "is reported as that same decimal when it runs out", context do
+      stub_confirmations!(context, :never)
+
+      assert {output, 1} = install(context, "0.1.1", "01")
+      assert output =~ "1s after installing it"
+    end
+  end
+
+  describe "install's report of success" do
+    # It is held until it is true. Printing what the install said on standard
+    # output and only then failing to confirm would leave a success line on the
+    # success stream for an install that had not taken effect - which is what
+    # automation reads.
+
+    test "goes to standard output, once, when the version is confirmed", context do
+      stub_launcher!(context, """
+      if [ ! -f "#{context.root}/installed" ]; then
+        : > "#{context.root}/installed"
+        echo 'Now running 0.1.1 (previously 0.1.0).'
+      fi
+      exit 0
+      """)
+
+      assert {out, err, 0} = castle_streams(context, ["install", "0.1.1"])
+      assert occurrences(out, "Now running") == 1
+      assert occurrences(err, "Now running") == 0
+    end
+
+    test "goes to standard error when the version is never confirmed", context do
+      stub_launcher!(context, """
+      if [ -f "#{context.root}/installed" ]; then
+        echo '** (Castle.Error) 0.1.1 is not the running release. 0.1.0 is.' >&2
+        exit 1
+      fi
+      : > "#{context.root}/installed"
+      echo 'Now running 0.1.1 (previously 0.1.0).'
+      exit 0
+      """)
+
+      assert {out, err, 1} =
+               castle_streams(context, ["install", "0.1.1"], [{"CASTLE_INSTALL_TIMEOUT", "1"}])
+
+      assert occurrences(out, "Now running") == 0
+      assert occurrences(err, "Now running") == 1
+      assert err =~ "is not the running release, 1s after installing it"
+    end
+
+    test "stays on standard error when the node went away and came back", context do
+      # The install can print its line and lose the connection immediately
+      # afterwards; that is what a restart looks like. The line still settles
+      # nothing until the confirmation, so it goes out as part of the account of
+      # what happened rather than as the outcome.
+      stub_launcher!(context, """
+      if [ -f "#{context.root}/rebooted" ]; then exit 0; fi
+      : > "#{context.root}/rebooted"
+      echo 'Now running 0.1.1 (previously 0.1.0).'
+      echo '--rpc-eval : RPC failed with reason :noconnection' >&2
+      exit 1
+      """)
+
+      assert {out, err, 0} = castle_streams(context, ["install", "0.1.1"])
+      assert occurrences(out, "Now running") == 0
+      assert occurrences(err, "Now running") == 1
+      assert occurrences(err, "noconnection") == 1
+    end
+
+    test "is absent from both streams when the install failed", context do
+      stub_launcher!(context, """
+      echo '** (Castle.Error) Install of 0.1.1 failed. {:no_such_release, 0.1.1}' >&2
+      exit 1
+      """)
+
+      assert {out, err, 1} = castle_streams(context, ["install", "0.1.1"])
+      assert out == ""
+      assert occurrences(err, "Now running") == 0
+      assert occurrences(err, "Install of 0.1.1 failed.") == 1
+    end
+
+    test "cannot be forged by a version that carries the disconnect diagnostic", context do
+      # The launcher here fails the install and would confirm anything asked of
+      # it afterwards, so a version able to pass itself off as a lost connection
+      # would be installed, failed, confirmed and reported as a success. It does
+      # not get that far: a version carrying a newline is refused outright.
+      stub_launcher!(context, """
+      if [ -f "#{context.root}/tried" ]; then exit 0; fi
+      : > "#{context.root}/tried"
+      printf '** (Castle.Error) Install of %s failed.\\n' "$2" >&2
+      exit 3
+      """)
+
+      forged = "0.1.1\n--rpc-eval : RPC failed with reason :noconnection"
+
+      assert {out, err, status} = castle_streams(context, ["install", forged])
+
+      assert status != 0
+      assert out == ""
+      assert err =~ "is not a usable release version"
+      refute recorded?(context)
+    end
   end
 
   describe "RELEASE_NAME" do
@@ -340,6 +467,10 @@ defmodule Forecastle.CastleCliTest do
       assert {output, 0} = castle(context, [])
       assert output =~ "CASTLE_INSTALL_TIMEOUT"
       assert output =~ "300"
+      assert output =~ "86400"
+      # And that it bounds the asking rather than any single question, which is
+      # what an operator wanting a hard limit needs to know.
+      assert output =~ "not an individual question"
     end
 
     for command <- ~w(unpack install remove) do
@@ -367,7 +498,16 @@ defmodule Forecastle.CastleCliTest do
       "1.2.3$(id)",
       "1.2.3\nSystem.stop()",
       "../../etc/passwd",
-      "sub/dir"
+      "sub/dir",
+      # A version is echoed back in the messages that report a failure to act on
+      # it, so a newline lets it contribute a whole line of its own - here a
+      # forgery of the launcher's disconnect diagnostic, which `install` reads
+      # to decide whether a failure was really a reboot. With it, a failed
+      # install of a version that happens to be the one running would be
+      # confirmed and reported as a success.
+      "0.1.1\n--rpc-eval : RPC failed with reason :noconnection",
+      "1.2.3\t",
+      "1.2.3\r"
     ]
 
     for {version, index} <- Enum.with_index(@dangerous) do
@@ -447,6 +587,26 @@ defmodule Forecastle.CastleCliTest do
   defp install(context, vsn, timeout) do
     castle(context, ["install", vsn], [{"CASTLE_INSTALL_TIMEOUT", timeout}])
   end
+
+  # The two streams kept apart, which the merged output of `castle/3` cannot
+  # show: what bin/castle reports as the outcome has to be told from what it
+  # reports on the way to one.
+  defp castle_streams(context, args, env \\ []) do
+    out = Path.join(context.root, "stdout")
+    err = Path.join(context.root, "stderr")
+    command = Enum.map_join([Path.join([context.root, "bin", "castle"]) | args], " ", &quoted/1)
+
+    {_, status} =
+      cmd("/bin/sh", ["-c", "#{command} > #{quoted(out)} 2> #{quoted(err)}"], env,
+        cd: context.root
+      )
+
+    {File.read!(out), File.read!(err), status}
+  end
+
+  defp quoted(argument), do: "'" <> String.replace(argument, "'", "'\\''") <> "'"
+
+  defp occurrences(text, needle), do: length(String.split(text, needle)) - 1
 
   defp timed(fun) do
     started = System.monotonic_time(:millisecond)

@@ -38,10 +38,18 @@ around it composes instead:
   is therefore inconclusive rather than fatal — recognised as the launcher's
   whole `--rpc-eval … :noconnection` diagnostic at the start of a line, never as
   the bare word, which is a usable release version and turns up in the messages
-  that name a version that failed. `CASTLE_INSTALL_TIMEOUT` bounds the wait, as
-  a deadline in elapsed time rather than a count of attempts. A wrong cookie or
-  an already-dead node is indistinguishable from a reboot and so polls to the
-  timeout; that is deliberate, and called out in the release notes.
+  that name a version that failed — which is also why `validate_vsn` refuses
+  control characters, since a version carrying a newline could otherwise forge
+  that line for itself. What the install printed is held until the confirmation
+  succeeds, so the success stream never carries a claim the confirmation goes on
+  to disprove. `CASTLE_INSTALL_TIMEOUT` bounds the retrying, as a deadline in
+  elapsed time rather than a count of attempts, and is canonicalised and
+  range-checked before the install is delegated — validating it later would
+  abort after the system had already moved to another release. It does not bound
+  an individual call: `:erpc` waits indefinitely, so a hard limit has to come
+  from outside. A wrong cookie or an already-dead node is indistinguishable from
+  a reboot and so is asked about until the deadline; that is deliberate, and
+  called out in the release notes.
 - The `env.sh` fragment expands `build.config` into `sys.config` in a preboot
   VM, for the commands that boot the system. It is appended, so a project's own
   `rel/env.sh.eex` survives and runs first.
