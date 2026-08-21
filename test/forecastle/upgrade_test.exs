@@ -126,6 +126,39 @@ defmodule Forecastle.UpgradeTest do
     end
   end
 
+  describe "the working directory the preboot VM runs in" do
+    # The fragment must not move the preboot VM out of the directory the
+    # launcher was invoked from, or a relative RELEASE_VM_ARGS - and any
+    # relative path the configuration itself reads - resolves against the
+    # release root instead. Only make_releases/0 needs the root.
+    test "is the caller's, so a relative RELEASE_VM_ARGS still resolves",
+         %{deploy: deploy} do
+      workspace = Fixture.workspace()
+      vsn = deploy |> Path.join("releases/start_erl.data") |> File.read!() |> vsn_of()
+
+      File.cp!(
+        Path.join(deploy, "releases/#{vsn}/vm.args"),
+        Path.join(workspace, "relative.vm.args")
+      )
+
+      on_exit(fn -> File.rm(Path.join(workspace, "relative.vm.args")) end)
+
+      # cmd/4 runs in the workspace, which is not the release root, so this
+      # only resolves if the preboot VM stayed there too.
+      assert {output, 0} =
+               cmd(Path.join(deploy, "bin/sample"), ["eval", "IO.puts(:evaluated)"], [
+                 {"RELEASE_VM_ARGS", "relative.vm.args"}
+               ]),
+             "eval with a relative RELEASE_VM_ARGS failed"
+
+      assert output =~ "evaluated"
+    end
+
+    test "still lets make_releases find the RELEASES file", %{deploy: deploy} do
+      assert File.exists?(Path.join(deploy, "releases/RELEASES"))
+    end
+  end
+
   describe "unpacking" do
     test "reports success", %{unpacked: unpacked} do
       assert unpacked.output =~ "Unpacked #{@to} ok"
@@ -229,4 +262,7 @@ defmodule Forecastle.UpgradeTest do
   end
 
   defp rpc!(deploy, expression), do: launcher!(deploy, ["rpc", expression])
+
+  # start_erl.data is "<erts vsn> <release vsn>".
+  defp vsn_of(start_erl_data), do: start_erl_data |> String.split() |> List.last()
 end

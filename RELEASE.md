@@ -46,6 +46,10 @@
   configuration, before it assigns `RELEASE_COOKIE`, `RELEASE_NODE`,
   `RELEASE_TMP` and the rest, leaving them unset for `runtime.exs`. The
   integration now applies the launcher's own defaults first.
+- `bin/castle` looked for the launcher at `bin/$RELEASE_NAME`. `RELEASE_NAME`
+  names the node, not the executable, so setting it sent the CLI looking for
+  a launcher that does not exist. It is now passed through to the launcher
+  and the executable is the one named at build time.
 - The `RELEASES` file was created relative to the working directory, so
   starting a release from anywhere other than its root left the system unable
   to manage its own releases.

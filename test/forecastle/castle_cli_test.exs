@@ -104,25 +104,26 @@ defmodule Forecastle.CastleCliTest do
   end
 
   describe "RELEASE_NAME" do
-    test "selects the launcher, as it does for Mix's own HEART_COMMAND", context do
-      File.cp!(
-        Path.join([context.root, "bin", "sample"]),
-        Path.join([context.root, "bin", "other"])
-      )
-
-      assert ["rpc", _] = castle!(context, ["releases"], [{"RELEASE_NAME", "other"}])
+    # RELEASE_NAME names the node. The launcher and the tarballs are named at
+    # build time and do not move when it is set, so nothing here may depend on
+    # an executable called after it. No bin/other is created on purpose: doing
+    # so would hide exactly the defect these pin down.
+    test "does not change which launcher is invoked", context do
+      assert ["rpc", "Castle.releases()"] =
+               castle!(context, ["releases"], [{"RELEASE_NAME", "other"}])
     end
 
     test "does not rename the release tarballs", context do
-      File.cp!(
-        Path.join([context.root, "bin", "sample"]),
-        Path.join([context.root, "bin", "other"])
-      )
-
       assert ["rpc", expression] =
                castle!(context, ["unpack", "0.1.1"], [{"RELEASE_NAME", "other"}])
 
       assert expression == "Castle.unpack(~s(sample-0.1.1))"
+    end
+
+    test "reaches the launcher, so the node it names is still the caller's",
+         %{release: release} do
+      # Passed through the environment rather than consumed here.
+      refute File.read!(Path.join(release, "bin/castle")) =~ "RELEASE_NAME="
     end
   end
 

@@ -14,13 +14,10 @@ readlink_f () {
 SELF=$(readlink_f "$0")
 RELEASE_ROOT="$(CDPATH='' cd "$(dirname "$SELF")/.." && pwd -P)"
 export RELEASE_ROOT
-RELEASE_NAME="${RELEASE_NAME:-"<%= release.name %>"}"
-export RELEASE_NAME
-
-# The launcher is named after the node, following the same convention Mix uses
-# for HEART_COMMAND. The release tarballs, however, are named at build time and
-# are unaffected by RELEASE_NAME, so that prefix is baked in.
-RELEASE_LAUNCHER="$RELEASE_ROOT/bin/$RELEASE_NAME"
+# Both the launcher and the release tarballs are named at build time. Neither
+# is affected by RELEASE_NAME, which names the node and is passed through the
+# environment to the launcher untouched.
+RELEASE_LAUNCHER="$RELEASE_ROOT/bin/<%= release.name %>"
 RELEASE_TARBALL_PREFIX="<%= release.name %>"
 
 NOTHING_TO_COMMIT="No release is awaiting commit. Pass a version explicitly."
@@ -105,7 +102,7 @@ case $1 in
     echo "Usage: $(basename "$0") COMMAND [ARGS]
 
 Manages the releases known to a running system. The system itself is
-controlled through the standard launcher, bin/$RELEASE_NAME.
+controlled through the standard launcher, bin/<%= release.name %>.
 
 The known commands are:
 
