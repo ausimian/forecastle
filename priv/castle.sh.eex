@@ -1,0 +1,86 @@
+#!/bin/sh
+set -e
+
+readlink_f () {
+  cd "$(dirname "$1")" > /dev/null
+  filename="$(basename "$1")"
+  if [ -h "$filename" ]; then
+    readlink_f "$(readlink "$filename")"
+  else
+    echo "$(pwd -P)/$filename"
+  fi
+}
+
+SELF=$(readlink_f "$0")
+RELEASE_ROOT="$(CDPATH='' cd "$(dirname "$SELF")/.." && pwd -P)"
+export RELEASE_ROOT
+RELEASE_NAME="${RELEASE_NAME:-"<%= release.name %>"}"
+export RELEASE_NAME
+
+# The launcher is named after the node, following the same convention Mix uses
+# for HEART_COMMAND. The release tarballs, however, are named at build time and
+# are unaffected by RELEASE_NAME, so that prefix is baked in.
+RELEASE_LAUNCHER="$RELEASE_ROOT/bin/$RELEASE_NAME"
+RELEASE_TARBALL_PREFIX="<%= release.name %>"
+
+require_vsn () {
+  if [ -z "$2" ]; then
+    echo "ERROR: $1 expects a version as argument" >&2
+    exit 1
+  fi
+}
+
+castle_rpc () {
+  exec "$RELEASE_LAUNCHER" rpc "$1"
+}
+
+case $1 in
+  releases)
+    castle_rpc "Castle.releases()"
+    ;;
+
+  unpack)
+    require_vsn "$1" "$2"
+    castle_rpc "Castle.unpack(~s($RELEASE_TARBALL_PREFIX-$2))"
+    ;;
+
+  install|remove)
+    require_vsn "$1" "$2"
+    castle_rpc "Castle.$1(~s($2))"
+    ;;
+
+  commit)
+    if [ -n "$2" ]; then
+      castle_rpc "Castle.commit(~s($2))"
+    else
+      # No version given: commit whichever release is currently running but not
+      # yet permanent. There is at most one such release at any time.
+      castle_rpc "case :release_handler.which_releases(:current) do
+                    [{_, vsn, _, _} | _] -> Castle.commit(to_string(vsn))
+                    [] -> IO.puts(~s(No release is awaiting commit. Pass a version explicitly.))
+                  end"
+    fi
+    ;;
+
+  *)
+    echo "Usage: $(basename "$0") COMMAND [ARGS]
+
+Manages the releases known to a running system. The system itself is
+controlled through the standard launcher, bin/$RELEASE_NAME.
+
+The known commands are:
+
+    releases       Lists the releases currently known to the system, and their status
+    unpack \"VSN\"   Unpacks $RELEASE_TARBALL_PREFIX-<VSN>.tar.gz
+    install \"VSN\"  Installs VSN and makes it the version that is running now
+    commit [VSN]   Commits VSN, so that it becomes the version that runs on restart.
+                   Defaults to the version that is running now.
+    remove \"VSN\"   Uninstalls VSN from the system
+" >&2
+
+    if [ -n "$1" ]; then
+      echo "ERROR: Unknown command $1" >&2
+      exit 1
+    fi
+    ;;
+esac

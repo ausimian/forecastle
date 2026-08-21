@@ -9,7 +9,7 @@ defmodule Forecastle do
   def steps(tasks \\ [:assemble, :tar]) when is_list(tasks) do
     if idx = Enum.find_index(tasks, &match?(:assemble, &1)) do
       {pre, [:assemble | post]} = Enum.split(tasks, idx)
-      pre ++ [&pre_assemble/1, :assemble, (&post_assemble/1) | post]
+      pre ++ [&__MODULE__.pre_assemble/1, :assemble, (&__MODULE__.post_assemble/1) | post]
     else
       tasks
     end
@@ -27,7 +27,8 @@ defmodule Forecastle do
     release
     |> tap(&add_config_providers/1)
     |> tap(&rename_sys_config/1)
-    |> tap(&restructure_bin_dir/1)
+    |> tap(&install_castle_cli/1)
+    |> tap(&extend_env_script/1)
     |> tap(&copy_runtime_exs/1)
     |> tap(&copy_relfile/1)
     |> tap(&copy_relup/1)
@@ -101,11 +102,31 @@ defmodule Forecastle do
     File.rename(Path.join(vp, "sys.config"), Path.join(vp, "build.config"))
   end
 
-  defp restructure_bin_dir(%Mix.Release{name: name, path: path} = release) do
-    bin_path = Path.join(path, "bin")
-    invoked = Path.join(bin_path, "#{name}")
-    template = Path.join(:code.priv_dir(@app), "script.sh")
-    File.write!(invoked, EEx.eval_file(template, release: release))
+  defp install_castle_cli(%Mix.Release{path: path} = release) do
+    if unix_executables?(release) do
+      castle = Path.join([path, "bin", "castle"])
+      File.write!(castle, render("castle.sh.eex", release))
+      File.chmod!(castle, 0o755)
+    end
+  end
+
+  defp extend_env_script(%Mix.Release{version_path: vp} = release) do
+    env_sh = Path.join(vp, "env.sh")
+
+    if unix_executables?(release) and File.exists?(env_sh) do
+      File.write!(env_sh, render("env.sh.eex", release), [:append])
+    end
+  end
+
+  defp unix_executables?(%Mix.Release{options: options}) do
+    :unix in Keyword.get(options, :include_executables_for, [:unix, :windows])
+  end
+
+  defp render(template, %Mix.Release{} = release) do
+    @app
+    |> :code.priv_dir()
+    |> Path.join(template)
+    |> EEx.eval_file(release: release)
   end
 
   defp copy_runtime_exs(%Mix.Release{version_path: vp}) do

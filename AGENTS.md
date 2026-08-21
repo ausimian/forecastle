@@ -15,12 +15,25 @@ build-time dependency — Forecastle is not intended to be taken directly.
   and adds a `:preboot` boot script that starts `:sasl`, `:compiler`, `:elixir`
   and `:castle`.
 - **`post_assemble/1`** — replays the stashed config providers into
-  `sys.config`, renames `sys.config` to `build.config`, replaces the generated
-  `bin/<name>` launcher with the EEx template in `priv/script.sh`, and copies
+  `sys.config`, renames `sys.config` to `build.config`, writes `bin/castle`,
+  appends the Castle integration to the generated `env.sh`, and copies
   `runtime.exs`, the `.rel` file and any `relup` into the release.
 
 The renaming and provider-stashing exist so that Castle, at runtime, controls
 configuration evaluation rather than the standard Mix launcher.
+
+`bin/<name>` is left exactly as Mix generated it. Everything Forecastle needs
+around it composes instead:
+
+- `bin/castle` is a thin wrapper that shells back through
+  `bin/<name> rpc "Castle.<command>(...)"`, so it inherits cookie handling,
+  distribution and node naming from the standard launcher.
+- The `env.sh` fragment expands `build.config` into `sys.config` in a preboot
+  VM, for the commands that boot the system. It is appended, so a project's own
+  `rel/env.sh.eex` survives and runs first.
+- Version selection needs no code at all: `release_handler` writes the
+  committed version to `releases/start_erl.data`, which is where the standard
+  launcher already reads `RELEASE_VSN` from.
 
 ## Layout
 
@@ -29,7 +42,8 @@ configuration evaluation rather than the standard Mix launcher.
 | `lib/forecastle.ex` | Release step hooks (the whole of the build-time logic) |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
 | `lib/mix/tasks/forecastle.relup.ex` | `mix forecastle.relup` — wraps `:systools.make_relup/4` |
-| `priv/script.sh` | EEx template for the replacement release launcher; supports unpack/install |
+| `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
+| `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
 
 ## Working on this project
 
