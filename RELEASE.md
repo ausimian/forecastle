@@ -36,6 +36,11 @@
 - `mix forecastle.relup` failed with `:systools is not available` in projects
   that do not themselves depend on `:sasl`, because Elixir prunes unused OTP
   applications from the build's code path.
+- Runtime configuration could not read the standard release variables.
+  The launcher sources `env.sh`, and so runs the preboot VM that expands
+  configuration, before it assigns `RELEASE_COOKIE`, `RELEASE_NODE`,
+  `RELEASE_TMP` and the rest, leaving them unset for `runtime.exs`. The
+  integration now applies the launcher's own defaults first.
 - The `RELEASES` file was created relative to the working directory, so
   starting a release from anywhere other than its root left the system unable
   to manage its own releases.
