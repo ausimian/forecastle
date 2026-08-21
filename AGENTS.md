@@ -46,15 +46,21 @@ around it composes instead:
   standard error is what the classifier reads and is passed through to standard
   error, while its standard output is held until the confirmation succeeds. So
   the success stream never carries a claim the confirmation goes on to disprove,
-  and a warning the launcher wrote never comes back out on the wrong stream. Do
-  not merge them again with `2>&1`; merging cannot be undone.
+  and a warning the launcher wrote never comes back out on the wrong stream. The
+  confirmations are split the same way, and their standard error is passed on
+  even when they succeed — a warning is worth no less for arriving as the upgrade
+  is being declared good. Do not merge either with `2>&1`; merging cannot be
+  undone.
 
   Everything able to stop the script is settled before the launcher is invoked:
   the timeout, the clock (`date +%s` is not a conversion POSIX requires, so a
-  system can have a `date` that will not answer), and a writable `RELEASE_TMP`
-  to capture into. Keep that ordering — past the install the system is on
-  another release, so stopping from there leaves it unconfirmed with nothing
-  said about it. Three separate review findings have been that same shape.
+  system can have a `date` that will not answer), and a capture directory, which
+  `install` claims for itself under `RELEASE_TMP` with `mkdir` under `umask 077`
+  — atomic, so it fails rather than following a symlink someone else planted at
+  the name, and private, so nothing inside can be swapped between one open and
+  the next. Keep that ordering — past the install the system is on another
+  release, so stopping from there leaves it unconfirmed with nothing said about
+  it. Four separate review findings have been that same shape.
 
   `CASTLE_INSTALL_TIMEOUT` bounds the retrying, as a deadline in elapsed time
   rather than a count of attempts, measured against the system clock — so a
@@ -64,6 +70,19 @@ around it composes instead:
   hard limit has to come from outside. A wrong cookie or an already-dead node is
   indistinguishable from a reboot and so is asked about until the deadline; that
   is deliberate, and called out in the release notes.
+
+  Do not add signal forwarding or process reaping to make an interrupt stop the
+  upgrade: it cannot. `Kernel.CLI` reaches the node through
+  `:erpc.call`, which uses `spawn_request` with `{reply, error_only}` and
+  `monitor` and **no link** (`erpc.erl:305`), so the remote worker is never
+  signalled when the caller goes away — and OTP's own `spawn_request_abandon/1`
+  documentation says only the `link` option would send an exit signal to an
+  abandoned child. Beneath that, `:release_handler.install_release/1` is a
+  `gen_server:call` (`release_handler.erl:1231`), and the upgrade runs inside
+  that server's `handle_call`, which completes whether or not the caller is
+  still there. Interrupting `bin/castle install` therefore stops the waiting,
+  not the upgrade; the release note says so, and points at `bin/castle
+  releases` for finding out where the system got to.
 - The `env.sh` fragment expands `build.config` into `sys.config` in a preboot
   VM, for the commands that boot the system. It is appended, so a project's own
   `rel/env.sh.eex` survives and runs first.

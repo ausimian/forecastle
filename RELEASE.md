@@ -21,14 +21,17 @@
   success it is; if the version is never confirmed it goes to standard error
   with the rest of the diagnosis instead, so nothing on the success stream ever
   describes an install that did not take effect. What the launcher wrote to
-  standard error stays on standard error throughout: the two streams are
-  captured separately, so a warning from the VM or from the preboot integration
-  arrives where a pipeline watching that stream will find it.
+  standard error stays on standard error throughout - from the install, and from
+  every confirmation after it: the two streams are captured separately, so a
+  warning from the VM or from the preboot integration arrives where a pipeline
+  watching that stream will find it, including when it arrives just as the
+  upgrade is being declared good.
 
   Everything that could refuse to go on is settled before the install runs - the
-  timeout, the clock, and somewhere to capture what the launcher says. Past that
-  point the system is on another release, and stopping there would leave that
-  unsaid and unconfirmed.
+  timeout, the clock, and somewhere to capture what the launcher says, which is
+  a directory `install` creates for itself under `RELEASE_TMP` and removes when
+  it is done. Past that point the system is on another release, and stopping
+  there would leave that unsaid and unconfirmed.
 
   `CASTLE_INSTALL_TIMEOUT` sets how long it keeps asking, in seconds, and
   defaults to 300, with 86400 the most it accepts: how long a reboot takes is a
@@ -55,6 +58,13 @@
   tell whether the system is coming back - but with the default it means a
   five-minute wait for a typo in `RELEASE_COOKIE`. Set `CASTLE_INSTALL_TIMEOUT`
   low when driving a system that is known to be reachable.
+
+  And the other way round: interrupting `bin/castle install` stops the waiting,
+  not the upgrade. The work runs on the system being upgraded, in
+  `release_handler`, and it carries on whether or not anything is still
+  listening - so a version may well become the running one after the command
+  that asked for it has gone. `bin/castle releases` is how to find out where
+  the system actually got to.
 
   Nothing can build a relup that restarts the emulator until
   [#4](https://github.com/ausimian/forecastle/issues/4), so the restart

@@ -369,6 +369,83 @@ defmodule Forecastle.CastleCliTest do
       assert {_output, 3} = castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
       assert File.ls!(tmp) == []
     end
+
+    test "captures into a directory nobody else can reach", context do
+      tmp = Path.join(context.root, "scratch")
+      File.mkdir_p!(tmp)
+
+      stub_launcher!(context, """
+      ls -ld "#{tmp}"/castle-install-* >> "#{context.root}/modes" 2>/dev/null
+      exit 0
+      """)
+
+      assert {_output, 0} = castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
+
+      # RELEASE_TMP can be somewhere shared, so what install captures into is
+      # the caller's alone from the moment it exists.
+      assert File.read!(Path.join(context.root, "modes")) =~ ~r/^drwx------/
+      assert File.ls!(tmp) == []
+    end
+
+    test "refuses a capture directory something else already owns", context do
+      tmp = Path.join(context.root, "scratch")
+      victim = Path.join(context.root, "victim")
+      File.mkdir_p!(tmp)
+      File.mkdir_p!(victim)
+      File.write!(Path.join(victim, "keep"), "precious")
+
+      stub_launcher!(context, "exit 0\n")
+
+      # The preamble runs in the process that goes on to become bin/castle, so
+      # its `$$` is the one bin/castle names the capture after: the symlink
+      # lands exactly where bin/castle will look. Redirecting into that name
+      # would write through it, into a directory chosen by whoever planted it.
+      # Claiming it with mkdir cannot.
+      assert {output, status} =
+               castle_after(
+                 context,
+                 ~s(ln -s "#{victim}" "#{tmp}/castle-install-$$"),
+                 ["install", "0.1.1"],
+                 [{"RELEASE_TMP", tmp}]
+               )
+
+      assert status != 0
+      assert output =~ "cannot claim"
+      refute recorded?(context)
+      assert File.ls!(victim) == ["keep"]
+      assert File.read!(Path.join(victim, "keep")) == "precious"
+    end
+
+    test "gives two installs at once a capture each", context do
+      tmp = Path.join(context.root, "scratch")
+      seen = Path.join(context.root, "seen")
+      File.mkdir_p!(tmp)
+
+      stub_launcher!(context, """
+      ls -d "#{tmp}"/castle-install-* >> "#{seen}" 2>/dev/null
+      exit 0
+      """)
+
+      statuses =
+        [1, 2]
+        |> Task.async_stream(
+          fn _ ->
+            {_output, status} = castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
+            status
+          end,
+          max_concurrency: 2,
+          timeout: 60_000
+        )
+        |> Enum.map(fn {:ok, status} -> status end)
+
+      assert statuses == [0, 0]
+
+      # Named after the process, so neither can claim what the other is using.
+      assert seen |> File.read!() |> String.split("\n", trim: true) |> Enum.uniq() |> length() >=
+               2
+
+      assert File.ls!(tmp) == []
+    end
   end
 
   describe "install's report of success" do
@@ -389,6 +466,27 @@ defmodule Forecastle.CastleCliTest do
       assert {out, err, 0} = castle_streams(context, ["install", "0.1.1"])
       assert occurrences(out, "Now running") == 1
       assert occurrences(err, "Now running") == 0
+    end
+
+    test "does not swallow what the launcher said while confirming", context do
+      # A warning is worth no less for arriving as the upgrade is declared good.
+      # Merging the confirmation's two streams and discarding them on success
+      # lost it at exactly that moment.
+      stub_launcher!(context, """
+      if [ ! -f "#{context.root}/installed" ]; then
+        : > "#{context.root}/installed"
+        echo 'Now running 0.1.1 (previously 0.1.0).'
+        exit 0
+      fi
+      echo 'warning: heard while confirming' >&2
+      exit 0
+      """)
+
+      assert {out, err, 0} = castle_streams(context, ["install", "0.1.1"])
+
+      assert occurrences(out, "Now running") == 1
+      assert occurrences(out, "heard while confirming") == 0
+      assert occurrences(err, "heard while confirming") == 1
     end
 
     test "leaves what the launcher wrote to standard error on standard error", context do
@@ -671,6 +769,15 @@ defmodule Forecastle.CastleCliTest do
   end
 
   defp quoted(argument), do: "'" <> String.replace(argument, "'", "'\\''") <> "'"
+
+  # Runs bin/castle with a shell preamble in front of it, in the same process:
+  # `exec` replaces the shell without changing its process id, so the preamble
+  # can act on the `$$` that bin/castle itself will see.
+  defp castle_after(context, preamble, args, env) do
+    launcher = Enum.map_join([Path.join([context.root, "bin", "castle"]) | args], " ", &quoted/1)
+
+    cmd("/bin/sh", ["-c", preamble <> "\nexec " <> launcher], env, cd: context.root)
+  end
 
   # An environment whose `date` answers with the given shell body, and whose
   # PATH is otherwise the caller's, so that everything else bin/castle runs is
