@@ -130,6 +130,39 @@ defmodule Forecastle.AssemblyTest do
     end
   end
 
+  describe "Windows executables" do
+    # Configuration is withheld from Mix and expanded at boot by the env.sh
+    # integration, which has no env.bat counterpart, so the .bat launcher looks
+    # for a sys.config nothing creates. That predates this change, and assembly
+    # still succeeds, so the build has to say so out loud.
+    test "are warned about, since the release they produce cannot boot" do
+      output = assemble_output!("rel-windows", [{"SAMPLE_EXECUTABLES", "unix,windows"}])
+
+      assert output =~ "Forecastle does not support Windows releases"
+      assert output =~ "include_executables_for: [:unix]"
+    end
+
+    test "produce no warning when the release asks only for unix" do
+      output = assemble_output!("rel-unix-only", [])
+
+      refute output =~ "Forecastle does not support Windows releases"
+    end
+
+    defp assemble_output!(into, env) do
+      workspace = Forecastle.Fixture.workspace()
+      path = Path.join(workspace, into)
+      File.rm_rf!(path)
+
+      mix!(
+        ["release", "sample", "--overwrite", "--path", path],
+        [
+          {"SAMPLE_VSN", "0.1.0"},
+          {"MIX_BUILD_ROOT", Path.join(workspace, "_build-0.1.0")} | env
+        ]
+      )
+    end
+  end
+
   describe "relup" do
     test "is copied into the version path when the project has one" do
       relup = Path.join(Forecastle.Fixture.workspace(), "relup")

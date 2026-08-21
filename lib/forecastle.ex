@@ -32,6 +32,7 @@ defmodule Forecastle do
     |> tap(&copy_runtime_exs/1)
     |> tap(&copy_relfile/1)
     |> tap(&copy_relup/1)
+    |> tap(&warn_unsupported_executables/1)
   end
 
   defp initialize(%Mix.Release{options: options} = release) do
@@ -118,8 +119,27 @@ defmodule Forecastle do
     end
   end
 
-  defp unix_executables?(%Mix.Release{options: options}) do
-    :unix in Keyword.get(options, :include_executables_for, [:unix, :windows])
+  defp unix_executables?(%Mix.Release{} = release) do
+    :unix in executables_for(release)
+  end
+
+  # Configuration is withheld from Mix and expanded at boot instead, and the
+  # integration that expands it is installed into env.sh. There is no env.bat
+  # equivalent, so a Windows launcher looks for a sys.config that nothing
+  # creates. That has always been true, and assembly still succeeds, so say so
+  # rather than let a release that cannot boot leave the build quietly.
+  defp warn_unsupported_executables(%Mix.Release{} = release) do
+    if :windows in executables_for(release) do
+      Mix.shell().error(
+        "warning: Forecastle does not support Windows releases, and the .bat " <>
+          "launcher this release includes will not boot. Set " <>
+          "include_executables_for: [:unix] to stop building one."
+      )
+    end
+  end
+
+  defp executables_for(%Mix.Release{options: options}) do
+    Keyword.get(options, :include_executables_for, [:unix, :windows])
   end
 
   defp render(template, %Mix.Release{} = release) do

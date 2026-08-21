@@ -32,10 +32,20 @@ defmodule Sample.MixProject do
   defp releases do
     [
       sample: [
-        include_executables_for: [:unix],
+        include_executables_for: executables(),
         steps: steps()
       ]
     ]
+  end
+
+  # Switched by the test suite so that the warning about unsupported Windows
+  # executables can be provoked.
+  defp executables do
+    case System.get_env("SAMPLE_EXECUTABLES") do
+      "unix,windows" -> [:unix, :windows]
+      "windows" -> [:windows]
+      _ -> [:unix]
+    end
   end
 
   # Switched by the test suite so that the same fixture can be assembled both

@@ -25,7 +25,12 @@ defmodule Forecastle.CastleCliTest do
 
     record = Path.join(root, "argv")
     stub = Path.join(bin, "sample")
-    File.write!(stub, ~s(#!/bin/sh\nprintf '%s\\0' "$@" > "#{record}"\n))
+
+    File.write!(
+      stub,
+      ~s(#!/bin/sh\nprintf '%s\\0' "$@" > "#{record}"\nprintf '%s' "$CASTLE_STUB_OUTPUT"\n)
+    )
+
     File.chmod!(stub, 0o755)
 
     {:ok, root: root, record: record}
@@ -64,6 +69,37 @@ defmodule Forecastle.CastleCliTest do
     test "says so when there is nothing to commit", context do
       assert ["rpc", expression] = castle!(context, ["commit"])
       assert expression =~ "No release is awaiting commit"
+    end
+
+    test "exits non-zero when there was nothing to commit", context do
+      # Whatever asked for a commit has to be able to tell that none happened.
+      assert {output, status} =
+               castle(context, ["commit"], [
+                 {"CASTLE_STUB_OUTPUT",
+                  "No release is awaiting commit. Pass a version explicitly."}
+               ])
+
+      assert status == 1
+      assert output =~ "No release is awaiting commit"
+    end
+
+    test "exits zero, and reports, when a commit happened", context do
+      assert {output, 0} =
+               castle(context, ["commit"], [
+                 {"CASTLE_STUB_OUTPUT",
+                  "Committed 0.1.1. System restarts will now boot into this version."}
+               ])
+
+      assert output =~ "Committed 0.1.1"
+    end
+
+    test "propagates a failing launcher exit status", context do
+      File.write!(
+        Path.join([context.root, "bin", "sample"]),
+        "#!/bin/sh\necho 'rpc failed' >&2\nexit 3\n"
+      )
+
+      assert {_output, 3} = castle(context, ["commit"])
     end
   end
 

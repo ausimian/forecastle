@@ -4,12 +4,17 @@
   standard launcher. It provides `releases`, `unpack`, `install`, `commit` and
   `remove`, and delegates to the running system through the standard launcher.
 - `bin/castle commit` may now be given no version, in which case it commits
-  whichever release is currently running.
+  whichever release is currently running. It exits non-zero if there was no
+  such release, so that automation can tell nothing was committed.
 - A test suite. It assembles a real release from a fixture application and, in
   the `:e2e` suite, boots it and performs a hot upgrade.
 
 ### Changed
 
+- Assembling a release that includes Windows executables now warns that it
+  will not boot. Configuration is expanded at boot by the `env.sh`
+  integration, which has no `env.bat` counterpart. This has always been the
+  case; it was previously silent.
 - **Breaking:** the standard Mix launcher, `bin/<release>`, is no longer
   replaced. It keeps everything Mix gives it — cookie handling, distribution,
   `eval`/`rpc`/`remote`, daemon mode, version selection — and stays current with

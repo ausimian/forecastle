@@ -23,6 +23,8 @@ export RELEASE_NAME
 RELEASE_LAUNCHER="$RELEASE_ROOT/bin/$RELEASE_NAME"
 RELEASE_TARBALL_PREFIX="<%= release.name %>"
 
+NOTHING_TO_COMMIT="No release is awaiting commit. Pass a version explicitly."
+
 # Versions reach the running node as Elixir source, so a version containing
 # the sigil terminator would close the call and have the remainder evaluated.
 # Reject anything outside the characters a release version can be built from,
@@ -71,10 +73,31 @@ case $1 in
     else
       # No version given: commit whichever release is currently running but not
       # yet permanent. There is at most one such release at any time.
-      castle_rpc "case :release_handler.which_releases(:current) do
+      #
+      # Not exec'd, unlike the other commands, because having nothing to commit
+      # has to leave a non-zero status behind for whatever asked us to commit.
+      if commit_output=$("$RELEASE_LAUNCHER" rpc "case :release_handler.which_releases(:current) do
                     [{_, vsn, _, _} | _] -> Castle.commit(to_string(vsn))
-                    [] -> IO.puts(~s(No release is awaiting commit. Pass a version explicitly.))
-                  end"
+                    [] -> IO.puts(~s($NOTHING_TO_COMMIT))
+                  end"); then
+        commit_status=0
+      else
+        commit_status=$?
+      fi
+
+      if [ -n "$commit_output" ]; then
+        echo "$commit_output"
+      fi
+
+      if [ "$commit_status" -ne 0 ]; then
+        exit "$commit_status"
+      fi
+
+      case $commit_output in
+        *"$NOTHING_TO_COMMIT"*)
+          exit 1
+          ;;
+      esac
     fi
     ;;
 
