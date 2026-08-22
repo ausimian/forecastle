@@ -15,6 +15,8 @@ defmodule Forecastle.UpgradeTest do
 
   use Forecastle.ReleaseCase
 
+  import Forecastle.Deployment
+
   alias Forecastle.Fixture
 
   @moduletag :e2e
@@ -29,7 +31,14 @@ defmodule Forecastle.UpgradeTest do
     deploy = assemble!(into: "deploy", vsn: @from)
     next = assemble!(into: "next", vsn: @to)
 
-    make_relup!(deploy, next)
+    # `--hot`, explicitly, because a hot upgrade is the whole subject of this
+    # suite and the default strategy would not produce one here: `:sample_dep`
+    # is a dependency of the fixture whose version moves with it, and
+    # `mix forecastle.relup`'s `auto` makes a transition that moves an
+    # application the project does not own a restart. Asking for the hot upgrade
+    # also means the task, rather than an assertion further down, is what fails
+    # if the transition ever stops being hot.
+    make_relup!({deploy, @from}, {next, @to}, ["--hot"])
     # Reassemble so that post-assembly copies the relup into the release, and
     # the tarball we are about to hand to release_handler contains it.
     ^next = assemble!(into: "next", vsn: @to)
@@ -44,7 +53,7 @@ defmodule Forecastle.UpgradeTest do
       File.rm(relup)
     end)
 
-    start!(deploy)
+    start!(deploy, [{"SAMPLE_GREETING", "hello-from-runtime"}])
 
     booted = %{
       greeting: rpc!(deploy, "IO.puts(Sample.greeting())"),
@@ -281,59 +290,4 @@ defmodule Forecastle.UpgradeTest do
       assert committed.version == "sample #{@to}"
     end
   end
-
-  defp make_relup!(from, to) do
-    # No --outdir: the relup is wanted in the workspace, which is where
-    # post-assembly looks for one. The task exits non-zero if it could not
-    # generate it, so `mix!` raising is what rules out a relup left over from
-    # an earlier run satisfying the assertions below.
-    relup = Path.join(Fixture.workspace(), "relup")
-
-    mix!(
-      [
-        "forecastle.relup",
-        "--target",
-        Path.join(to, "releases/#{@to}/sample"),
-        "--fromto",
-        Path.join(from, "releases/#{@from}/sample")
-      ],
-      [{"SAMPLE_VSN", @to}, {"MIX_BUILD_ROOT", Path.join(Fixture.workspace(), "_build-#{@to}")}]
-    )
-
-    assert File.exists?(relup), "mix forecastle.relup did not produce a relup"
-
-    # And that it is a plan between these two versions, not merely a file.
-    contents = File.read!(relup)
-    assert contents =~ ~s("#{@to}"), "relup does not target #{@to}:\n\n#{contents}"
-    assert contents =~ ~s("#{@from}"), "relup has no path from #{@from}:\n\n#{contents}"
-  end
-
-  defp start!(deploy) do
-    launcher!(deploy, ["daemon"], [{"SAMPLE_GREETING", "hello-from-runtime"}])
-    await_boot!(deploy, 100)
-  end
-
-  defp await_boot!(deploy, 0) do
-    flunk("#{deploy} did not accept an rpc within the timeout")
-  end
-
-  defp await_boot!(deploy, attempts) do
-    case cmd(Path.join(deploy, "bin/sample"), ["rpc", "IO.puts(:booted)"]) do
-      {_output, 0} -> :ok
-      {_output, _} -> Process.sleep(200) && await_boot!(deploy, attempts - 1)
-    end
-  end
-
-  defp launcher!(deploy, args, env \\ []) do
-    deploy |> Path.join("bin/sample") |> cmd!(args, env) |> String.trim()
-  end
-
-  defp castle!(deploy, args, env \\ []) do
-    deploy |> Path.join("bin/castle") |> cmd!(args, env) |> String.trim()
-  end
-
-  defp rpc!(deploy, expression), do: launcher!(deploy, ["rpc", expression])
-
-  # start_erl.data is "<erts vsn> <release vsn>".
-  defp vsn_of(start_erl_data), do: start_erl_data |> String.split() |> List.last()
 end

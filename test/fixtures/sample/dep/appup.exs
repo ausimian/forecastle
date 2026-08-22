@@ -6,7 +6,12 @@
 # code. Whether the running system's code path follows the version change is
 # then decided entirely by whether release_handler knows the version changed,
 # and it only knows that from the release records in RELEASES.
-case System.get_env("SAMPLE_VSN", "0.1.0") do
+#
+# Keyed off SampleDep.MixProject.version/0 rather than SAMPLE_VSN directly, so
+# that the appup's version tag cannot drift from the application's when
+# SAMPLE_DEP_VSN pins one and not the other - which systools would report as a
+# bad_vsn warning against a fixture that meant nothing of the sort.
+case SampleDep.MixProject.version() do
   "0.1.0" ->
     {~c"0.1.0", [], []}
 

@@ -228,9 +228,85 @@ relative `--outdir` is resolved from the directory the task is run in rather
 than from the project root. The directory has to exist already: a mistyped one
 that sprang into existence is how a relup ends up somewhere nothing looks for.
 
+At least one of `--fromto`, `--upfrom` and `--downto` is required: a relup with
+no transitions in it is not an upgrade plan.
+
 The task fails if it could not generate the relup, so a build pipeline can tell,
-and it leaves any earlier relup alone rather than half-replacing it. Assembly
-then checks the relup it is about to package really is this release's upgrade
-plan - the right target version, with the upgrade and downgrade sections
-`release_handler` will read - and fails if it is not. Between them, a build
-cannot quietly ship the previous version's plan.
+and a failure writes nothing at all - so any earlier relup is still sitting where
+post-assembly looks for one, rather than having been replaced by a plan that was
+then refused. Assembly then checks the relup it is about to package really is
+this release's upgrade plan - the right target version, with the upgrade and
+downgrade sections `release_handler` will read - and fails if it is not. Between
+them, a build cannot quietly ship the previous version's plan.
+
+### Upgrade strategy
+
+Whether a transition can be hot is a property of the edge between two releases,
+not of either release, so it is chosen per relup:
+
+```shell
+# auto: hot where it can be, restart where it cannot
+> mix forecastle.relup --target ... --fromto ...
+
+# require a hot upgrade, and fail rather than degrade
+> mix forecastle.relup --target ... --fromto ... --hot
+
+# force a full emulator restart, with no appups at all
+> mix forecastle.relup --target ... --fromto ... --restart
+```
+
+`--hot` and `--restart` are mutually exclusive, and each may be given once.
+
+**`auto`**, the default, generates every transition from the applications'
+appups - unless something in that transition cannot be hot-upgraded, and then
+that transition, and only that one, becomes a restart. A transition becomes a
+restart when the ERTS version changed, or when the version of an application the
+project does not own changed: a dependency, one of Elixir's own applications, or
+one of OTP's. None of those carries appups written for your transitions.
+Applications merely added or removed are left alone, since starting or stopping
+one is hot. Which transitions were chosen, and why, is printed.
+
+`auto` does not fall back to a restart when an appup is missing. A transition it
+judged hot and `systools` then could not generate is a failure, so that the
+default never quietly ships something other than the upgrade it decided on.
+
+**`--hot`** requires a genuine hot upgrade of every transition, and exits
+non-zero, having written nothing, if one cannot be: a missing appup entry, an
+ERTS change, or an appup that asks for the emulator to be restarted. This is
+about feasibility rather than policy, so unlike `auto` it will happily upgrade a
+dependency whose appup covers the transition. It is the switch for a pipeline
+that promises zero downtime.
+
+**`--restart`** makes every transition a single `restart_emulator` instruction.
+No appup is read - not for your own applications either - and `systools` is not
+involved at all. Use it when the upgrade instructions a change would need are
+not worth writing or maintaining.
+
+### Which restart, and what the operator sees
+
+OTP has two emulator-restart instructions and they are different transitions,
+not two spellings of one. Forecastle generates only the first:
+
+| | `restart_emulator` | `restart_new_emulator` |
+| --- | --- | --- |
+| Where in the script | last | first |
+| Relup evaluated | in full, before the reboot | partly; continues on the way up |
+| Hybrid temporary release | no | yes - new ERTS, kernel, stdlib, sasl over the old applications |
+| `install_release/1` replies | `{ok, Vsn, Descr}` | `{continue_after_restart, Vsn, Descr}` |
+
+The reply differs, and automation reads the reply, which is why the task says
+which strategy it chose for each transition.
+
+`restart_new_emulator` is not a strategy here, and is refused wherever it turns
+up. That is also why `auto` decides the ERTS case for itself rather than asking
+`systools` and taking what comes: `systools` inserts `restart_new_emulator` on
+its own whenever the ERTS version differs between two releases, so a default
+that simply generated a relup would ship the two-stage transition without
+anybody having chosen it.
+
+Note that a restart transition can be *generated* but not yet *performed*: the
+reboot comes back up on whichever version `releases/start_erl.data` names, and
+nothing writes the installed version there until it is committed. Until
+[castle#14](https://github.com/ausimian/castle/issues/14) and
+[#10](https://github.com/ausimian/forecastle/issues/10) land, treat a restart
+relup as something to generate and inspect rather than to deploy.

@@ -93,15 +93,59 @@
   that asked for it has gone. `bin/castle releases` is how to find out where
   the system actually got to.
 
-  Nothing can build a relup that restarts the emulator until
-  [#4](https://github.com/ausimian/forecastle/issues/4), so the restart
-  transitions this exists for **cannot be exercised end to end yet**. What is
-  covered is the hot-upgrade path, by the `:e2e` suite, which now installs
-  *and* confirms; and every branch of the shell logic - inconclusive,
-  confirmed, failed, timed out - against a launcher stub, which is the only
-  place the restart shape can be simulated until #4 lands. A continuation that
-  fails and rolls back is left to the end-to-end coverage that #4 and
-  [castle#14](https://github.com/ausimian/castle/issues/14) bring.
+  A relup that restarts the emulator can now be built - see
+  `mix forecastle.relup --restart` below - but the transition it describes still
+  **cannot be exercised end to end**, because nothing yet brings the reboot back
+  up on the version that was installed. That is
+  [castle#14](https://github.com/ausimian/castle/issues/14) and
+  [#10](https://github.com/ausimian/forecastle/issues/10). What is covered is
+  the hot-upgrade path, by the `:e2e` suite, which now installs *and* confirms;
+  and every branch of the shell logic - inconclusive, confirmed, failed, timed
+  out - against a launcher stub, which remains the only place the restart shape
+  can be simulated. A continuation that fails and rolls back is left to the
+  end-to-end coverage those two bring.
+- `mix forecastle.relup` now takes an upgrade strategy, because whether a
+  transition can be hot is a property of the edge between two releases rather
+  than of either release. `--hot` requires a genuine hot upgrade and fails,
+  having written nothing, if the transition cannot be one - which is what a
+  pipeline that promises zero downtime needs. `--restart` makes every transition
+  in the relup a single `restart_emulator` instruction, written directly, with no
+  appup read for any application, not even one the project owns: the escape hatch
+  for a change whose upgrade instructions are not worth maintaining. With
+  neither, the strategy is `auto`, and each transition is generated from the
+  appups unless something in it cannot be hot-upgraded - in which case that
+  transition, and only that one, becomes a restart.
+
+  `auto` makes a transition a restart when the ERTS version changed, or when the
+  version of an application the project does not own changed: a dependency, one
+  of Elixir's own applications, or one of OTP's. None of those carries appups
+  written for this project's transitions. Applications merely added or removed
+  are left to `systools`, since starting or stopping one is hot. Which
+  transitions were chosen, and why, is printed.
+
+  Every restart generated is the one-stage `restart_emulator`: the relup is
+  evaluated in full in the running system, `install_release/1` replies
+  `{ok, Vsn, Descr}`, and the emulator then reboots. The two-stage
+  `restart_new_emulator` - which boots a hybrid temporary release carrying the
+  new ERTS, kernel, stdlib and sasl over the old applications, and continues the
+  relup on the way up, replying `{continue_after_restart, Vsn, Descr}` - is not a
+  strategy here, and is refused where it turns up. Which of the two a relup
+  carries is worth saying out loud precisely because those replies differ and
+  automation reads them.
+
+  That is also why `auto` decides the ERTS case for itself rather than asking
+  `systools` and taking what comes: `systools` inserts `restart_new_emulator` on
+  its own whenever the ERTS version differs between the two releases, so a
+  default strategy that simply generated a relup would ship the two-stage
+  transition without anybody having chosen it. An ERTS change becomes a
+  `restart_emulator` transition instead, and whatever `systools` does produce for
+  the remaining transitions is inspected, so a `restart_new_emulator` arriving
+  through an appup is refused rather than packaged.
+
+  `auto` does not fall back to a restart when an appup is missing, either. A
+  transition it judged hot and `systools` then could not generate is a failure,
+  so that the default never silently ships something other than the upgrade it
+  decided on; ask for the restart with `--restart`.
 - A test suite. It assembles a real release from a fixture application and, in
   the `:e2e` suite, boots it and performs a hot upgrade.
 
@@ -217,6 +261,27 @@
 - The Castle integration is installed by extending the release's `env.sh`
   rather than by replacing the launcher. An `env.sh` supplied through
   `rel/env.sh.eex` is preserved and runs first.
+- `mix forecastle.relup` with no strategy switch is now `auto`, which changes
+  what an existing invocation produces for some transitions. Where the version
+  of an application the project does not own moved between the two releases - a
+  Castle bump, or anything else in `deps` - the default now writes a
+  `restart_emulator` relup where it previously asked `systools` for a hot one.
+  That is the intended policy: such an application carries no appups written for
+  this project's transitions, so a hot upgrade of it either does nothing or does
+  something nobody here wrote. Pass `--hot` for the previous behaviour, and to
+  have the generation fail rather than degrade if the transition cannot be hot.
+- A `mix forecastle.relup` run that fails now writes nothing at all. It used to
+  let `systools` write the relup and report afterwards, which was harmless while
+  every refusal came from `systools` itself; the strategies add refusals that can
+  only be made once a relup has been generated, so the file is now written by the
+  task, from the term it inspected, when there is nothing left to refuse. A relup
+  already in the output directory is therefore the one still sitting there after
+  a failure, rather than one that was replaced by a plan that was then rejected.
+  The bytes are unchanged: the same encoding comment and single term `systools`
+  writes and `release_handler` reads.
+- `mix forecastle.relup` now requires at least one of `--fromto`, `--upfrom` or
+  `--downto`. It used to accept none and write a relup with no transitions in it,
+  which is not an upgrade plan and which `release_handler` can do nothing with.
 - Raised the minimum Elixir requirement to 1.18.
 
 ### Security
@@ -383,11 +448,26 @@ the new version reads the old file.
 
 ### Known limitations
 
-- A transition that restarts the emulator cannot be exercised end to end,
-  because nothing can build a relup that asks for one until
-  [#4](https://github.com/ausimian/forecastle/issues/4). `bin/castle install`
-  handles it, and each branch of that handling is tested against a stub, but
-  the real thing is unproven. See above.
+- **A transition that restarts the emulator can be generated, but not yet
+  performed.** `mix forecastle.relup --restart` writes the relup, assembly
+  packages it, and `bin/castle install` handles the reply, each branch of that
+  handling tested against a stub - but nothing brings the reboot back up on the
+  version that was installed, so the transition is unproven end to end. The
+  reboot comes back on whichever version `releases/start_erl.data` names, and
+  only `commit` writes that; `release_handler` leaves the installed version in
+  `releases/new_start_erl.data` instead.
+  [castle#14](https://github.com/ausimian/castle/issues/14) and
+  [#10](https://github.com/ausimian/forecastle/issues/10) are what close that.
+  Until they land, treat a restart relup as something to generate and inspect
+  rather than to deploy.
+- **`restart_new_emulator` is not supported.** The two-stage transition - a
+  hybrid temporary release, a reboot into it, and the rest of the relup applied
+  on the way up - is refused wherever it turns up rather than generated, and
+  `auto` takes the ERTS change that would otherwise produce it and makes a
+  one-stage `restart_emulator` transition of it instead. Supporting it properly
+  is its own piece of work: the provisional boot would have to come up and
+  *resume* an upgrade, which is strictly more than coming up on a provisional
+  version.
 - **A system that cannot write `releases/RELEASES` cannot be upgraded.** The
   release creates it on its first start; where that fails — a read-only release
   root is the usual reason — the start warns, the system runs perfectly well, and
