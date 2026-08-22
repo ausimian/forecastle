@@ -23,9 +23,10 @@
   describes an install that did not take effect. What the launcher wrote to
   standard error stays on standard error throughout - from the install, and from
   every confirmation after it: the two streams are captured separately, so a
-  warning from the VM or from the preboot integration arrives where a pipeline
-  watching that stream will find it, including when it arrives just as the
-  upgrade is being declared good.
+  warning from the VM, or from a config provider running in the peer that
+  resolves the target's configuration, arrives where a pipeline watching that
+  stream will find it, including when it arrives just as the upgrade is being
+  declared good.
 
   Everything that could refuse to go on is settled before the install runs - the
   timeout, the clock, and somewhere to capture what the launcher says, which is
@@ -99,10 +100,54 @@
 
 ### Changed
 
-- Assembling a release that includes Windows executables now warns that it
-  will not boot. Configuration is expanded at boot by the `env.sh`
-  integration, which has no `env.bat` counterpart. This has always been the
-  case; it was previously silent.
+- **Breaking:** Forecastle no longer touches configuration. It used to set
+  `:runtime_config_path` to `false`, install a `Config.Reader` of its own,
+  initialise every config provider itself and stash the results, and rename the
+  `sys.config` Mix wrote to `build.config` — so that the standard launcher could
+  not configure the system and Castle had to expand the configuration in a
+  preboot VM before every start. All of that is gone. Mix decides which file
+  configures a release at runtime, initialises the providers a project declared
+  with whatever term it declared them with, writes `sys.config`, and expands
+  runtime configuration in the booting VM, exactly as it does for a release
+  Forecastle was never involved in.
+
+  The reason that interception existed was to give the version being upgraded
+  *to* a configuration resolved by *its* providers, which is not something a
+  boot of the version being upgraded *from* can produce.
+  [castle#13](https://github.com/ausimian/castle/issues/13) now does that
+  properly: `install` and `commit` materialise the target's configuration in a
+  temporary `:peer`, booted on the target's own code and running the target's
+  own providers through Elixir's own pipeline. The two changes are atomic —
+  neither works without the other — and the absence of `build.config` is exactly
+  what tells Castle to take that path, so this release requires the Castle it
+  ships with.
+
+  What this fixes, what it costs, and what it means for an existing deployment
+  are below.
+- The `env.sh` fragment does nothing on a normal start. It ran a preboot VM on
+  every `start`, `daemon` and `eval` — to expand `build.config` and to create
+  `releases/RELEASES` — and neither is needed now. It is still appended, after
+  any `env.sh` the project supplied, because
+  [#10](https://github.com/ausimian/forecastle/issues/10) needs somewhere to
+  consume the provisional restart marker that a relup restarting the emulator
+  leaves in `releases/new_start_erl.data`. Until then it is a comment.
+
+  A release therefore starts as quickly as a plain Mix release, and a start that
+  used to fail because configuration could not be expanded now fails, or does
+  not, wherever Mix would have it fail.
+- `releases/RELEASES`, which `release_handler` keeps its state in, is created by
+  `bin/castle unpack` rather than before every boot. OTP does not need it to
+  start — with the file missing it synthesises a permanent release from the boot
+  script it was started from — and `unpack` is both the one door a new version
+  comes in through and the first operation that writes that state out, so it is
+  the last moment the file can be created. There is a cost to this; see the
+  known limitations.
+- Assembling a release that includes Windows executables still warns, but for a
+  different reason, and the warning says so. The `.bat` launcher now boots: Mix
+  writes the `sys.config` it reads and configures the system itself, which it
+  could not do while Forecastle was withholding both. What a Windows deployment
+  has not got is `bin/castle`, which is a POSIX shell script, so nothing on it
+  can unpack, install or commit an upgrade.
 - **Breaking:** the `:appup` compiler now fails the build when the `:appup`
   project key names a file that does not exist, rather than warning and
   carrying on. The project asked for an appup and cannot have one, and the
@@ -126,7 +171,7 @@
   to graft onto it have moved to `bin/castle`; `bin/<release> unpack`,
   `install`, `commit`, `remove` and `releases` are now `bin/castle unpack` and
   so on.
-- The Castle boot integration is installed by extending the release's `env.sh`
+- The Castle integration is installed by extending the release's `env.sh`
   rather than by replacing the launcher. An `env.sh` supplied through
   `rel/env.sh.eex` is preserved and runs first.
 - Raised the minimum Elixir requirement to 1.18.
@@ -188,18 +233,41 @@
   which used to keep the last occurrence and generate from a target the
   caller had not asked for. `--fromto`, `--upfrom` and `--downto` may still
   be given more than once, as they always could.
+- A release naming its runtime configuration file with `:runtime_config_path`
+  booted `config/runtime.exs` instead. The option was read as a boolean — any
+  value meant "there is runtime configuration" — and the provider that replaced
+  Mix's was hardcoded to `config/runtime.exs`, so a project asking for
+  `config/prod_runtime.exs` got the other file if it happened to exist, and a
+  provider pointing at a file that was never copied into the release if it did
+  not. Mix has always handled this option correctly, and now nothing overrides
+  it.
+- Config providers declared with anything other than a keyword list were handed
+  something else. `Mix.Release` allows any term as a provider's init argument,
+  and Forecastle rewrote a non-list into `[path: term]` and then added an `:env`
+  key to whatever was left — so a provider declared with a binary, a map or a
+  plain list saw a keyword list it had never asked for. Providers are no longer
+  intercepted, so `init/1` is called by Mix, with the term the project wrote.
 - Runtime configuration could not read the standard release variables.
-  The launcher sources `env.sh`, and so runs the preboot VM that expands
+  The launcher sources `env.sh`, and so used to run the preboot VM that expanded
   configuration, before it assigns `RELEASE_COOKIE`, `RELEASE_NODE`,
-  `RELEASE_TMP` and the rest, leaving them unset for `runtime.exs`. The
-  integration now applies the launcher's own defaults first.
+  `RELEASE_TMP` and the rest, leaving them unset for `runtime.exs`. Nothing
+  expands configuration from `env.sh` any more: the launcher exports all of them
+  before it starts the VM that configures itself, so `runtime.exs` sees them the
+  way Mix's own documentation says it does.
+- Concurrent `start`, `daemon` and `eval` invocations no longer race on
+  `sys.config`. Expanding configuration into the version directory meant two
+  boots with differing environments overwrote each other's configuration; Mix
+  applies the resolved configuration inside the booting VM instead, and writes
+  nothing.
 - `bin/castle` looked for the launcher at `bin/$RELEASE_NAME`. `RELEASE_NAME`
   names the node, not the executable, so setting it sent the CLI looking for
   a launcher that does not exist. It is now passed through to the launcher
   and the executable is the one named at build time.
 - The `RELEASES` file was created relative to the working directory, so
   starting a release from anywhere other than its root left the system unable
-  to manage its own releases.
+  to manage its own releases. It is now created by `bin/castle`, which changes
+  to the release root for the call, so where the launcher was invoked from makes
+  no difference.
 - The `GitHub` link in the Hex package metadata pointed at the Castle
   repository rather than Forecastle's.
 - The `:appup` compiler left `<app>.appup` behind in `ebin` once the project
@@ -246,6 +314,12 @@ This applies to `bin/castle` too: once installed, later changes to it will not
 reach an existing deployment through a hot upgrade. That is the same property
 Mix's own `bin/<release>` has always had.
 
+Configuration is decided per version directory, so a deployment part way through
+this migration is coherent rather than confused: the version it is running keeps
+its `build.config` and is still expanded the old way, while the version it is
+upgraded to has a `sys.config` and is resolved in a peer. Nothing has to be
+converted in place.
+
 ### Known limitations
 
 - A transition that restarts the emulator cannot be exercised end to end,
@@ -253,10 +327,19 @@ Mix's own `bin/<release>` has always had.
   [#4](https://github.com/ausimian/forecastle/issues/4). `bin/castle install`
   handles it, and each branch of that handling is tested against a stub, but
   the real thing is unproven. See above.
-- Configuration is expanded into the version directory's `sys.config`, so
-  concurrent `start`/`daemon`/`eval` invocations with differing environments can
-  race on it. Tracked in
-  [castle#13](https://github.com/ausimian/castle/issues/13), which materialises
-  the target release's configuration in a `:peer` running its own config
-  providers - not by having Castle accept a destination path.
-- Windows releases are not supported; see above.
+- **A system that boots without a `RELEASES` file manages its first upgrade with
+  less information than it used to have.** OTP synthesises a permanent release
+  record from the boot script when the file is missing, and that record has
+  neither the application versions nor the ERTS version out of the `.rel` file.
+  Only a *boot* can replace it — `release_handler` reads `RELEASES` once, at
+  startup — so creating the file from `bin/castle` cannot repair the system it is
+  run on, and the first `install` after a cold deployment therefore updates the
+  code path only for the applications its relup actually loads code for, rather
+  than for every application whose version changed. Restarting the deployment
+  once after the first `bin/castle` command, or committing an upgrade and letting
+  the next restart read the file, is enough to get the full record. This was not
+  a limitation while the file was created before every boot; it is the price of
+  the `env.sh` hook doing nothing on a normal start, and it is a good deal less
+  than a preboot VM per start.
+- Windows releases are not supported; see above. What is missing is now
+  `bin/castle` rather than a bootable release.
