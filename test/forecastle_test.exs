@@ -36,7 +36,7 @@ defmodule ForecastleTest do
         options: []
       }
 
-      {:ok, release: Forecastle.pre_assemble(release)}
+      {:ok, release: release, assembled: Forecastle.pre_assemble(release)}
     end
 
     test "refuses to carry a staged relup it did not stage itself" do
@@ -61,18 +61,31 @@ defmodule ForecastleTest do
       assert Keyword.fetch(options, :forecastle_relup) == :error
     end
 
-    test "takes the config providers away from Mix", %{release: release} do
-      assert release.config_providers == []
+    test "leaves the config providers with Mix", %{release: release, assembled: assembled} do
+      # They used to be taken away here and replayed into the release's
+      # configuration afterwards, with their init arguments rewritten into a
+      # keyword list on the way through. Mix initialises them itself, with
+      # whatever term the project declared, and nothing here has an opinion.
+      assert assembled.config_providers == release.config_providers
     end
 
-    test "stashes the config providers for post-assembly", %{release: release} do
-      assert [{Config.Reader, args}] = release.options[Forecastle]
-      assert args[:path] == "/nowhere/provider.exs"
-      assert args[:env] == Mix.env()
+    test "says nothing about runtime configuration", %{assembled: assembled} do
+      # Setting :runtime_config_path to false is what used to stop Mix expanding
+      # runtime configuration at all, so that Castle could do it at boot instead.
+      refute Keyword.has_key?(assembled.options, :runtime_config_path)
     end
 
-    test "adds a preboot script that can start Castle", %{release: release} do
-      preboot = release.boot_scripts[:preboot]
+    test "stashes nothing under its own key", %{assembled: assembled} do
+      # The accumulator the stripped providers were collected in. Nothing reads
+      # it any more, so nothing may write it either: Mix carries release options
+      # it does not recognise straight into the assembled release.
+      refute Keyword.has_key?(assembled.options, Forecastle)
+    end
+
+    test "adds a preboot script that can start Castle", %{assembled: assembled} do
+      # The script Castle's peer boots to work out the configuration of the
+      # version being installed.
+      preboot = assembled.boot_scripts[:preboot]
 
       assert preboot[:kernel] == :permanent
       assert preboot[:stdlib] == :permanent
@@ -82,15 +95,8 @@ defmodule ForecastleTest do
       end
     end
 
-    test "leaves the start_clean script alone", %{release: release} do
-      assert release.boot_scripts[:start_clean] == [kernel: :permanent, stdlib: :permanent]
-    end
-
-    test "leaves runtime config evaluation alone when there is no runtime.exs",
-         %{release: release} do
-      # Forecastle's own project has no config/runtime.exs, so the option that
-      # disables Mix's evaluation of it must not have been set.
-      refute Keyword.has_key?(release.options, :runtime_config_path)
+    test "leaves the start_clean script alone", %{assembled: assembled} do
+      assert assembled.boot_scripts[:start_clean] == [kernel: :permanent, stdlib: :permanent]
     end
   end
 end

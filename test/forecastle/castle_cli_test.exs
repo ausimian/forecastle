@@ -57,6 +57,8 @@ defmodule Forecastle.CastleCliTest do
     end
 
     test "unpack composes the tarball name from the build-time release name", context do
+      write_releases!(context)
+
       assert castle!(context, ["unpack", "0.1.1"]) == ["rpc", "Castle.unpack(~s(sample-0.1.1))"]
     end
 
@@ -75,6 +77,66 @@ defmodule Forecastle.CastleCliTest do
 
     test "remove", context do
       assert castle!(context, ["remove", "0.1.1"]) == ["rpc", "Castle.remove(~s(0.1.1))"]
+    end
+  end
+
+  describe "the RELEASES file" do
+    # Mix writes no RELEASES file, and release_handler works without one - it
+    # synthesises a permanent release from the boot script it started from - but
+    # that record has neither the application versions nor the ERTS version out
+    # of the .rel file. Creating it is bin/castle's job now that the boot-time
+    # integration is gone, and unpack is where it belongs: the one door a new
+    # version comes in through, and the first operation that writes
+    # release_handler's state out over the top of it.
+
+    test "is created before a version is unpacked", context do
+      assert castle!(context, ["unpack", "0.1.1"]) == [
+               "rpc",
+               "File.cd!(to_string(:code.root_dir()), &Castle.make_releases/0)",
+               "rpc",
+               "Castle.unpack(~s(sample-0.1.1))"
+             ]
+    end
+
+    test "is left alone once the release has one", context do
+      # The launcher is not asked at all: a working directory belongs to the node
+      # rather than to a process, and there is no reason to change one on a
+      # running system to answer a question this side already knows the answer
+      # to.
+      write_releases!(context)
+
+      assert castle!(context, ["unpack", "0.1.1"]) == ["rpc", "Castle.unpack(~s(sample-0.1.1))"]
+    end
+
+    test "is not created by the commands that follow an unpack", context do
+      # Each of these acts on a version release_handler already knows about, so
+      # the file is there by the time they are reached.
+      for args <- [["install", "0.1.1"], ["commit", "0.1.1"], ["remove", "0.1.1"], ["releases"]] do
+        File.rm(context.record)
+
+        refute Enum.any?(castle!(context, args), &(&1 =~ "make_releases")),
+               "#{hd(args)} asked for the RELEASES file"
+      end
+    end
+
+    test "is not created when the version is refused", context do
+      assert {_output, status} = castle(context, ["unpack", "1.2.3)"])
+
+      assert status != 0
+      refute recorded?(context)
+    end
+
+    test "stops the unpack when it cannot be created", context do
+      stub_launcher!(context, "echo 'no permanent release' >&2\nexit 1\n")
+
+      assert {output, 1} = castle(context, ["unpack", "0.1.1"])
+
+      assert output =~ "no permanent release"
+
+      assert calls(context) == [
+               "rpc",
+               "File.cd!(to_string(:code.root_dir()), &Castle.make_releases/0)"
+             ]
     end
   end
 
@@ -794,6 +856,8 @@ defmodule Forecastle.CastleCliTest do
     end
 
     test "does not rename the release tarballs", context do
+      write_releases!(context)
+
       assert ["rpc", expression] =
                castle!(context, ["unpack", "0.1.1"], [{"RELEASE_NAME", "other"}])
 
@@ -1063,4 +1127,12 @@ defmodule Forecastle.CastleCliTest do
   end
 
   defp recorded?(context), do: File.exists?(context.record)
+
+  # A release that already has a RELEASES file, so that unpack has no reason to
+  # ask for one. bin/castle resolves it from its own location, which is what
+  # makes the check exact rather than a guess about the node's directory.
+  defp write_releases!(context) do
+    File.mkdir_p!(Path.join(context.root, "releases"))
+    File.write!(Path.join([context.root, "releases", "RELEASES"]), "[].\n")
+  end
 end

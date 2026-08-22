@@ -52,7 +52,8 @@ defmodule Forecastle.UpgradeTest do
       release_env: rpc!(deploy, "IO.puts(inspect(Sample.release_env()))"),
       counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
       os_pid: launcher!(deploy, ["pid"]),
-      releases: castle!(deploy, ["releases"])
+      releases: castle!(deploy, ["releases"]),
+      releases_file?: File.exists?(Path.join(deploy, "releases/RELEASES"))
     }
 
     "3" =
@@ -60,7 +61,8 @@ defmodule Forecastle.UpgradeTest do
 
     unpacked = %{
       output: castle!(deploy, ["unpack", @to]),
-      releases: castle!(deploy, ["releases"])
+      releases: castle!(deploy, ["releases"]),
+      releases_file?: File.exists?(Path.join(deploy, "releases/RELEASES"))
     }
 
     installed = %{output: castle!(deploy, ["install", @to])}
@@ -91,26 +93,40 @@ defmodule Forecastle.UpgradeTest do
   end
 
   describe "booting under the stock launcher" do
-    test "expands runtime configuration before the system starts", %{booted: booted} do
+    test "is configured by config/runtime.exs", %{booted: booted} do
+      # Through Elixir's own pipeline, in the booting VM, with nothing of
+      # Forecastle's involved: the launcher is Mix's, sys.config is the one Mix
+      # wrote, and the provider that reads runtime.exs is the one Mix installed.
       assert booted.greeting == "hello-from-runtime"
     end
 
-    test "runs the project's own env.sh before expanding configuration", %{booted: booted} do
+    test "runs the project's own env.sh", %{booted: booted} do
+      # The marker is exported by the fixture's rel/env.sh.eex and read by
+      # runtime.exs, so it only arrives if the project's env.sh survived being
+      # extended and ran before the VM started.
       assert booted.env_marker == "preserved"
     end
 
-    test "creates the RELEASES file regardless of the working directory",
-         %{deploy: deploy} do
-      # The launcher was invoked from the workspace, not the release root.
-      assert File.exists?(Path.join(deploy, "releases/RELEASES"))
+    test "does nothing to create the RELEASES file", %{booted: booted} do
+      # It used to be created before every boot, by the preboot VM the env.sh
+      # fragment ran. Nothing runs at boot now, so a system that has never been
+      # asked to manage a release has no RELEASES file - which release_handler
+      # does not need, since it synthesises a permanent release from the boot
+      # script it started from.
+      refute booted.releases_file?
     end
 
-    test "gives runtime.exs the release variables the launcher would have set",
+    test "still reports the release as permanent without one", %{booted: booted} do
+      assert booted.releases =~ ~r/#{@from}\s+permanent/
+    end
+
+    test "gives runtime.exs the release variables the launcher sets",
          %{booted: booted} do
-      # env.sh is sourced before the launcher assigns these, so the integration
-      # has to apply their defaults itself. runtime.exs fetches them with
-      # fetch_env!, so a regression here fails the boot outright - these
-      # assertions pin the values it should be seeing.
+      # runtime.exs fetches these with fetch_env!, so a release that reached it
+      # without them would fail to boot. That used to take work: the fragment ran
+      # the configuration before the launcher had assigned them, and had to apply
+      # the launcher's own defaults itself. Now the launcher exports them before
+      # the VM it configures even starts, and these pin the values it sees.
       assert booted.release_env =~ ~s(release_node: "sample")
       assert booted.release_env =~ "release_cookie_set: true"
       assert booted.release_env =~ ~s(release_mode: "embedded")
@@ -118,21 +134,17 @@ defmodule Forecastle.UpgradeTest do
       assert booted.release_env =~ ~r/release_vm_args: "[^"]+\/vm\.args"/
     end
 
-    test "reports the release as permanent", %{booted: booted} do
-      assert booted.releases =~ ~r/#{@from}\s+permanent/
-    end
-
     test "starts the version that was built", %{booted: booted} do
       assert booted.counter == ~s({"#{@from}", 0})
     end
   end
 
-  describe "the working directory the preboot VM runs in" do
-    # The fragment must not move the preboot VM out of the directory the
-    # launcher was invoked from, or a relative RELEASE_VM_ARGS - and any
-    # relative path the configuration itself reads - resolves against the
-    # release root instead. Only make_releases/0 needs the root.
-    test "is the caller's, so a relative RELEASE_VM_ARGS still resolves",
+  describe "the env.sh hook" do
+    # It does nothing on a normal start, and this is what that buys: the stock
+    # launcher's own handling of everything, unaltered. Kept as a test rather
+    # than deleted with the code it covered, because the hook is still appended
+    # and #10 will put work back into it.
+    test "leaves a relative RELEASE_VM_ARGS resolving against the caller",
          %{deploy: deploy} do
       workspace = Fixture.workspace()
       vsn = deploy |> Path.join("releases/start_erl.data") |> File.read!() |> vsn_of()
@@ -144,8 +156,8 @@ defmodule Forecastle.UpgradeTest do
 
       on_exit(fn -> File.rm(Path.join(workspace, "relative.vm.args")) end)
 
-      # cmd/4 runs in the workspace, which is not the release root, so this
-      # only resolves if the preboot VM stayed there too.
+      # cmd/4 runs in the workspace, which is not the release root, so this only
+      # resolves if nothing changed directory on the way to starting the VM.
       assert {output, 0} =
                cmd(Path.join(deploy, "bin/sample"), ["eval", "IO.puts(:evaluated)"], [
                  {"RELEASE_VM_ARGS", "relative.vm.args"}
@@ -153,10 +165,6 @@ defmodule Forecastle.UpgradeTest do
              "eval with a relative RELEASE_VM_ARGS failed"
 
       assert output =~ "evaluated"
-    end
-
-    test "still lets make_releases find the RELEASES file", %{deploy: deploy} do
-      assert File.exists?(Path.join(deploy, "releases/RELEASES"))
     end
   end
 
@@ -168,6 +176,14 @@ defmodule Forecastle.UpgradeTest do
     test "makes the new release known to the system", %{unpacked: unpacked} do
       assert unpacked.releases =~ ~r/#{@to}\s+unpacked/
       assert unpacked.releases =~ ~r/#{@from}\s+permanent/
+    end
+
+    test "creates the RELEASES file, from wherever it was invoked",
+         %{unpacked: unpacked} do
+      # bin/castle was run from the workspace rather than from the release root,
+      # and the file is resolved against the running node's working directory,
+      # which is the workspace too. It has to land in the release regardless.
+      assert unpacked.releases_file?
     end
   end
 
@@ -198,7 +214,28 @@ defmodule Forecastle.UpgradeTest do
       assert installed.os_pid == booted.os_pid
     end
 
-    test "keeps the configuration that was expanded at boot", %{installed: installed} do
+    test "resolved the target's configuration in a peer", %{deploy: deploy} do
+      # The release has no build.config, which is what sends Castle down the
+      # peer path: it keeps what Mix wrote as sys.config.pristine, boots a VM on
+      # the target's own preboot script to run the target's own providers, and
+      # renames the result over sys.config with a line saying it did.
+      version_path = Path.join(deploy, "releases/#{@to}")
+
+      assert File.read!(Path.join(version_path, "sys.config")) =~ "CASTLE_MATERIALISED=true"
+      assert File.exists?(Path.join(version_path, "sys.config.pristine"))
+      refute File.read!(Path.join(version_path, "sys.config.pristine")) =~ "CASTLE_MATERIALISED"
+    end
+
+    test "left no peer, and no working directory, behind", %{deploy: deploy} do
+      assert Path.wildcard(Path.join(deploy, "releases/*/castle-*")) == []
+    end
+
+    test "configures the version it installed", %{installed: installed} do
+      # release_handler reads the target version's sys.config and applies it as
+      # part of the upgrade, so this is the configuration Castle's peer resolved
+      # - by running 0.1.1's own providers, in a VM of its own, before the
+      # install was asked for. The peer inherits the running node's environment,
+      # which is where SAMPLE_GREETING comes from.
       assert installed.greeting == "hello-from-runtime"
     end
   end
