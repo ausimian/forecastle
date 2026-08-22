@@ -26,11 +26,15 @@ That existed to give the version being upgraded *to* a configuration resolved by
 its own providers, which a boot of the version being upgraded *from* cannot
 produce. [castle#13](https://github.com/ausimian/castle/issues/13) does that
 properly — in a `:peer` booted on the target's own code, running Elixir's own
-pipeline — and this half of the change is what makes it reachable: Castle
-dispatches on whether `releases/<vsn>/build.config` exists, so the file must not
-be created. Mix decides which file configures a release at runtime, initialises
-the providers a project declared with whatever term it declared them with, and
-expands runtime configuration in the booting VM.
+pipeline — and this half of the change is what made it reachable. It is now the
+only path Castle has: 1.0 configures every version that way, and the branch that
+read a `build.config` is deleted along with the file, so there is no
+discriminator left to preserve. What that leaves as the rule here is simply that
+the `sys.config` Mix writes stays where Mix put it — renaming it again would
+produce a release whose launcher can find no configuration at all, and no Castle
+that reads the other name exists any more. Mix decides which file configures a
+release at runtime, initialises the providers a project declared with whatever
+term it declared them with, and expands runtime configuration in the booting VM.
 
 The two defects that interception carried —
 [#6](https://github.com/ausimian/forecastle/issues/6) — are gone with it rather
@@ -145,9 +149,41 @@ around it composes instead:
 
   Failure there is a warning rather than a refusal — a release does not need the
   file in order to run, and a read-only release root is an ordinary way to run
-  one. `bin/castle unpack` is where the consequence is refused instead; see
-  `require_releases`, and the known limitation about what its test does and does
-  not cover.
+  one. Castle is where the consequence is refused instead, from inside `unpack`
+  and `install`; see the next entry.
+
+  The call needs no working directory of its own: `Castle.make_releases/0`
+  derives the releases directory from `code:root_dir()`, the root
+  `release_handler` resolves *its* relative paths against, so the file lands
+  beside the records that will be read from it however the launcher was invoked.
+  It used to be resolved against the working directory, which is why the
+  fragment wrapped it in a `File.cd!` into `RELEASE_ROOT`.
+- **There is no check in front of `unpack` or `install`, and nothing may add
+  one.** A system running from the record `release_handler` synthesised for
+  itself cannot be upgraded from — the record names no applications, so nothing
+  compares as changed and an application whose version moved but whose code the
+  relup does not load is left reachable only through the release being replaced.
+  Castle refuses both operations for that, from inside the call that acts, and
+  raises: the launcher exits non-zero with the reason and its remedy — a restart,
+  the only thing that changes the record — on standard error. `bin/castle` decides
+  nothing and paraphrases nothing.
+
+  This repo did have a gate, one rpc to `Castle.upgradable/0` in front of each
+  operation, and it was wrong. Two rpcs are two moments and possibly two node
+  instances: a node can answer on the record it read at boot, restart onto a
+  synthesised one, and have the unpack or the install arrive afterwards and act
+  on an answer that no longer holds — the very failure the check exists to
+  prevent. An answer is only good for the call that acts on it, which is why the
+  check is `Castle.Commands.ensure_upgradable/2` and belongs to the operations.
+  Do not reintroduce one here, in any shape, and do not add one to make a refusal
+  arrive sooner: `Castle.install/1` materialises the target's configuration
+  before it refuses, so a refused install starts a peer first. That is harmless —
+  the peer writes only into the target's version directory, never to the running
+  system or to any release record, and it is idempotent.
+
+  `bin/castle upgradable` asks the question on its own, for an operator who wants
+  to know where a system stands without staging anything. It is a plain command
+  like `releases`, gates nothing, and says nothing when the answer is yes.
 - The `env.sh` fragment expands no configuration and applies none of the
   launcher's defaults; on every start after the first it does nothing at all. It
   is appended, so a project's own `rel/env.sh.eex` survives and runs first, and
@@ -218,23 +254,19 @@ returns its argument, which is what makes the second observable at all.
   written for a release that asks for unix executables, so nothing on a Windows
   deployment can unpack, install or commit an upgrade. Assembly warns. Real
   support is a feature, not a fix.
-- **`require_releases` tests for the file, not for the record.** A system with no
-  `releases/RELEASES` has certainly started without one, so refusing there is
-  never wrong. The converse is uncovered: a file that appeared *after* the start
-  that looked for it passes the test while the node is still working from the
-  record OTP built out of the boot script. Nothing in Forecastle or Castle
-  creates that file after a start any more, so reaching the state takes
-  deliberate work — but the complete test is to ask the node what its release
-  records hold, and that belongs in Castle beside `which_releases/0`, not in
-  shell-embedded Elixir here.
-
-  What the gap costs, if it is ever reached: `get_new_libs/2` is seeded from the
-  running record, so an empty one means nothing compares as changed, and only the
+- **A system that cannot write `releases/RELEASES` cannot be upgraded, only
+  restarted.** The start warns, the system runs, and Castle then refuses `unpack`
+  and `install`. There is nothing `bin/castle` could do about it from outside:
+  `release_handler` reads that file in its `init` and never again, so creating it
+  changes no record the running node holds. What the refusal costs if it is ever
+  ignored — through an older launcher, whose `bin/<release>` a hot upgrade does
+  not replace — is that `get_new_libs/2` is seeded from the running
+  record, so an empty one means nothing compares as changed, and only the
   applications the relup explicitly loads code for get `code:replace_path`. Every
   other application whose version moved stays reachable through the superseded
-  release's directory, which the next `remove` deletes. `test/forecastle/upgrade_test.exs`
-  covers it with `:sample_dep`, whose version changes and whose appup asks for
-  nothing.
+  release's directory, which the next `remove` deletes.
+  `test/forecastle/upgrade_test.exs` covers that shape with `:sample_dep`, whose
+  version changes and whose appup asks for nothing.
 - **Root scripts do not update through a hot upgrade.** `release_handler`
   extracts with `keep_old_files`, so `bin/<release>` and `bin/castle` are
   whatever the deployment was first built with. New files do appear, so a
@@ -260,8 +292,14 @@ returns its argument, which is what makes the second observable at all.
 
 Do not work the configuration question around in this repo: putting Castle's
 logic back into shell-embedded Elixir is the coupling `bin/castle` exists to
-remove. `require_releases` is a file test for that reason — the moment it needs to
-interrogate the node, it becomes a Castle function.
+remove. `require_releases` was a file test for that reason, and the rule said
+that the moment it needed to interrogate the node it became a Castle function.
+That is what happened, twice over: first as `Castle.upgradable/0` called from
+here, and then — because a question asked in one call and acted on in another is
+a question about a moment that has passed — as a check the operations make
+themselves. The lesson is the stronger form of the same rule: what the node holds
+is Castle's to know, and where a decision rests on it, the decision goes with it.
+Nothing here is the place for either.
 
 ## Compatibility
 

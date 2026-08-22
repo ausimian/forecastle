@@ -102,6 +102,17 @@ defmodule Forecastle.AssemblyTest do
       assert env_sh =~ ~s([ ! -f "$RELEASE_ROOT/releases/RELEASES" ])
     end
 
+    test "does not change directory to do it", %{env_sh: env_sh} do
+      # Castle derives the releases directory from code:root_dir(), the root
+      # release_handler resolves its own paths against, so the call needs no
+      # working directory of its own and nothing about the release has to be
+      # interpolated into the expression to say where the file goes. The whole
+      # expression, asserted as one, is what says both: it used to be a File.cd!
+      # into a RELEASE_ROOT read out of the environment.
+      assert env_sh =~ ~s|--eval "Castle.make_releases()"|
+      refute env_sh =~ "fetch_env!"
+    end
+
     test "only runs for the commands that start the system", %{env_sh: env_sh} do
       # Not eval, which the configuration expansion needed and this does not: an
       # eval VM manages no releases.
@@ -135,10 +146,11 @@ defmodule Forecastle.AssemblyTest do
     test "leaves the configuration where Mix put it", %{forecastle: forecastle} do
       # Forecastle used to rename sys.config to build.config so that the stock
       # launcher could not boot from it and Castle had to expand it first.
-      # Castle now dispatches on whether build.config exists - present means a
-      # release whose configuration was intercepted at build time, absent means
-      # Mix's pipeline is intact and the target is evaluated in a peer - so the
-      # absence of that file is what selects the new path.
+      # Neither the rename nor anything that would read the renamed file exists
+      # any more: Mix's pipeline is intact, the launcher boots what Mix wrote,
+      # and Castle resolves the version it is installing in a peer. Both files
+      # are asserted because the defect could be either - the configuration
+      # withheld, or written twice under two names.
       version_path = Path.join(forecastle, "releases/#{@vsn}")
 
       refute File.exists?(Path.join(version_path, "build.config"))

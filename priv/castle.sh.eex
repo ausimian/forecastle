@@ -88,43 +88,18 @@ castle_rpc () {
   exec "$RELEASE_LAUNCHER" rpc "$1"
 }
 
-# Refuses to go on when the system has no releases/RELEASES, the file
-# release_handler keeps its state in.
+# There is no check in front of unpack or install here, and nothing may add one.
+# A system that started without a readable releases/RELEASES cannot be upgraded
+# from, and Castle refuses both operations for that from inside the call that
+# acts, raising - so the launcher exits non-zero with the reason, and its remedy,
+# on standard error, and there is nothing for this script to decide.
 #
-# It is not created here, and could not usefully be. release_handler reads that
-# file once, in its init, and when it is missing it builds a release record out
-# of the boot script's name and version instead - a record with no application
-# versions and no ERTS version in it. Creating the file afterwards changes
-# nothing about the record the running node is working from, and `unpack`, the
-# very next thing below, writes that record straight back over the file. So the
-# release's env.sh creates it before the system starts, on the first start of a
-# deployment, and all that is left here is to notice when that did not happen.
-#
-# What this protects against is upgrading from the synthesised record. It names
-# no application versions, so release_handler sees nothing change, and an
-# application whose version did change but whose code the relup does not load is
-# left reachable only through the directory of the release being replaced -
-# which the next `remove` deletes. That is silent, and it outlives the upgrade.
-#
-# The test is on the file rather than on the node. It is exact for the case that
-# arises, since a system with no file has certainly booted without one, and not
-# for the converse: a file created after the boot that looked for it would pass
-# this and still leave the node on the synthesised record. Asking the node what
-# its records actually hold is the complete test, and it belongs in Castle,
-# where which_releases/0 already is.
-require_releases () {
-  if [ ! -f "$RELEASE_ROOT/releases/RELEASES" ]; then
-    echo "ERROR: $RELEASE_ROOT/releases/RELEASES does not exist, so this system" \
-         "is running on a release record OTP built from its boot script, and" \
-         "that record names no application versions. Upgrading from it would" \
-         "leave any application whose version changed, but whose code the" \
-         "upgrade does not load, reachable only through the release being" \
-         "replaced. Restart the system - the release creates this file before it" \
-         "starts - and unpack again. A start that could not create it said so at" \
-         "the time; a release root nothing may write to is the usual reason." >&2
-    exit 1
-  fi
-}
+# Asking first, from here, was tried and is wrong: two rpcs are two moments and
+# possibly two node instances, so a node can answer on the record it read at
+# boot, restart onto a synthesised one, and have the unpack or the install arrive
+# afterwards and act on an answer that no longer holds. An answer is only good
+# for the call that acts on it. `bin/castle upgradable` asks the question
+# deliberately, for an operator; it gates nothing.
 
 # The timeout as a plain decimal number of seconds, or a complaint and a
 # non-zero return if it is not one that can be worked with.
@@ -303,6 +278,10 @@ install_and_confirm () {
   # it: a timeout that turns out not to be a number, a date that cannot report
   # the time, nowhere to capture what the launcher says. None of those are
   # discovered late.
+  #
+  # What the system itself refuses is not among them, and must not be moved up
+  # here: Castle checks the release record inside the install, where the answer
+  # cannot go stale between the asking and the acting.
   install_vsn=$1
   install_outcome=""
   held_output=""
@@ -488,9 +467,18 @@ case $1 in
     castle_rpc "Castle.releases()"
     ;;
 
+  # The question unpack and install answer for themselves, asked on its own, for
+  # an operator who wants to know where a system stands - after a restart that
+  # was the remedy for a refusal, say - without staging or installing anything.
+  # Silence means it can be upgraded from; Castle has nothing to report in that
+  # case and inventing something to say here would be this script deciding what
+  # the answer means.
+  upgradable)
+    castle_rpc "Castle.upgradable()"
+    ;;
+
   unpack)
     require_vsn "$1" "$2"
-    require_releases
     castle_rpc "Castle.unpack(~s($RELEASE_TARBALL_PREFIX-$2))"
     ;;
 
@@ -548,11 +536,17 @@ controlled through the standard launcher, bin/<%= release.name %>.
 The known commands are:
 
     releases       Lists the releases currently known to the system, and their status
+    upgradable     Asks whether the system can be upgraded from, saying nothing if it can
     unpack \"VSN\"   Unpacks $RELEASE_TARBALL_PREFIX-<VSN>.tar.gz
     install \"VSN\"  Installs VSN and waits until it is the version running now
     commit [VSN]   Commits VSN, so that it becomes the version that runs on restart.
                    Defaults to the version that is running now.
     remove \"VSN\"   Uninstalls VSN from the system
+
+unpack and install ask that same question themselves, and refuse rather than
+upgrade a system running from the release record OTP made up for it - a system
+that started without a readable releases/RELEASES. The remedy is a restart, and
+the refusal says so.
 
 An upgrade is not complete when the system accepts it: one that restarts the
 emulator is still to reboot, and one that replaces the emulator finishes on the

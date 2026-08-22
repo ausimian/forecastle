@@ -46,11 +46,11 @@ Take `Castle` 1.0 or later with a 1.x `Forecastle`, and do not pair a 1.x
 `Forecastle` with an older `Castle`. The two halves divide one job between them
 and the boundary moved in 1.0: `Forecastle` no longer intercepts configuration at
 build time, and `Castle` works out the configuration of the version being
-installed for itself, in a temporary VM running that version's own code.
-`Castle` tells the two worlds apart by whether a release has a `build.config`
-file — the file `Forecastle` used to create and no longer does — so an older
-`Castle` paired with this `Forecastle` finds no `build.config`, looks for a path
-it has not got, and refuses the install.
+installed for itself, in a temporary VM running that version's own code. That is
+`Castle` 1.0's only path: the branch that read the `build.config` `Forecastle`
+used to write is gone, along with the file. So a release assembled by a 1.x
+`Forecastle` carries the `sys.config` Mix wrote and nothing else, and an older
+`Castle` handed one looks for a file that is not there and refuses the install.
 
 Nothing in the build can enforce this. `Forecastle` is a dependency *of*
 `Castle`, so it cannot constrain the version of `Castle` that brought it in, and
@@ -106,12 +106,14 @@ In the post-assembly step:
     deployment it creates `releases/RELEASES`, which is what lets the system
     manage its own releases — a short-lived VM, once, and only while that file
     is absent. The release root has to be writable for it to succeed; if it is
-    not, the start still proceeds, with a warning, and `bin/castle unpack` will
-    later refuse rather than upgrade a system that cannot record what it is
-    running. Every start after the first does nothing at all. The hook is also
-    where the provisional version marker left by a relup that restarts the
-    emulator will be consumed. Any `env.sh` the project supplies through
-    `rel/env.sh.eex` is preserved, and runs first.
+    not, the start still proceeds, with a warning, and `bin/castle unpack` and
+    `bin/castle install` will later refuse — each reading the running system's
+    own release records as it acts — rather than upgrade a system that cannot
+    record what it is running. Every start after the first does nothing at all.
+    The
+    hook is also where the provisional version marker left by a relup that
+    restarts the emulator will be consumed. Any `env.sh` the project supplies
+    through `rel/env.sh.eex` is preserved, and runs first.
   - The generated _name.rel_ is copied into the `releases` folder as _name-vsn.rel_,
     which is where `release_handler` looks for it when unpacking a tarball.
   - Any checked `relup` is written into the version path of the release.
@@ -134,6 +136,9 @@ Moving the running system from one version to the next is done through `bin/cast
 # List the releases the system knows about, and their status.
 > myapp/bin/castle releases
 
+# Ask whether this system can be upgraded from at all. Silence means it can.
+> myapp/bin/castle upgradable
+
 # Unpack myapp-0.1.1.tar.gz, which you have placed in myapp/releases.
 > myapp/bin/castle unpack 0.1.1
 
@@ -147,6 +152,12 @@ Moving the running system from one version to the next is done through `bin/cast
 # Or, having decided against it, remove it again.
 > myapp/bin/castle remove 0.1.1
 ```
+
+`unpack` and `install` refuse a system that cannot be upgraded from — one that
+started without a readable `releases/RELEASES`, and so is running from a release
+record OTP made up out of its boot script. Each asks the system itself, as it
+acts, rather than trusting an answer given earlier; the refusal names the remedy,
+which is a restart.
 
 Version selection on restart needs nothing from `Forecastle`: OTP's
 `release_handler` records the committed version in `releases/start_erl.data`,
