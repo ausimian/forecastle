@@ -88,39 +88,41 @@ castle_rpc () {
   exec "$RELEASE_LAUNCHER" rpc "$1"
 }
 
-# Creates releases/RELEASES, the file release_handler keeps its state in, if the
-# release has not got one.
+# Refuses to go on when the system has no releases/RELEASES, the file
+# release_handler keeps its state in.
 #
-# Mix never writes one, and OTP does not need one to start: with the file
-# missing, release_handler synthesises a single permanent release at boot out of
-# the name and version in the boot script it was started from, so a system that
-# has never had a RELEASES file still answers `releases` and still accepts every
-# command here. What that synthesised record has not got is the application and
-# ERTS versions from the .rel file, and reading those out of it is what
-# create_RELEASES does.
+# It is not created here, and could not usefully be. release_handler reads that
+# file once, in its init, and when it is missing it builds a release record out
+# of the boot script's name and version instead - a record with no application
+# versions and no ERTS version in it. Creating the file afterwards changes
+# nothing about the record the running node is working from, and `unpack`, the
+# very next thing below, writes that record straight back over the file. So the
+# release's env.sh creates it before the system starts, on the first start of a
+# deployment, and all that is left here is to notice when that did not happen.
 #
-# Ahead of `unpack`, and only there. unpack is the one door a new version comes
-# in through, and the first operation that writes release_handler's state out to
-# this file, so it is the last moment the file can be created before something
-# else creates it. install, commit and remove all follow an unpack on the system
-# they act on, and by then the file is there and this does nothing.
+# What this protects against is upgrading from the synthesised record. It names
+# no application versions, so release_handler sees nothing change, and an
+# application whose version did change but whose code the relup does not load is
+# left reachable only through the directory of the release being replaced -
+# which the next `remove` deletes. That is silent, and it outlives the upgrade.
 #
-# Asked of the running node, over the same rpc as every other command, rather
-# than in a VM of its own: there is nothing wanted here that a fresh VM would
-# bring, and a fresh VM would expand the release's configuration again to get
-# it. The release root is code:root_dir() on that node. make_releases/0 decides
-# whether the file is already there relative to the working directory, which for
-# a running node is wherever the launcher was invoked from, so the directory is
-# changed for the call and put back after it - a node started from somewhere
-# else would otherwise not see the file it had already created, and would replace
-# it with one naming only the permanent release. A working directory belongs to
-# the node rather than to a process, which is the other reason the launcher is
-# not asked at all once the file exists: the test below is exact, since
-# bin/castle and the launcher it shells through share a release root.
-ensure_releases () {
+# The test is on the file rather than on the node. It is exact for the case that
+# arises, since a system with no file has certainly booted without one, and not
+# for the converse: a file created after the boot that looked for it would pass
+# this and still leave the node on the synthesised record. Asking the node what
+# its records actually hold is the complete test, and it belongs in Castle,
+# where which_releases/0 already is.
+require_releases () {
   if [ ! -f "$RELEASE_ROOT/releases/RELEASES" ]; then
-    "$RELEASE_LAUNCHER" rpc \
-        "File.cd!(to_string(:code.root_dir()), &Castle.make_releases/0)"
+    echo "ERROR: $RELEASE_ROOT/releases/RELEASES does not exist, so this system" \
+         "is running on a release record OTP built from its boot script, and" \
+         "that record names no application versions. Upgrading from it would" \
+         "leave any application whose version changed, but whose code the" \
+         "upgrade does not load, reachable only through the release being" \
+         "replaced. Restart the system - the release creates this file before it" \
+         "starts - and unpack again. A start that could not create it said so at" \
+         "the time; a release root nothing may write to is the usual reason." >&2
+    exit 1
   fi
 }
 
@@ -488,7 +490,7 @@ case $1 in
 
   unpack)
     require_vsn "$1" "$2"
-    ensure_releases
+    require_releases
     castle_rpc "Castle.unpack(~s($RELEASE_TARBALL_PREFIX-$2))"
     ;;
 

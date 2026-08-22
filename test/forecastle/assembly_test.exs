@@ -81,25 +81,39 @@ defmodule Forecastle.AssemblyTest do
       assert env_sh =~ "Forecastle: end Castle integration"
     end
 
-    test "does nothing on a normal start", %{env_sh: env_sh} do
-      # Configuration is Mix's own business again, and the RELEASES file is
-      # bin/castle's, so the hook runs no VM and no command of its own. The one
-      # thing left for it is the provisional restart marker (#10); until that
-      # lands it is a comment.
+    test "expands no configuration", %{env_sh: env_sh} do
+      # Configuration is Mix's own business again, so the hook neither runs the
+      # release's config providers nor applies the launcher's defaults ahead of
+      # doing so - the launcher assigns those itself, after sourcing this.
       refute env_sh =~ "Castle.generate"
-      refute env_sh =~ "Castle.make_releases"
+      # How build.config used to be loaded into the preboot VM, and the last of
+      # the launcher defaults the fragment used to have to apply for itself.
+      refute env_sh =~ "--erl-config"
+      refute env_sh =~ "RELEASE_BOOT_SCRIPT_CLEAN"
+    end
 
-      fragment =
-        env_sh
-        |> String.split("\n")
-        |> Enum.drop_while(&(not String.starts_with?(&1, "# --- Forecastle: Castle integration")))
-        |> Enum.drop(1)
-        |> Enum.reject(&(&1 == ""))
+    test "creates the RELEASES file, once, before the system starts", %{env_sh: env_sh} do
+      # The only thing left for the hook on a normal start, and the only place it
+      # can be done at all: release_handler reads that file in its init, so a
+      # system that booted without one keeps the record it synthesised until it
+      # is restarted. Guarded on the file, so this is the first start of a
+      # deployment and nothing after it.
+      assert env_sh =~ "Castle.make_releases"
+      assert env_sh =~ ~s([ ! -f "$RELEASE_ROOT/releases/RELEASES" ])
+    end
 
-      assert fragment != [], "the hook was not found in env.sh"
+    test "only runs for the commands that start the system", %{env_sh: env_sh} do
+      # Not eval, which the configuration expansion needed and this does not: an
+      # eval VM manages no releases.
+      assert env_sh =~ ~r/case \$RELEASE_COMMAND in\n\s+start\|start_iex\|daemon\|daemon_iex\)/
+    end
 
-      assert Enum.all?(fragment, &String.starts_with?(&1, "#")),
-             "the hook has a line that does something:\n\n#{Enum.join(fragment, "\n")}"
+    test "warns rather than refuses when it cannot create the file", %{env_sh: env_sh} do
+      # A system does not need the file in order to boot, and a release root
+      # nothing may write to is an ordinary way to run one. bin/castle is where
+      # the consequence is refused, not the start.
+      assert env_sh =~ "warning: could not create"
+      refute env_sh =~ "exit 1"
     end
 
     test "comes after the project's own customization", %{env_sh: env_sh} do

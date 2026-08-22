@@ -27,7 +27,11 @@ defmodule Sample.MixProject do
       # TEMPORARY for the 1.0.0 cycle: the fixture needs Castle's in-progress API.
       # Flip back to {:castle, "~> 1.0"} before publishing.
       {:castle, github: "ausimian/castle", branch: "release/1.0.0"},
-      {:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), override: true}
+      {:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), override: true},
+      # An application the relup never mentions, versioned in step with this
+      # one, so that "release_handler knows its version changed" is observable
+      # from outside the system. See dep/mix.exs.
+      {:sample_dep, path: "dep"}
     ]
   end
 

@@ -53,7 +53,8 @@ defmodule Forecastle.UpgradeTest do
       counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
       os_pid: launcher!(deploy, ["pid"]),
       releases: castle!(deploy, ["releases"]),
-      releases_file?: File.exists?(Path.join(deploy, "releases/RELEASES"))
+      releases_file?: File.exists?(Path.join(deploy, "releases/RELEASES")),
+      dep_lib: rpc!(deploy, "IO.puts(:code.lib_dir(:sample_dep))")
     }
 
     "3" =
@@ -72,7 +73,8 @@ defmodule Forecastle.UpgradeTest do
         counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
         os_pid: launcher!(deploy, ["pid"]),
         greeting: rpc!(deploy, "IO.puts(Sample.greeting())"),
-        releases: castle!(deploy, ["releases"])
+        releases: castle!(deploy, ["releases"]),
+        dep_lib: rpc!(deploy, "IO.puts(:code.lib_dir(:sample_dep))")
       })
 
     committed = %{output: castle!(deploy, ["commit"])}
@@ -107,16 +109,19 @@ defmodule Forecastle.UpgradeTest do
       assert booted.env_marker == "preserved"
     end
 
-    test "does nothing to create the RELEASES file", %{booted: booted} do
-      # It used to be created before every boot, by the preboot VM the env.sh
-      # fragment ran. Nothing runs at boot now, so a system that has never been
-      # asked to manage a release has no RELEASES file - which release_handler
-      # does not need, since it synthesises a permanent release from the boot
-      # script it started from.
-      refute booted.releases_file?
+    test "creates the RELEASES file before the system starts", %{booted: booted} do
+      # The one thing the env.sh hook still does, and the only moment it can be
+      # done: release_handler reads this file in its init and otherwise works
+      # from a record built out of the boot script, which names no application
+      # versions. Nothing after the boot can replace that record - see the code
+      # path test below for what it costs.
+      #
+      # The launcher was invoked from the workspace rather than the release root,
+      # so this also pins that the file lands in the release either way.
+      assert booted.releases_file?
     end
 
-    test "still reports the release as permanent without one", %{booted: booted} do
+    test "reports the release as permanent", %{booted: booted} do
       assert booted.releases =~ ~r/#{@from}\s+permanent/
     end
 
@@ -178,11 +183,9 @@ defmodule Forecastle.UpgradeTest do
       assert unpacked.releases =~ ~r/#{@from}\s+permanent/
     end
 
-    test "creates the RELEASES file, from wherever it was invoked",
-         %{unpacked: unpacked} do
-      # bin/castle was run from the workspace rather than from the release root,
-      # and the file is resolved against the running node's working directory,
-      # which is the workspace too. It has to land in the release regardless.
+    test "keeps the RELEASES file", %{unpacked: unpacked} do
+      # release_handler rewrites it here, from the records it holds in memory, so
+      # what the boot created is what those records were built from.
       assert unpacked.releases_file?
     end
   end
@@ -224,6 +227,25 @@ defmodule Forecastle.UpgradeTest do
       assert File.read!(Path.join(version_path, "sys.config")) =~ "CASTLE_MATERIALISED=true"
       assert File.exists?(Path.join(version_path, "sys.config.pristine"))
       refute File.read!(Path.join(version_path, "sys.config.pristine")) =~ "CASTLE_MATERIALISED"
+    end
+
+    test "moves an application the relup never mentions onto the new code path",
+         %{booted: booted, installed: installed} do
+      # :sample_dep's version changes between the two builds, and its appup asks
+      # for nothing, so the relup carries no instruction that loads its code. The
+      # only way release_handler can know its version changed is from the release
+      # records it holds - and it builds those from releases/RELEASES at startup,
+      # or, when that file is missing, from the boot script, which names no
+      # application versions at all.
+      #
+      # get_new_libs/2 is what turns "this application's version changed" into
+      # the code:replace_path that runs at point_of_no_return. Seeded from a
+      # record with no applications in it, it returns nothing, and the running
+      # system is left reaching this application through the directory of the
+      # release being replaced - which the next `remove` deletes. Nothing says
+      # so at the time, which is why this is asserted rather than reasoned about.
+      assert booted.dep_lib =~ "sample_dep-#{@from}"
+      assert installed.dep_lib =~ "sample_dep-#{@to}"
     end
 
     test "left no peer, and no working directory, behind", %{deploy: deploy} do
