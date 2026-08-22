@@ -33,11 +33,32 @@ defmodule Sample.MixProject do
 
   defp releases do
     [
-      sample: [
-        include_executables_for: executables(),
-        steps: steps()
-      ]
+      sample:
+        [
+          include_executables_for: executables(),
+          steps: steps()
+        ] ++ configuration()
     ]
+  end
+
+  # Switched by the test suite so that the fixture can be assembled as a project
+  # that configures itself in the two ways Forecastle used to get wrong: naming a
+  # runtime configuration file other than `config/runtime.exs` while that file
+  # also exists, and declaring providers whose init arguments are not keyword
+  # lists.
+  defp configuration do
+    if System.get_env("SAMPLE_CONFIG") == "custom" do
+      [
+        runtime_config_path: "config/prod_runtime.exs",
+        config_providers: [
+          {Sample.EchoProvider, "a binary"},
+          {Sample.EchoProvider, %{a: :map}},
+          {Sample.EchoProvider, [:not, :a, :keyword, :list]}
+        ]
+      ]
+    else
+      []
+    end
   end
 
   # Switched by the test suite so that the fixture can be built as a project
