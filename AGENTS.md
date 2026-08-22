@@ -27,7 +27,89 @@ around it composes instead:
 
 - `bin/castle` is a thin wrapper that shells back through
   `bin/<name> rpc "Castle.<command>(...)"`, so it inherits cookie handling,
-  distribution and node naming from the standard launcher.
+  distribution and node naming from the standard launcher. Most commands
+  `exec` the launcher and are done; `install` and the version-less `commit`
+  cannot, because they have something to do afterwards, so they capture the
+  output and propagate the status themselves. What `install` does afterwards is
+  confirm, through `Castle.running/1`, that the version it installed is the one
+  running: `release_handler` replies as soon as it has accepted an upgrade,
+  which for a transition that restarts the emulator is before the upgrade has
+  run, and the reply may not outlive the reboot it triggers. A lost connection
+  is therefore inconclusive rather than fatal — recognised as the launcher's
+  whole `--rpc-eval … :noconnection` diagnostic at the start of a line, never as
+  the bare word, which is a usable release version and turns up in the messages
+  that name a version that failed — which is also why `validate_vsn` refuses
+  control characters, since a version carrying a newline could otherwise forge
+  that line for itself.
+
+  The install's two streams are captured apart, for different purposes: its
+  standard error is what the classifier reads and is passed through to standard
+  error, while its standard output is held until the confirmation succeeds. So
+  the success stream never carries a claim the confirmation goes on to disprove,
+  and a warning the launcher wrote never comes back out on the wrong stream. The
+  confirmations are split the same way, and their standard error is passed on
+  even when they succeed — a warning is worth no less for arriving as the upgrade
+  is being declared good. Do not merge either with `2>&1`; merging cannot be
+  undone.
+
+  Everything able to stop the script is settled before the launcher is invoked:
+  the timeout, the clock (`date +%s` is not a conversion POSIX requires, so a
+  system can have a `date` that will not answer), and a capture directory, which
+  `install` claims for itself under `RELEASE_TMP` with `mkdir` under `umask 077`
+  — atomic, so it fails rather than following a symlink someone else planted at
+  the name, and private, so nothing inside can be swapped between one open and
+  the next. Keep that ordering — past the install the system is on another
+  release, so stopping from there leaves it unconfirmed with nothing said about
+  it. Six separate review findings have been that same shape.
+
+  That rule has a second half, because the first cannot reach everywhere. The
+  deadline has to be anchored *after* the install — earlier, and a slow install
+  eats the window meant for confirming it — so the clock gets asked again where
+  a failure can no longer be moved out of the way, and past the install there is
+  always something else: a capture that cannot be read, a stream that cannot be
+  written, a sleep cut short, whatever the next change adds. So: **after the
+  install has run, no path may exit without reporting the held output.** Not the
+  clock, not the scratch file, not anything added later.
+  `install_and_confirm` enforces that structurally rather than case by case —
+  `install_outcome` is armed the moment the launcher has been asked, every exit
+  runs `install_epilogue` through the EXIT and signal traps, and a terminal path
+  that has already spoken marks itself `reported`. A bare `|| exit 1` past the
+  install is therefore safe *only* because the epilogue is there; do not remove
+  it, and do not add a path that reports the outcome without marking it. What
+  the operator gets when something breaks late is what the install said, that
+  nothing confirmed it, and `bin/castle releases` to go and find out.
+
+  Claiming the name says nothing about who may *rename* it, which belongs to the
+  parent, so the parent is checked too: a `RELEASE_TMP` that anyone may write to
+  and that is not sticky is refused, since there the directory can be moved
+  aside and a symlink left behind it whatever mode it was created with. Refuse
+  the parent rather than re-checking the path on the way to each redirection —
+  that narrows a race instead of removing it. `test -k` for sticky and
+  `find -L … -prune -perm -0002` for the other-write bit, both of which follow a
+  `RELEASE_TMP` that is itself a symlink. Nothing ordinary is refused: the
+  default lives inside the release, and `/tmp` is sticky.
+
+  `CASTLE_INSTALL_TIMEOUT` bounds the retrying, as a deadline in elapsed time
+  rather than a count of attempts, measured against the system clock — so a
+  correction to that clock mid-wait moves it, which is a footnote in the release
+  notes rather than something to engineer around; POSIX shell has no monotonic
+  clock. It does not bound an individual call: `:erpc` waits indefinitely, so a
+  hard limit has to come from outside. A wrong cookie or an already-dead node is
+  indistinguishable from a reboot and so is asked about until the deadline; that
+  is deliberate, and called out in the release notes.
+
+  Do not add signal forwarding or process reaping to make an interrupt stop the
+  upgrade: it cannot. `Kernel.CLI` reaches the node through
+  `:erpc.call`, which uses `spawn_request` with `{reply, error_only}` and
+  `monitor` and **no link** (`erpc.erl:305`), so the remote worker is never
+  signalled when the caller goes away — and OTP's own `spawn_request_abandon/1`
+  documentation says only the `link` option would send an exit signal to an
+  abandoned child. Beneath that, `:release_handler.install_release/1` is a
+  `gen_server:call` (`release_handler.erl:1231`), and the upgrade runs inside
+  that server's `handle_call`, which completes whether or not the caller is
+  still there. Interrupting `bin/castle install` therefore stops the waiting,
+  not the upgrade; the release note says so, and points at `bin/castle
+  releases` for finding out where the system got to.
 - The `env.sh` fragment expands `build.config` into `sys.config` in a preboot
   VM, for the commands that boot the system. It is appended, so a project's own
   `rel/env.sh.eex` survives and runs first.
@@ -92,15 +174,18 @@ configures distribution without one.
   migrating deployment gains `bin/castle`, but keeps its old launcher. Mix's own
   launcher has always behaved this way; do not add a dispatcher to work around
   it without deciding that question for `bin/<release>` too.
-- **Failed Castle operations exit 0.** Castle catches `release_handler` errors
-  and returns `:ok`, and `rpc` only reports whether evaluation completed, so
-  `bin/castle` cannot surface them. Needs Castle to report failures —
-  [castle#15](https://github.com/ausimian/castle/issues/15).
-- **Concurrent boots race on `sys.config`.** `Castle.generate/1` hardcodes the
-  version directory, so per-invocation config files aren't reachable from here.
-  Same issue.
+- **The emulator-restart transitions are unproven.** `bin/castle install`
+  handles them, and each branch of that handling is tested against a launcher
+  stub, but nothing can build a relup that asks for one until
+  [#4](https://github.com/ausimian/forecastle/issues/4), so the `:e2e` suite
+  only covers the hot-upgrade path.
+- **Concurrent boots race on `sys.config`.** `Castle.generate/1` writes into
+  the version directory, so per-invocation config files aren't reachable from
+  here. Fixed on Castle's side by
+  [castle#13](https://github.com/ausimian/castle/issues/13), which materialises
+  the target configuration in a `:peer`.
 
-Do not work the last two around in this repo: putting Castle's logic back into
+Do not work the last one around in this repo: putting Castle's logic back into
 shell-embedded Elixir is the coupling `bin/castle` exists to remove.
 
 ## Compatibility

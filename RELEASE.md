@@ -6,6 +6,94 @@
 - `bin/castle commit` may now be given no version, in which case it commits
   whichever release is currently running. It exits non-zero if there was no
   such release, so that automation can tell nothing was committed.
+- `bin/castle install` now confirms that the version it installed is the one
+  running before it reports success, rather than trusting what
+  `release_handler` replied. That reply says only that the upgrade was
+  accepted: a transition that restarts the emulator is replied to and *then*
+  reboots, so a successful upgrade can arrive back here as a lost connection,
+  and an upgrade that replaces the emulator finishes on the way back up, where
+  it can still fail and roll back. A reply that the node has gone away is
+  therefore taken to settle nothing either way, and `install` polls
+  `Castle.running/1` until the version is running - exiting 0 only then, and
+  non-zero on a real failure or if the version never becomes the running one.
+  What the install printed on standard output is held back until the version has
+  been confirmed. Only then does it go to standard output as the report of
+  success it is; if the version is never confirmed it goes to standard error
+  with the rest of the diagnosis instead, so nothing on the success stream ever
+  describes an install that did not take effect. What the launcher wrote to
+  standard error stays on standard error throughout - from the install, and from
+  every confirmation after it: the two streams are captured separately, so a
+  warning from the VM or from the preboot integration arrives where a pipeline
+  watching that stream will find it, including when it arrives just as the
+  upgrade is being declared good.
+
+  Everything that could refuse to go on is settled before the install runs - the
+  timeout, the clock, and somewhere to capture what the launcher says, which is
+  a directory `install` creates for itself under `RELEASE_TMP` and removes when
+  it is done. Past that point the system is on another release, and stopping
+  there would leave that unsaid and unconfirmed.
+
+  And when something does go wrong past that point - the deadline has to be
+  timed from after the install, so not everything can be settled in advance -
+  what the install said is reported anyway, along with the fact that nothing
+  confirmed it and a pointer at `bin/castle releases`. A failure late in the
+  wait never leaves an operator holding a diagnostic about a clock or a
+  temporary file with no mention of the release that moved.
+
+  One of those checks is worth spelling out, because it can refuse a directory
+  that would have been used before: `RELEASE_TMP` must not be writable by
+  everyone unless it is sticky. Where it is, another user can rename the capture
+  directory and leave a symlink in its place, whatever mode it was created
+  with - renaming an entry is the parent directory's business, not the entry's -
+  so `install` says so and stops rather than racing it. Neither ordinary setting
+  is affected: the default is a `tmp` directory inside the release itself, and
+  `/tmp` is sticky on every mainstream Unix, which is exactly what the sticky bit
+  is for. A shared directory that is world-writable and *not* sticky is the one
+  case, and `chmod +t` on it, or a `RELEASE_TMP` of the operator's own, is what
+  the message asks for.
+
+  `CASTLE_INSTALL_TIMEOUT` sets how long it keeps asking, in seconds, and
+  defaults to 300, with 86400 the most it accepts: how long a reboot takes is a
+  property of the system being upgraded. It is a deadline in elapsed time
+  rather than a count of attempts, so the time the attempts themselves take
+  counts against it, and the clock is whole seconds, so the wait can come out
+  up to a second short of the number given. It is the system clock, so a
+  correction to that clock while `install` is waiting moves the deadline with
+  it; there is no monotonic clock to be had from a POSIX shell, and elapsed
+  wall-clock time is what a number of seconds means to an operator anyway.
+
+  It is a deadline for the *retrying*, not a limit on any single question.
+  Nothing can interrupt one already in flight: `rpc` reaches the node through
+  `:erpc`, which waits indefinitely, so a node that holds the connection open
+  without answering holds the attempt with it - as it would hold the install
+  itself, which happens before the deadline exists at all. An operator who
+  needs a hard bound has to impose one from outside, with `timeout(1)` or
+  whatever runs the deployment.
+
+  Worth knowing before it surprises anyone: a lost connection is exactly what a
+  successful restart looks like from out here, and so is a wrong cookie, or a
+  node that was already down. `install` asks about those until the deadline and
+  then fails, rather than failing at once. That is honest - it genuinely cannot
+  tell whether the system is coming back - but with the default it means a
+  five-minute wait for a typo in `RELEASE_COOKIE`. Set `CASTLE_INSTALL_TIMEOUT`
+  low when driving a system that is known to be reachable.
+
+  And the other way round: interrupting `bin/castle install` stops the waiting,
+  not the upgrade. The work runs on the system being upgraded, in
+  `release_handler`, and it carries on whether or not anything is still
+  listening - so a version may well become the running one after the command
+  that asked for it has gone. `bin/castle releases` is how to find out where
+  the system actually got to.
+
+  Nothing can build a relup that restarts the emulator until
+  [#4](https://github.com/ausimian/forecastle/issues/4), so the restart
+  transitions this exists for **cannot be exercised end to end yet**. What is
+  covered is the hot-upgrade path, by the `:e2e` suite, which now installs
+  *and* confirms; and every branch of the shell logic - inconclusive,
+  confirmed, failed, timed out - against a launcher stub, which is the only
+  place the restart shape can be simulated until #4 lands. A continuation that
+  fails and rolls back is left to the end-to-end coverage that #4 and
+  [castle#14](https://github.com/ausimian/castle/issues/14) bring.
 - A test suite. It assembles a real release from a fixture application and, in
   the `:e2e` suite, boots it and performs a hot upgrade.
 
@@ -50,9 +138,14 @@
   closed the sigil and ran arbitrary code on the node with the release
   cookie's authority. `bin/castle` now refuses the characters that can end
   the sigil, escape within it, or start an interpolation, along with the
-  path separator. Everything else is passed through, since Mix does not
-  constrain a release version. The same sink existed in the launcher
-  Forecastle used to generate.
+  path separator, and control characters: a version is echoed back in the
+  messages that report a failure to act on it, so one carrying a newline can
+  add a whole line of its own to that output - including a forgery of the
+  launcher's disconnect diagnostic, which `install` reads to decide whether a
+  failure was really a reboot, and which would have it confirm and report a
+  success for an install that had failed. Everything else is passed through,
+  since Mix does not constrain a release version. The same sink existed in the
+  launcher Forecastle used to generate.
 
 ### Fixed
 
@@ -155,12 +248,15 @@ Mix's own `bin/<release>` has always had.
 
 ### Known limitations
 
-- Castle prints `release_handler` failures and returns normally, so a failed
-  `bin/castle unpack`/`install`/`commit`/`remove` still exits 0. Automation
-  cannot yet distinguish a failed release operation from a successful one.
-  Tracked in [castle#15](https://github.com/ausimian/castle/issues/15).
+- A transition that restarts the emulator cannot be exercised end to end,
+  because nothing can build a relup that asks for one until
+  [#4](https://github.com/ausimian/forecastle/issues/4). `bin/castle install`
+  handles it, and each branch of that handling is tested against a stub, but
+  the real thing is unproven. See above.
 - Configuration is expanded into the version directory's `sys.config`, so
   concurrent `start`/`daemon`/`eval` invocations with differing environments can
-  race on it. Fixing this needs Castle to accept a destination path, also
-  tracked in [castle#15](https://github.com/ausimian/castle/issues/15).
+  race on it. Tracked in
+  [castle#13](https://github.com/ausimian/castle/issues/13), which materialises
+  the target release's configuration in a `:peer` running its own config
+  providers - not by having Castle accept a destination path.
 - Windows releases are not supported; see above.

@@ -22,17 +22,53 @@ RELEASE_TARBALL_PREFIX="<%= release.name %>"
 
 NOTHING_TO_COMMIT="No release is awaiting commit. Pass a version explicitly."
 
+# How long install waits for the version it installed to become the version
+# that is running, in seconds, and how often it looks. A transition that
+# restarts the emulator has to reboot the system, and an emulator upgrade then
+# runs the rest of the upgrade on the way back up, so how long that takes is a
+# property of the system being upgraded rather than of this script: hence
+# generous by default, and overridable.
+# The window is measured against the system clock, so a correction to that
+# clock while install is waiting moves the deadline with it. There is no
+# monotonic clock to be had from a POSIX shell, and elapsed wall-clock time is
+# what an operator means by a number of seconds anyway.
+CASTLE_INSTALL_TIMEOUT="${CASTLE_INSTALL_TIMEOUT:-300}"
+install_poll_interval=2
+install_timeout_max=86400
+
+# Where install captures what the launcher writes to standard error. The
+# launcher's own default for RELEASE_TMP, applied here because bin/castle does
+# not go through the launcher's env.sh to get it.
+CASTLE_TMP="${RELEASE_TMP:-$RELEASE_ROOT/tmp}"
+
+# The launcher's own diagnostic for a node it could not reach. install asks two
+# questions of it, and both are asked with this one pattern: whether a failed
+# install was the node going away rather than a refusal, and whether what an
+# attempt at confirmation wrote amounts to more than the sound of a node that is
+# not back yet. Matched as the whole diagnostic at the start of a line - not as
+# the word on its own, which is a usable release version and appears in the
+# messages that name a version that failed.
+lost_connection_line='^--rpc-eval .*RPC failed with reason :noconnection'
+
 # Versions reach the running node as Elixir source, inside a ~s() sigil, so a
 # version able to end that sigil would have the remainder of it evaluated with
 # the release cookie's authority. Three things can do that - the bracket pair
 # that delimits it, the backslash that escapes within it, and the # that starts
 # an interpolation - and the path separator is refused alongside them because
-# the version also names a tarball. Everything else is inert inside the sigil
-# and is allowed: Mix does not constrain a release version, so refusing more
-# than this would reject versions that assemble and boot perfectly well.
+# the version also names a tarball.
+#
+# Control characters are refused for a second reason: the version is echoed
+# back inside the messages that report a failure to act on it, so one carrying
+# a newline can add a whole line of its own to that output - including a
+# forgery of the launcher's disconnect diagnostic, which install reads to decide
+# whether a failure was really a reboot. Nothing legitimate needs them.
+#
+# Everything else is inert inside the sigil and is allowed: Mix does not
+# constrain a release version, so refusing more than this would reject versions
+# that assemble and boot perfectly well.
 validate_vsn () {
   case "$1" in
-    "" | *"("* | *")"* | *"#"* | *"\\"* | *"/"*)
+    "" | *"("* | *")"* | *"#"* | *"\\"* | *"/"* | *[[:cntrl:]]*)
       echo "ERROR: $1 is not a usable release version" >&2
       exit 1
       ;;
@@ -52,6 +88,363 @@ castle_rpc () {
   exec "$RELEASE_LAUNCHER" rpc "$1"
 }
 
+# The timeout as a plain decimal number of seconds, or a complaint and a
+# non-zero return if it is not one that can be worked with.
+#
+# Called before anything reaches the launcher. Arithmetic on the raw value
+# would otherwise be the first thing to notice a problem, and by then the
+# install would have run and changed which release the system is on, with the
+# script aborting before anything could confirm it.
+#
+# Leading zeros are stripped because shell arithmetic reads them as octal: 060
+# would quietly mean 48 seconds, and 08 is not a number at all in either sh or
+# dash. A value too long to be an integer is refused rather than left to
+# overflow into a deadline already past, or a negative one.
+canonical_timeout () {
+  case $1 in
+    "" | *[!0-9]*)
+      echo "ERROR: CASTLE_INSTALL_TIMEOUT must be a whole number of seconds," \
+           "got: $1" >&2
+      return 1
+      ;;
+  esac
+
+  seconds=$1
+  while :; do
+    case $seconds in
+      0[0-9]*) seconds=${seconds#0} ;;
+      *) break ;;
+    esac
+  done
+
+  # The length test keeps the comparison itself away from anything that could
+  # overflow; the comparison is what applies the limit.
+  if [ "${#seconds}" -gt 9 ] || [ "$seconds" -gt "$install_timeout_max" ]; then
+    echo "ERROR: CASTLE_INSTALL_TIMEOUT must be at most" \
+         "${install_timeout_max}s, got: $1" >&2
+    return 1
+  fi
+
+  echo "$seconds"
+}
+
+# The clock, as whole seconds since the epoch, or a complaint and a non-zero
+# return if it cannot be read as that.
+#
+# %s is not a conversion POSIX requires of date, so a system can have a date
+# that does not answer. Called once before the install for that reason: the
+# deadline is the first thing that needs the clock, and it is downstream of the
+# install, so a date that cannot answer would otherwise abort the script with
+# the system already moved to another release and nothing left to confirm it.
+clock_now () {
+  now=$(date +%s 2>/dev/null) || now=""
+
+  case $now in
+    "" | *[!0-9]*)
+      echo "ERROR: date +%s did not report the seconds since the epoch," \
+           "which install needs to time itself; got: $now" >&2
+      return 1
+      ;;
+  esac
+
+  echo "$now"
+}
+
+# A private directory to capture the launcher's output in, or a complaint and a
+# non-zero return if there is nowhere to put one.
+#
+# A capture has two readers - install decides whether a failure was a lost
+# connection by what the launcher said, and the caller has to receive it on the
+# stream it was written to - and a merged capture can only serve one of them.
+# Under RELEASE_TMP, defaulted as the launcher defaults it, because a release
+# root is not necessarily writable.
+#
+# RELEASE_TMP may be somewhere shared, so what is captured into is not a file
+# made by redirecting into a name anyone else can reach. mkdir creates and
+# claims in the same step: it fails if anything is there already, a symlink
+# included, so nothing written here can be aimed elsewhere by whoever got there
+# first, and the files inside are out of reach of anyone who could otherwise
+# have replaced them between one open and the next. Under umask 077, so it is
+# private from the moment it exists rather than being widened and narrowed
+# again. Failing to claim it fails here, before the install - the same rule as
+# the timeout and the clock.
+scratch_dir () {
+  if ! mkdir -p "$CASTLE_TMP" 2>/dev/null; then
+    echo "ERROR: cannot create $CASTLE_TMP, which install needs to capture" \
+         "what the system reports; set RELEASE_TMP somewhere writable" >&2
+    return 1
+  fi
+
+  # Claiming the name atomically settles who created the directory; it says
+  # nothing about who can rename it afterwards. Renaming and removing entries is
+  # the parent directory's business, so in a directory anyone may write to,
+  # another user can move this one aside and leave a symlink in its place
+  # between one redirection and the next - and mode 0700 on a directory that is
+  # no longer there protects nothing. The sticky bit is what stops that, which
+  # is what it has always been for.
+  #
+  # So a parent that anyone can write to and that is not sticky is refused
+  # outright, here, before the install. Re-checking the path on the way to each
+  # redirection would only narrow the window rather than close it. Nothing
+  # realistic is turned away by this: the default is a tmp directory inside the
+  # release itself, and every mainstream Unix ships /tmp sticky.
+  if [ ! -k "$CASTLE_TMP" ] &&
+      [ -n "$(find -L "$CASTLE_TMP" -prune -perm -0002 2>/dev/null)" ]; then
+    echo "ERROR: $CASTLE_TMP can be written by anyone and is not sticky, so" \
+         "another user could replace what install captures into after it has" \
+         "been created. Set the sticky bit on it (chmod +t), or point" \
+         "RELEASE_TMP at a directory of your own" >&2
+    return 1
+  fi
+
+  dir="$CASTLE_TMP/castle-install-$$"
+
+  if ! (umask 077 && mkdir "$dir" 2>/dev/null); then
+    echo "ERROR: cannot claim $dir, which install needs to capture what the" \
+         "system reports. Another install may be running under this process" \
+         "id, or one that was killed may have left it behind - remove it if" \
+         "nothing is using it" >&2
+    return 1
+  fi
+
+  echo "$dir"
+}
+
+# The other half of the rule that everything able to stop the script is settled
+# before the install: once it is not, whatever stops the script still has to say
+# that an install happened.
+#
+# The preflight cannot cover the whole function. The deadline has to be taken
+# after the install - anchoring it earlier would let a slow install eat the
+# window meant for confirming it - so the clock is asked again where a failure
+# can no longer be moved out of the way. And past the install there is always
+# something: a capture that cannot be read, a stream that cannot be written, a
+# sleep cut short, and whatever the next change adds.
+#
+# So this is a last word rather than a list of cases. Every exit runs it,
+# including the signal traps and the ones `set -e` takes without an exit
+# statement of its own, and if no terminal path has spoken it says what the
+# operator needs: an install was started, nobody confirmed it, go and ask the
+# system. Reporting comes before tidying up, and the tidying cannot fail, so
+# neither `set -e` nor a failed rm can lose the message. Terminal paths mark
+# themselves reported, so nothing is said twice.
+install_epilogue () {
+  if [ "$install_outcome" = unreported ]; then
+    install_outcome=reported
+
+    if [ -n "$held_output" ]; then
+      echo "$held_output" >&2
+    fi
+
+    echo "ERROR: install of $install_vsn was started and its outcome is not" \
+         "known - nothing above confirmed it. Ask the system what it is" \
+         "running: bin/castle releases" >&2
+  fi
+
+  rm -rf "$install_scratch" 2>/dev/null || true
+}
+
+# Installs a version and then confirms that it is the one running.
+#
+# release_handler replies as soon as it has accepted an upgrade, and for a
+# transition that restarts the emulator that is before the upgrade has run.
+# The reply has to cross distribution to reach the short-lived VM that carried
+# the request, and the reboot takes distribution down with it, so a successful
+# upgrade can arrive back here as a lost connection. An emulator upgrade goes
+# further and finishes on the way back up, where it can still fail the boot and
+# roll back. Nor does the reply say which kind of transition it was: OTP sends a
+# plain ok both for a completed hot upgrade and for one about to reboot. So the
+# reply decides nothing on its own - the version has to be seen running.
+#
+# Not exec'd, unlike the other commands, because there is something to do after
+# the install: the status this returns with is this function's to report.
+install_and_confirm () {
+  # Everything that can refuse to go on is asked first, before the launcher is
+  # invoked at all. Once the install has run, the system is on another release,
+  # and an abort from here on leaves that unconfirmed with nothing said about
+  # it: a timeout that turns out not to be a number, a date that cannot report
+  # the time, nowhere to capture what the launcher says. None of those are
+  # discovered late.
+  install_vsn=$1
+  install_outcome=""
+  held_output=""
+
+  install_timeout=$(canonical_timeout "$CASTLE_INSTALL_TIMEOUT") || exit 1
+  clock_now > /dev/null || exit 1
+  install_scratch=$(scratch_dir) || exit 1
+  install_stderr_file="$install_scratch/install.err"
+  confirm_stderr_file="$install_scratch/confirm.err"
+
+  # Installed before the install, so that every way out of what follows goes
+  # through the epilogue: it tidies up, and it is what says an install happened
+  # when nothing else has. An interrupt stops the waiting, not the upgrade - the
+  # work runs in the release_handler server on the node being upgraded, which
+  # finishes whether or not anything is still listening for the reply. So a
+  # version may become the running one after this has gone, which is why the
+  # epilogue points at `bin/castle releases` rather than guessing.
+  trap install_epilogue EXIT
+  trap 'install_epilogue; exit 130' HUP INT TERM
+
+  # The two streams are captured apart, because they are read for different
+  # things and merging them is not reversible. Standard output is what the
+  # install has to report, and is held until there is something to report it
+  # about. Standard error is where the launcher writes the diagnostic that says
+  # whether the node went away, and belongs to the caller's standard error
+  # whatever the outcome - a pipeline watching for it there would never see it
+  # if it arrived on standard output instead.
+  if install_stdout=$("$RELEASE_LAUNCHER" rpc "Castle.install(~s($1))" \
+      2> "$install_stderr_file"); then
+    install_status=0
+  else
+    install_status=$?
+  fi
+
+  # Armed the moment the launcher has been asked: from here on, an install has
+  # happened or may have, and no exit may leave that unsaid. The epilogue is
+  # what enforces it; terminal paths below mark themselves reported.
+  install_outcome=unreported
+
+  install_stderr=$(cat "$install_stderr_file")
+
+  if [ -n "$install_stderr" ]; then
+    echo "$install_stderr" >&2
+  fi
+
+  if [ "$install_status" -eq 0 ]; then
+    # Held, not printed. What the install said is only a report of success once
+    # the version has been seen running, and the confirmation below can still
+    # find a rollback or run out of time - at which point a "Now running ..."
+    # already on standard output would be a lie that automation reads.
+    held_output=$install_stdout
+  elif [ -n "$install_stdout" ]; then
+    # Nothing to hold back: what a failed install printed is not a report of
+    # success either, so it goes out now, and on standard error with the rest
+    # of the account of the failure.
+    echo "$install_stdout" >&2
+  fi
+
+  if [ "$install_status" -ne 0 ]; then
+    # A node that has gone away is what a successful restart looks like from
+    # out here, so it settles nothing either way and the confirmation below has
+    # to decide. Any other failure has just been reported, and is final.
+    #
+    # Read from the standard error capture, which is where the launcher writes
+    # it. A bare match on the word would send a real failure off to be confirmed
+    # rather than reported: were the version named already the one running, the
+    # confirmation would succeed and this would exit 0 on a launcher that had
+    # failed.
+    if ! printf '%s\n' "$install_stderr" | grep -q "$lost_connection_line"; then
+      # Reported already, and in full: the install failed, so there is no
+      # outcome left in doubt for the epilogue to raise.
+      install_outcome=reported
+
+      exit "$install_status"
+    fi
+  fi
+
+  # A deadline for when to stop retrying, in elapsed time rather than a number
+  # of attempts: the operator gave seconds, and the time each attempt itself
+  # takes has to count against them as much as the sleeps do. The first attempt
+  # is made straight away and the last at the deadline, so a confirmation that
+  # arrives just as time runs out still counts. The clock is whole seconds, so
+  # the wait can come out up to a second short of the number given.
+  #
+  # It bounds the retrying, not any single call. Nothing here can interrupt an
+  # attempt already in flight: rpc reaches the node through :erpc, which waits
+  # indefinitely, so a node that holds the connection open without answering
+  # holds the attempt with it - as it would hold the install itself, which
+  # happens before any of this. An operator who needs a hard bound has to
+  # impose one from outside, with timeout(1) or whatever their scheduler
+  # offers.
+  #
+  # Timed from here rather than from before the install, so that an install that
+  # takes its time does not eat the window meant for confirming it. The clock
+  # has already answered once, in the preflight above, which is what makes
+  # asking it again here safe.
+  deadline=$(clock_now) || exit 1
+  deadline=$(( deadline + install_timeout ))
+
+  # Each attempt says nothing while there is another one to come - a node that
+  # is still rebooting is not news. What the last one saw is worth having,
+  # though: it names the version that is running instead, or says the node never
+  # came back.
+  #
+  # Kept apart here too. `Castle.running/1` says nothing on standard output, so
+  # that side is discarded, but the launcher can still have something to say
+  # while confirming - and a warning is not worth less for arriving as the
+  # upgrade is being declared good, so it is passed on either way.
+  while :; do
+    if confirm_stdout=$("$RELEASE_LAUNCHER" rpc "Castle.running(~s($1))" \
+        2> "$confirm_stderr_file"); then
+      confirm_stderr=$(cat "$confirm_stderr_file")
+
+      if [ -n "$confirm_stderr" ]; then
+        echo "$confirm_stderr" >&2
+      fi
+
+      # Only now is what the install said a report of success.
+      if [ -n "$held_output" ]; then
+        echo "$held_output"
+      fi
+
+      install_outcome=reported
+
+      return 0
+    fi
+
+    confirm_stderr=$(cat "$confirm_stderr_file")
+
+    now=$(clock_now) || exit 1
+    if [ "$now" -ge "$deadline" ]; then
+      # Held back until the outcome was known, and the outcome is failure, so
+      # it goes out with the diagnosis rather than to the stream that says the
+      # install worked.
+      if [ -n "$held_output" ]; then
+        echo "$held_output" >&2
+      fi
+
+      if [ -n "$confirm_stdout" ]; then
+        echo "$confirm_stdout" >&2
+      fi
+
+      # All of it, this time, the diagnostic for an unreachable node included.
+      # Between attempts that line is noise; as the last thing seen it is the
+      # finding - it is what tells "the node never came back" from "the node
+      # came back running something else", which are different problems.
+      if [ -n "$confirm_stderr" ]; then
+        echo "$confirm_stderr" >&2
+      fi
+
+      echo "ERROR: $1 is not the running release, ${install_timeout}s after" \
+           "installing it" >&2
+      install_outcome=reported
+
+      exit 1
+    fi
+
+    # There is another attempt to come, so this one's standard error is not the
+    # last word - but it is the only chance to say anything it holds, since the
+    # next attempt truncates the capture. Everything except the launcher's
+    # diagnostic for a node it could not reach is passed on: that line is what a
+    # node part-way through a reboot looks like, and repeating it every couple
+    # of seconds for the length of the wait would bury whatever came with it.
+    # Anything else is unexpected by definition and goes straight out.
+    unexpected_stderr=$(printf '%s\n' "$confirm_stderr" |
+      grep -v "$lost_connection_line" || true)
+
+    if [ -n "$unexpected_stderr" ]; then
+      echo "$unexpected_stderr" >&2
+    fi
+
+    remaining=$(( deadline - now ))
+    if [ "$remaining" -lt "$install_poll_interval" ]; then
+      sleep "$remaining"
+    else
+      sleep "$install_poll_interval"
+    fi
+  done
+}
+
 case $1 in
   releases)
     castle_rpc "Castle.releases()"
@@ -62,9 +455,14 @@ case $1 in
     castle_rpc "Castle.unpack(~s($RELEASE_TARBALL_PREFIX-$2))"
     ;;
 
-  install|remove)
+  install)
     require_vsn "$1" "$2"
-    castle_rpc "Castle.$1(~s($2))"
+    install_and_confirm "$2"
+    ;;
+
+  remove)
+    require_vsn "$1" "$2"
+    castle_rpc "Castle.remove(~s($2))"
     ;;
 
   commit)
@@ -112,10 +510,21 @@ The known commands are:
 
     releases       Lists the releases currently known to the system, and their status
     unpack \"VSN\"   Unpacks $RELEASE_TARBALL_PREFIX-<VSN>.tar.gz
-    install \"VSN\"  Installs VSN and makes it the version that is running now
+    install \"VSN\"  Installs VSN and waits until it is the version running now
     commit [VSN]   Commits VSN, so that it becomes the version that runs on restart.
                    Defaults to the version that is running now.
     remove \"VSN\"   Uninstalls VSN from the system
+
+An upgrade is not complete when the system accepts it: one that restarts the
+emulator is still to reboot, and one that replaces the emulator finishes on the
+way back up. So install asks the system what it is running until it answers
+with the version installed, and fails if it never does.
+
+CASTLE_INSTALL_TIMEOUT is how long it keeps asking, in seconds
+($CASTLE_INSTALL_TIMEOUT, at most ${install_timeout_max}). It bounds the
+asking, not an individual question: a node that keeps the connection open
+without answering is waited on indefinitely, so a hard limit has to come from
+outside, from timeout(1) or whatever runs this.
 " >&2
 
     if [ -n "$1" ]; then
