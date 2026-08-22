@@ -1,8 +1,15 @@
 ### Added
 
 - `bin/castle`, a release management CLI, is now installed alongside the
-  standard launcher. It provides `releases`, `unpack`, `install`, `commit` and
-  `remove`, and delegates to the running system through the standard launcher.
+  standard launcher. It provides `releases`, `upgradable`, `unpack`, `install`,
+  `commit` and `remove`, and delegates to the running system through the standard
+  launcher.
+- `bin/castle upgradable` asks whether the system can be upgraded from, for an
+  operator who wants to know where one stands without staging or installing
+  anything. It says nothing when it can, and exits zero; when it cannot, it
+  reports the same refusal `unpack` and `install` would, and exits non-zero.
+  Nothing has to call it first — those two ask the question for themselves, from
+  inside the operation.
 - `bin/castle commit` may now be given no version, in which case it commits
   whichever release is currently running. It exits non-zero if there was no
   such release, so that automation can tell nothing was committed.
@@ -143,14 +150,16 @@
   *cannot* create `releases/RELEASES` — a release root nothing may write to, say
   — warns and carries on, rather than refusing to start a system that does not
   need that file in order to run.
-- `bin/castle unpack` and `bin/castle install` ask the running system whether it
-  can be upgraded at all, through `Castle.upgradable/0`, and refuse when it
-  cannot. What decides is the release record `release_handler` is working from,
-  not whether `releases/RELEASES` is on disk: it reads that file once, in its
-  `init`, and when the file is missing — or cannot be read — it works from a
-  record it builds out of the boot script's name and version, which names no
-  applications. Upgrading from that is silently wrong rather than refused; see
-  the fix below for what it leaves behind.
+- `bin/castle unpack` and `bin/castle install` refuse a system that cannot be
+  upgraded from, and say why and what to do about it. The refusal is Castle's,
+  made inside the operation itself, so what `bin/castle` does is pass it on: the
+  message goes to standard error and the command exits non-zero, which is what a
+  script chaining `unpack` and `install` needs. What decides is the release
+  record `release_handler` is working from, not whether `releases/RELEASES` is on
+  disk: it reads that file once, in its `init`, and when the file is missing — or
+  cannot be read — it works from a record it builds out of the boot script's name
+  and version, which names no applications. Upgrading from that is silently wrong
+  rather than refused; see the fix below for what it leaves behind.
 
   **The remedy is a restart, not creating the file.** Nothing can repair the
   record a running system holds: `release_handler` never reads `RELEASES` again
@@ -161,15 +170,13 @@
   *that* reads the erased version. Restart first, and the release creates the
   file before the system starts. What the refusal says is exactly that.
 
-  Both commands are asked, because they are separate invocations and the answer
-  given before one does not carry to the other: `install_release` is the
-  operation that acts on the record, and a restart, a `RELEASES` file that has
-  gone away, or a version staged by an older launcher can come between. The
-  refusal carries whatever `Castle.upgradable/0` said, on standard error, and
-  exits with the status the launcher failed with — a system that refused and a
-  node that could not be reached are different failures. `commit`, `remove` and
-  `releases` are not gated: they compare no release records, and refusing them
-  would only be a way to interrupt an upgrade already under way.
+  Nothing asks the question ahead of those operations, and a deployment script
+  should not either. A check made in one call and acted on in another is a check
+  about a moment that has passed: the node can restart in between, onto a record
+  it makes up afresh, and the operation would then go ahead on an answer that no
+  longer held. `commit`, `remove` and `releases` are not refused at all — none of
+  them can write that record back, and refusing them could strand a version that
+  was already installed.
 - Assembling a release that includes Windows executables still warns, but for a
   different reason, and the warning says so. The `.bat` launcher now boots: Mix
   writes the `sys.config` it reads and configures the system itself, which it
@@ -305,9 +312,11 @@
   left reachable only through the directory of the superseded release, which the
   next `bin/castle remove` deletes. Nothing reported it. The file is now created
   before the system starts, and `bin/castle unpack` and `bin/castle install`
-  refuse rather than upgrade a system that started without one — asking the node
-  what its records hold, so that a file which appeared after the boot that went
-  looking for it is not mistaken for a system that can be upgraded. The `:e2e`
+  refuse rather than upgrade a system that started without one — the operations
+  reading the node's own records as they act, so that a file which appeared after
+  the boot that went looking for it is not mistaken for a system that can be
+  upgraded, and so that nothing acts on an answer given before a restart. The
+  `:e2e`
   suite covers it with an application whose version changes and whose appup asks
   for nothing, which is the shape that used to go unnoticed.
 - The `GitHub` link in the Hex package metadata pointed at the Castle

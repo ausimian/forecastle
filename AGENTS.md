@@ -54,12 +54,7 @@ around it composes instead:
   distribution and node naming from the standard launcher. Most commands
   `exec` the launcher and are done; `install` and the version-less `commit`
   cannot, because they have something to do afterwards, so they capture the
-  output and propagate the status themselves. A gate is the other reason not to
-  `exec` — `castle_rpc` replaces the shell, so nothing after it would run — which
-  is why `require_upgradable` calls the launcher in the same shape, and why
-  `unpack`, gated and then `exec`ing, reaches the launcher twice.
-
-  What `install` does afterwards is
+  output and propagate the status themselves. What `install` does afterwards is
   confirm, through `Castle.running/1`, that the version it installed is the one
   running: `release_handler` replies as soon as it has accepted an upgrade,
   which for a transition that restarts the emulator is before the upgrade has
@@ -154,8 +149,8 @@ around it composes instead:
 
   Failure there is a warning rather than a refusal — a release does not need the
   file in order to run, and a read-only release root is an ordinary way to run
-  one. `bin/castle` is where the consequence is refused instead; see
-  `require_upgradable`.
+  one. Castle is where the consequence is refused instead, from inside `unpack`
+  and `install`; see the next entry.
 
   The call needs no working directory of its own: `Castle.make_releases/0`
   derives the releases directory from `code:root_dir()`, the root
@@ -163,36 +158,32 @@ around it composes instead:
   beside the records that will be read from it however the launcher was invoked.
   It used to be resolved against the working directory, which is why the
   fragment wrapped it in a `File.cd!` into `RELEASE_ROOT`.
-- **`require_upgradable` asks the node, not the filesystem.** It rpcs
-  `Castle.upgradable/0`, which prints nothing when the running release can be
-  upgraded from and raises `Castle.Error` when it cannot, so the launcher exits
-  non-zero and Castle's message — including the remedy, which is a restart —
-  reaches the operator. Both streams pass straight through, and the launcher's
-  own status with them: a refusal and a node that could not be reached are
-  different failures.
+- **There is no check in front of `unpack` or `install`, and nothing may add
+  one.** A system running from the record `release_handler` synthesised for
+  itself cannot be upgraded from — the record names no applications, so nothing
+  compares as changed and an application whose version moved but whose code the
+  relup does not load is left reachable only through the release being replaced.
+  Castle refuses both operations for that, from inside the call that acts, and
+  raises: the launcher exits non-zero with the reason and its remedy — a restart,
+  the only thing that changes the record — on standard error. `bin/castle` decides
+  nothing and paraphrases nothing.
 
-  The record is what decides, and only the node holds it. `release_handler` reads
-  `releases/RELEASES` once, in `init`, and a file that appeared *after* the boot
-  that went looking for it passes a `[ -f ]` test while the node is still working
-  from the record it synthesised — which is precisely the case a gate exists to
-  catch, and the reason the test that used to be here was an approximation.
-  Castle's discriminator is the record's empty application list, which is exact:
-  `which_releases/0` reports `mk_lib_name(Libs)`, `mk_lib_name([]) -> []`, and a
-  record read from a real `RELEASES` names at least `kernel` and `stdlib`.
+  This repo did have a gate, one rpc to `Castle.upgradable/0` in front of each
+  operation, and it was wrong. Two rpcs are two moments and possibly two node
+  instances: a node can answer on the record it read at boot, restart onto a
+  synthesised one, and have the unpack or the install arrive afterwards and act
+  on an answer that no longer holds — the very failure the check exists to
+  prevent. An answer is only good for the call that acts on it, which is why the
+  check is `Castle.Commands.ensure_upgradable/2` and belongs to the operations.
+  Do not reintroduce one here, in any shape, and do not add one to make a refusal
+  arrive sooner: `Castle.install/1` materialises the target's configuration
+  before it refuses, so a refused install starts a peer first. That is harmless —
+  the peer writes only into the target's version directory, never to the running
+  system or to any release record, and it is idempotent.
 
-  **`unpack` and `install` are both gated, and nothing else is.** `unpack` is
-  where an operator is told to restart before they stage anything, and it is also
-  the operation that writes the synthesised record back over the file.
-  `install_release` is the operation that acts on the record, and it is a
-  separate invocation: a restart, a `RELEASES` file that has gone away or gone
-  unreadable, or a version staged by an older `bin/<release>` on a migrating
-  deployment can all come between the two, so the answer given before the unpack
-  does not carry. `commit`, `remove` and `releases` compare no records, and
-  gating them would only add a way to refuse an upgrade that was already under
-  way. In `install` the gate is the last of the preflight — after the checks that
-  need nothing from the system, and after the traps, so a refusal still takes the
-  capture directory with it — and before the launcher is asked to install
-  anything, which is the rule the whole function is built around.
+  `bin/castle upgradable` asks the question on its own, for an operator who wants
+  to know where a system stands without staging anything. It is a plain command
+  like `releases`, gates nothing, and says nothing when the answer is yes.
 - The `env.sh` fragment expands no configuration and applies none of the
   launcher's defaults; on every start after the first it does nothing at all. It
   is appended, so a project's own `rel/env.sh.eex` survives and runs first, and
@@ -264,12 +255,12 @@ returns its argument, which is what makes the second observable at all.
   deployment can unpack, install or commit an upgrade. Assembly warns. Real
   support is a feature, not a fix.
 - **A system that cannot write `releases/RELEASES` cannot be upgraded, only
-  restarted.** The start warns, the system runs, and `require_upgradable` then
-  refuses `unpack` and `install`. There is nothing `bin/castle` could do about it
-  from outside: `release_handler` reads that file in its `init` and never again,
-  so creating it changes no record the running node holds. What the refusal costs
-  if it is ever ignored — through an older launcher, or a direct
-  `rpc Castle.unpack(...)` — is that `get_new_libs/2` is seeded from the running
+  restarted.** The start warns, the system runs, and Castle then refuses `unpack`
+  and `install`. There is nothing `bin/castle` could do about it from outside:
+  `release_handler` reads that file in its `init` and never again, so creating it
+  changes no record the running node holds. What the refusal costs if it is ever
+  ignored — through an older launcher, whose `bin/<release>` a hot upgrade does
+  not replace — is that `get_new_libs/2` is seeded from the running
   record, so an empty one means nothing compares as changed, and only the
   applications the relup explicitly loads code for get `code:replace_path`. Every
   other application whose version moved stays reachable through the superseded
@@ -302,11 +293,13 @@ returns its argument, which is what makes the second observable at all.
 Do not work the configuration question around in this repo: putting Castle's
 logic back into shell-embedded Elixir is the coupling `bin/castle` exists to
 remove. `require_releases` was a file test for that reason, and the rule said
-that the moment it needed to interrogate the node it became a Castle function —
-which is what happened: it is now one rpc to `Castle.upgradable/0`, and the
-answer is Castle's to give, message and all. Keep it that way. Anything new that
-has to know what the node holds is a Castle function too, not an expression
-assembled here.
+that the moment it needed to interrogate the node it became a Castle function.
+That is what happened, twice over: first as `Castle.upgradable/0` called from
+here, and then — because a question asked in one call and acted on in another is
+a question about a moment that has passed — as a check the operations make
+themselves. The lesson is the stronger form of the same rule: what the node holds
+is Castle's to know, and where a decision rests on it, the decision goes with it.
+Nothing here is the place for either.
 
 ## Compatibility
 

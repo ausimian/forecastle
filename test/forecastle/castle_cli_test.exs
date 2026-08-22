@@ -5,14 +5,11 @@ defmodule Forecastle.CastleCliTest do
   The release launcher is replaced with a stub that records the arguments it was
   handed, so these tests pin down exactly what `bin/castle` delegates without
   needing a running system. Every call appends to the same record, so a command
-  that reaches the launcher more than once - `unpack` and `install`, which ask
-  the system whether it can be upgraded first, and `install` again to confirm
-  what it installed - reads back as one flat list of arguments in the order they
-  were passed.
-
-  Every stub answers that first question the way a system that can be upgraded
-  answers it, so a stub keyed on how many times it has been called counts only
-  the calls it is about; `refuses/2` is how a test asks for the other answer.
+  that reaches the launcher more than once - `install`, which confirms what it
+  installed - reads back as one flat list of arguments in the order they were
+  passed. What the system refuses is Castle's to refuse, from inside the call
+  that acts, so a stub that answers a command non-zero is how a refusal is
+  simulated here.
 
   Replacing that stub is also the only way to simulate a transition that
   restarts the emulator: nothing can build a relup that asks for one until #4,
@@ -28,15 +25,6 @@ defmodule Forecastle.CastleCliTest do
   # one that never finishes is ExUnit's own test timeout to catch, since nothing
   # here interrupts a `System.cmd/3` in flight.
   @runaway 60_000
-
-  # What a system that cannot be upgraded says, abridged from
-  # `Castle.Commands.upgradable/1`: enough of it to tell that the message
-  # reached the operator, including the remedy, which is the part that matters
-  # and the part nothing else can supply.
-  @refusal "0.1.0 is running from a release record OTP built from the boot script, which " <>
-             "names no applications: releases/RELEASES was missing, or could not be read, " <>
-             "when the system booted. Restart the system before upgrading it: the release " <>
-             "creates the file before it starts."
 
   setup_all do
     release = assemble!(into: "rel-forecastle")
@@ -66,23 +54,20 @@ defmodule Forecastle.CastleCliTest do
     end
 
     test "unpack composes the tarball name from the build-time release name", context do
-      assert castle!(context, ["unpack", "0.1.1"]) == [
-               "rpc",
-               "Castle.upgradable()",
-               "rpc",
-               "Castle.unpack(~s(sample-0.1.1))"
-             ]
+      assert castle!(context, ["unpack", "0.1.1"]) == ["rpc", "Castle.unpack(~s(sample-0.1.1))"]
     end
 
     test "install, and then the confirmation that it took effect", context do
       assert castle!(context, ["install", "0.1.1"]) == [
                "rpc",
-               "Castle.upgradable()",
-               "rpc",
                "Castle.install(~s(0.1.1))",
                "rpc",
                "Castle.running(~s(0.1.1))"
              ]
+    end
+
+    test "upgradable", context do
+      assert castle!(context, ["upgradable"]) == ["rpc", "Castle.upgradable()"]
     end
 
     test "commit with an explicit version", context do
@@ -94,127 +79,91 @@ defmodule Forecastle.CastleCliTest do
     end
   end
 
-  describe "whether the running system can be upgraded" do
+  describe "a system that cannot be upgraded from" do
     # release_handler reads releases/RELEASES once, in its init, and when the
     # file is missing - or cannot be read - it works from a record it builds out
     # of the boot script's name and version, which names no applications.
     # Upgrading from that leaves any application whose version moved, but whose
     # code the relup does not load, running from the release being replaced.
     #
-    # So the question is put to the node, through Castle.upgradable/0, rather
-    # than to the filesystem: what is on disk cannot answer it. A file that
-    # appeared after the boot that looked for it passes a test for the file and
-    # leaves the node on the synthesised record regardless, which is the one case
-    # a gate is for. The file itself is created before the system starts, by the
-    # release's env.sh, and nowhere else.
+    # Castle refuses `unpack` and `install` for it, from inside the call that
+    # acts. Nothing here asks first: two rpcs are two moments and possibly two
+    # node instances, so a node could answer on the record it read at boot,
+    # restart onto a synthesised one, and have the operation arrive afterwards
+    # and act on an answer that no longer held. What bin/castle owes an operator
+    # is the refusal, its remedy, and a non-zero status.
 
-    test "is asked before a version is unpacked", context do
-      assert castle!(context, ["unpack", "0.1.1"]) == [
-               "rpc",
-               "Castle.upgradable()",
-               "rpc",
-               "Castle.unpack(~s(sample-0.1.1))"
-             ]
-    end
-
-    test "is asked again before an install", context do
-      # install_release is the operation that acts on the running record, and it
-      # is a separate invocation of this script from the unpack that staged the
-      # version: a restart, a RELEASES file that has gone away or gone
-      # unreadable, or a version staged by an older launcher can all come
-      # between the two, and the answer given before the unpack does not carry.
-      assert castle!(context, ["install", "0.1.1"]) == [
-               "rpc",
-               "Castle.upgradable()",
-               "rpc",
-               "Castle.install(~s(0.1.1))",
-               "rpc",
-               "Castle.running(~s(0.1.1))"
-             ]
-    end
-
-    test "stops the unpack, saying what the system said, when it cannot be", context do
-      assert {output, status} = castle(context, ["unpack", "0.1.1"], refuses())
-
-      assert status != 0
-      # Castle's own message, passed through rather than paraphrased here: it is
-      # what names the remedy, and a restart is the only thing that changes the
-      # record the node holds.
-      assert output =~ "names no applications"
-      assert output =~ "Restart the system before upgrading it"
-      # Refused before the system was asked to unpack anything.
-      assert calls(context) == ["rpc", "Castle.upgradable()"]
-    end
-
-    test "stops the install before anything has been installed", context do
-      assert {out, err, status} = castle_streams(context, ["install", "0.1.1"], refuses())
-
-      assert status != 0
-      assert out == ""
-      assert err =~ "Restart the system before upgrading it"
-      # Nothing was installed, so there is no outcome left in doubt: the
-      # epilogue must not tell an operator to go and find out what their system
-      # is running when this refused before it could move.
-      refute err =~ "outcome is not known"
-      assert calls(context) == ["rpc", "Castle.upgradable()"]
-    end
-
-    test "leaves nothing behind when it refuses an install", context do
-      # The refusal happens after install has claimed somewhere to capture what
-      # the launcher says, so the capture has to be tidied up on the way out.
-      tmp = Path.join(context.root, "scratch")
-
-      assert {_output, status} =
-               castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp} | refuses()])
-
-      assert status != 0
-      assert File.ls!(tmp) == []
-    end
-
-    test "reports the status the launcher failed with", context do
-      # A node that cannot be reached and a system that refuses are different
-      # failures, and both arrive here as a launcher that exited non-zero.
-      # Whatever drove this may care which, so the status is passed through
-      # rather than flattened to 1.
-      assert {_output, 3} = castle(context, ["unpack", "0.1.1"], refuses(@refusal, 3))
-    end
-
-    test "is not asked by the commands that do not act on the record", context do
-      # commit makes a release the system is already running permanent, remove
-      # deletes one, releases reads. None of them compares release records to
-      # decide which code paths to switch, so gating them would only add a way
-      # to refuse an upgrade that was already under way - and they still work on
-      # a system that has just refused one.
-      for args <- [["commit", "0.1.1"], ["remove", "0.1.1"], ["releases"]] do
-        File.rm(context.record)
-
-        assert {_output, 0} = castle(context, args, refuses()), "#{hd(args)} was refused"
-
-        refute Enum.any?(calls(context), &(&1 =~ "Castle.upgradable")),
-               "#{hd(args)} asked whether the system could be upgraded"
-      end
-    end
-
-    test "is not asked when the version is refused", context do
-      # The version is checked first, so an unusable one is reported as that
-      # rather than as something the system could not answer.
-      assert {output, status} = castle(context, ["unpack", "1.2.3)"])
-
-      assert status != 0
-      assert output =~ "is not a usable release version"
-      refute recorded?(context)
-    end
-
-    test "does not have bin/castle create the file instead", context do
-      # It cannot be created usefully from here: the record is read at boot, and
-      # the first operation that changes anything writes that record straight
-      # back over the file.
+    test "is asked about by nothing but the command for asking", context do
       for args <- [
             ["unpack", "0.1.1"],
             ["install", "0.1.1"],
             ["commit", "0.1.1"],
             ["remove", "0.1.1"],
             ["releases"]
+          ] do
+        File.rm(context.record)
+
+        refute Enum.any?(castle!(context, args), &(&1 =~ "Castle.upgradable")),
+               "#{hd(args)} asked whether the system could be upgraded first"
+      end
+    end
+
+    test "refuses the unpack, in the words the system refused it with", context do
+      refuses!(context, "unpack sample-0.1.1")
+
+      assert {output, status} = castle(context, ["unpack", "0.1.1"])
+
+      assert status != 0
+      # Castle's message, passed through rather than paraphrased: it leads with
+      # the operation that did not happen and it names the remedy, which is a
+      # restart, because that is the only thing that changes the record.
+      assert output =~ "Cannot unpack sample-0.1.1"
+      assert output =~ "Restart the system"
+      # It came back from the unpack itself. Nothing was asked beforehand.
+      assert calls(context) == ["rpc", "Castle.unpack(~s(sample-0.1.1))"]
+    end
+
+    test "refuses the install, and reports it as the failure it is", context do
+      refuses!(context, "install 0.1.1")
+
+      assert {out, err, status} = castle_streams(context, ["install", "0.1.1"])
+
+      assert status != 0
+      assert out == ""
+      assert err =~ "Cannot install 0.1.1"
+      assert err =~ "Restart the system"
+      # A refusal is final, so it is reported in full and nothing is left in
+      # doubt for the epilogue to raise - and there is nothing to wait for: the
+      # system said no, and polling would only delay the report.
+      refute err =~ "outcome is not known"
+      assert calls(context) == ["rpc", "Castle.install(~s(0.1.1))"]
+    end
+
+    test "leaves nothing behind in RELEASE_TMP when the install is refused", context do
+      # The refusal arrives after install has claimed somewhere to capture what
+      # the launcher says, so the capture still has to be tidied up on the way
+      # out.
+      tmp = Path.join(context.root, "scratch")
+      refuses!(context, "install 0.1.1")
+
+      assert {_output, status} = castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
+
+      assert status != 0
+      assert File.ls!(tmp) == []
+    end
+
+    test "does not have bin/castle create the file instead", context do
+      # It cannot be created usefully from here: the record is read at boot, and
+      # the first operation that changes anything writes that record straight
+      # back over the file. The release's env.sh creates it before the system
+      # starts, and nowhere else.
+      for args <- [
+            ["unpack", "0.1.1"],
+            ["install", "0.1.1"],
+            ["commit", "0.1.1"],
+            ["remove", "0.1.1"],
+            ["releases"],
+            ["upgradable"]
           ] do
         File.rm(context.record)
 
@@ -299,8 +248,6 @@ defmodule Forecastle.CastleCliTest do
 
       assert calls(context) == [
                "rpc",
-               "Castle.upgradable()",
-               "rpc",
                "Castle.install(~s(0.1.1))",
                "rpc",
                "Castle.running(~s(0.1.1))"
@@ -318,7 +265,7 @@ defmodule Forecastle.CastleCliTest do
 
       # Nothing to wait for: the system said no. Polling would only delay the
       # report by however long the timeout is.
-      assert calls(context) == ["rpc", "Castle.upgradable()", "rpc", "Castle.install(~s(0.1.1))"]
+      assert calls(context) == ["rpc", "Castle.install(~s(0.1.1))"]
     end
 
     test "propagates a failing launcher exit status", context do
@@ -343,20 +290,13 @@ defmodule Forecastle.CastleCliTest do
       assert {output, 3} = castle(context, ["install", "noconnection"])
       assert output =~ "Install of noconnection failed."
 
-      assert calls(context) == [
-               "rpc",
-               "Castle.upgradable()",
-               "rpc",
-               "Castle.install(~s(noconnection))"
-             ]
+      assert calls(context) == ["rpc", "Castle.install(~s(noconnection))"]
     end
 
     test "confirms a version named noconnection like any other", context do
       # The other half of that: the word in the version must not get in the way
       # of the ordinary path either.
       assert castle!(context, ["install", "noconnection"]) == [
-               "rpc",
-               "Castle.upgradable()",
                "rpc",
                "Castle.install(~s(noconnection))",
                "rpc",
@@ -950,7 +890,7 @@ defmodule Forecastle.CastleCliTest do
     end
 
     test "does not rename the release tarballs", context do
-      assert ["rpc", "Castle.upgradable()", "rpc", expression] =
+      assert ["rpc", expression] =
                castle!(context, ["unpack", "0.1.1"], [{"RELEASE_NAME", "other"}])
 
       assert expression == "Castle.unpack(~s(sample-0.1.1))"
@@ -980,6 +920,18 @@ defmodule Forecastle.CastleCliTest do
     test "documents that commit's version is optional", context do
       assert {output, 0} = castle(context, [])
       assert output =~ ~r/commit \[VSN\]/
+    end
+
+    test "documents upgradable, and that the operations ask it for themselves", context do
+      # An operator who meets the refusal needs to know both halves: that the
+      # question can be asked on its own, and that a silent answer is the good
+      # one - and that asking it first is not a step they are missing.
+      assert {output, 0} = castle(context, [])
+
+      assert output =~ ~r/upgradable\s+Asks whether the system can be upgraded from/
+      assert output =~ "saying nothing if it can"
+      assert output =~ "ask that same question themselves"
+      assert output =~ "The remedy is a restart"
     end
 
     test "documents the timeout install waits for, and its default", context do
@@ -1063,7 +1015,7 @@ defmodule Forecastle.CastleCliTest do
 
     for {version, index} <- Enum.with_index(@unusual_but_valid) do
       test "#{index}: #{inspect(version)} is passed through as itself", context do
-        assert ["rpc", "Castle.upgradable()", "rpc", installing, "rpc", confirming] =
+        assert ["rpc", installing, "rpc", confirming] =
                  castle!(context, ["install", unquote(version)])
 
         # The real property is not the text of the expression but its meaning:
@@ -1211,43 +1163,31 @@ defmodule Forecastle.CastleCliTest do
     write_stub!(Path.join([context.root, "bin", "sample"]), context.record, body)
   end
 
-  # Writes a launcher stub: it records every call it is handed, answers the
-  # upgrade gate, and then runs `body`.
-  #
-  # The gate is answered here rather than in each body because bin/castle asks
-  # it before it unpacks or installs, and a body keyed on how many times it has
-  # been called, or on a marker file it writes the first time, is about the calls
-  # that come after it. Answered silently and with a zero exit, which is what
-  # Castle.upgradable/0 does on a system that can be upgraded; a body never sees
-  # the call. CASTLE_STUB_NOT_UPGRADABLE is the other answer - a Castle.Error on
-  # standard error and a non-zero exit - and CASTLE_STUB_GATE_STATUS the status
-  # to refuse with, so that a launcher that could not reach the node at all can
-  # be told from a system that answered.
+  # Writes a launcher stub: it records every call it is handed, and then runs
+  # `body`.
   defp write_stub!(stub, record, body) do
     File.write!(stub, """
     #!/bin/sh
     printf '%s\\0' "$@" >> "#{record}"
-    case $2 in
-      Castle.upgradable*)
-        if [ -n "$CASTLE_STUB_NOT_UPGRADABLE" ]; then
-          echo "** (Castle.Error) $CASTLE_STUB_NOT_UPGRADABLE" >&2
-          exit "${CASTLE_STUB_GATE_STATUS:-1}"
-        fi
-        exit 0
-        ;;
-    esac
     #{body}
     """)
 
     File.chmod!(stub, 0o755)
   end
 
-  # An environment in which the system refuses to be upgraded.
-  defp refuses(message \\ @refusal, status \\ 1) do
-    [
-      {"CASTLE_STUB_NOT_UPGRADABLE", message},
-      {"CASTLE_STUB_GATE_STATUS", to_string(status)}
-    ]
+  # A launcher whose system refuses the operation for the release record it is
+  # running from, the way Castle refuses it from inside the call that acts. The
+  # message leads with the operation that did not happen, abridged from
+  # Castle.Commands.ensure_upgradable/2, and names the remedy - the part nothing
+  # else can supply.
+  defp refuses!(context, operation) do
+    stub_launcher!(context, """
+    echo '** (Castle.Error) Cannot #{operation}: 0.1.0 is running from a release' \\
+         'record OTP built from the boot script, which names no applications -' \\
+         'releases/RELEASES was missing, or could not be read, when the system' \\
+         'booted. Restart the system: the release creates the file before it starts.' >&2
+    exit 1
+    """)
   end
 
   defp recorded?(context), do: File.exists?(context.record)
