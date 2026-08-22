@@ -106,12 +106,13 @@ In the post-assembly step:
     deployment it creates `releases/RELEASES`, which is what lets the system
     manage its own releases — a short-lived VM, once, and only while that file
     is absent. The release root has to be writable for it to succeed; if it is
-    not, the start still proceeds, with a warning, and `bin/castle unpack` will
-    later refuse rather than upgrade a system that cannot record what it is
-    running. Every start after the first does nothing at all. The hook is also
-    where the provisional version marker left by a relup that restarts the
-    emulator will be consumed. Any `env.sh` the project supplies through
-    `rel/env.sh.eex` is preserved, and runs first.
+    not, the start still proceeds, with a warning, and `bin/castle unpack` and
+    `bin/castle install` will later refuse — asking the running system whether
+    it can be upgraded at all — rather than upgrade a system that cannot record
+    what it is running. Every start after the first does nothing at all. The
+    hook is also where the provisional version marker left by a relup that
+    restarts the emulator will be consumed. Any `env.sh` the project supplies
+    through `rel/env.sh.eex` is preserved, and runs first.
   - The generated _name.rel_ is copied into the `releases` folder as _name-vsn.rel_,
     which is where `release_handler` looks for it when unpacking a tarball.
   - Any checked `relup` is written into the version path of the release.

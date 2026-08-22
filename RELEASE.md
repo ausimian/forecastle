@@ -141,13 +141,33 @@
   *cannot* create `releases/RELEASES` — a release root nothing may write to, say
   — warns and carries on, rather than refusing to start a system that does not
   need that file in order to run.
-- `bin/castle unpack` refuses to unpack a version into a system that has no
-  `releases/RELEASES`, and says to restart it first. `release_handler` reads that
-  file once, in its `init`, and builds a release record out of the boot script
-  when it is missing; the first operation that changes anything then writes the
-  record it is already holding straight back over the file. So a system that
-  started without one cannot be repaired while it runs, and upgrading it is not
-  safe — see the fix below for what it silently does.
+- `bin/castle unpack` and `bin/castle install` ask the running system whether it
+  can be upgraded at all, through `Castle.upgradable/0`, and refuse when it
+  cannot. What decides is the release record `release_handler` is working from,
+  not whether `releases/RELEASES` is on disk: it reads that file once, in its
+  `init`, and when the file is missing — or cannot be read — it works from a
+  record it builds out of the boot script's name and version, which names no
+  applications. Upgrading from that is silently wrong rather than refused; see
+  the fix below for what it leaves behind.
+
+  **The remedy is a restart, not creating the file.** Nothing can repair the
+  record a running system holds: `release_handler` never reads `RELEASES` again
+  after its `init`, so a file created afterwards changes nothing about what the
+  node is working from — and the first operation that changes anything, `unpack`
+  among them, writes the record it is already holding straight back over the
+  file, so creating it by hand is erased moments later and a restart after
+  *that* reads the erased version. Restart first, and the release creates the
+  file before the system starts. What the refusal says is exactly that.
+
+  Both commands are asked, because they are separate invocations and the answer
+  given before one does not carry to the other: `install_release` is the
+  operation that acts on the record, and a restart, a `RELEASES` file that has
+  gone away, or a version staged by an older launcher can come between. The
+  refusal carries whatever `Castle.upgradable/0` said, on standard error, and
+  exits with the status the launcher failed with — a system that refused and a
+  node that could not be reached are different failures. `commit`, `remove` and
+  `releases` are not gated: they compare no release records, and refusing them
+  would only be a way to interrupt an upgrade already under way.
 - Assembling a release that includes Windows executables still warns, but for a
   different reason, and the warning says so. The `.bat` launcher now boots: Mix
   writes the `sys.config` it reads and configures the system itself, which it
@@ -282,10 +302,12 @@
   and every application whose new code the relup does not explicitly load was
   left reachable only through the directory of the superseded release, which the
   next `bin/castle remove` deletes. Nothing reported it. The file is now created
-  before the system starts, and `bin/castle unpack` refuses rather than upgrade a
-  system that started without one. The `:e2e` suite covers it with an application
-  whose version changes and whose appup asks for nothing, which is the shape that
-  used to go unnoticed.
+  before the system starts, and `bin/castle unpack` and `bin/castle install`
+  refuse rather than upgrade a system that started without one — asking the node
+  what its records hold, so that a file which appeared after the boot that went
+  looking for it is not mistaken for a system that can be upgraded. The `:e2e`
+  suite covers it with an application whose version changes and whose appup asks
+  for nothing, which is the shape that used to go unnoticed.
 - The `GitHub` link in the Hex package metadata pointed at the Castle
   repository rather than Forecastle's.
 - The `:appup` compiler left `<app>.appup` behind in `ebin` once the project
@@ -348,18 +370,10 @@ converted in place.
 - **A system that cannot write `releases/RELEASES` cannot be upgraded.** The
   release creates it on its first start; where that fails — a read-only release
   root is the usual reason — the start warns, the system runs perfectly well, and
-  `bin/castle unpack` then refuses, because upgrading from the release record OTP
-  builds out of the boot script leaves applications on old code without saying
-  so. Make the release root writable, or the `releases` directory within it, and
-  restart once. There is no way to repair a running system: `release_handler`
-  reads that file only in its `init`.
-- **`bin/castle` tests for that file rather than asking the system.** A system
-  with no file has certainly started without one, so the refusal is never wrong;
-  the converse is not covered, so a file that appeared *after* the start that
-  looked for it would be accepted while the node was still working from the
-  synthesised record. Reaching that state takes deliberate work — nothing in
-  Forecastle or Castle creates the file after a start any more — and closing it
-  properly means asking the node what its release records hold, which belongs in
-  Castle alongside `which_releases/0`.
+  `bin/castle unpack` and `bin/castle install` then refuse, because upgrading
+  from the release record OTP builds out of the boot script leaves applications
+  on old code without saying so. Make the release root writable, or the
+  `releases` directory within it, and restart once. There is no way to repair a
+  running system: `release_handler` reads that file only in its `init`.
 - Windows releases are not supported; see above. What is missing is now
   `bin/castle` rather than a bootable release.
