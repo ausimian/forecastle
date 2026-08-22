@@ -102,6 +102,17 @@ defmodule Forecastle.AssemblyTest do
       assert env_sh =~ ~s([ ! -f "$RELEASE_ROOT/releases/RELEASES" ])
     end
 
+    test "does not change directory to do it", %{env_sh: env_sh} do
+      # Castle derives the releases directory from code:root_dir(), the root
+      # release_handler resolves its own paths against, so the call needs no
+      # working directory of its own and nothing about the release has to be
+      # interpolated into the expression to say where the file goes. The whole
+      # expression, asserted as one, is what says both: it used to be a File.cd!
+      # into a RELEASE_ROOT read out of the environment.
+      assert env_sh =~ ~s|--eval "Castle.make_releases()"|
+      refute env_sh =~ "fetch_env!"
+    end
+
     test "only runs for the commands that start the system", %{env_sh: env_sh} do
       # Not eval, which the configuration expansion needed and this does not: an
       # eval VM manages no releases.
