@@ -26,11 +26,15 @@ That existed to give the version being upgraded *to* a configuration resolved by
 its own providers, which a boot of the version being upgraded *from* cannot
 produce. [castle#13](https://github.com/ausimian/castle/issues/13) does that
 properly — in a `:peer` booted on the target's own code, running Elixir's own
-pipeline — and this half of the change is what makes it reachable: Castle
-dispatches on whether `releases/<vsn>/build.config` exists, so the file must not
-be created. Mix decides which file configures a release at runtime, initialises
-the providers a project declared with whatever term it declared them with, and
-expands runtime configuration in the booting VM.
+pipeline — and this half of the change is what made it reachable. It is now the
+only path Castle has: 1.0 configures every version that way, and the branch that
+read a `build.config` is deleted along with the file, so there is no
+discriminator left to preserve. What that leaves as the rule here is simply that
+the `sys.config` Mix writes stays where Mix put it — renaming it again would
+produce a release whose launcher can find no configuration at all, and no Castle
+that reads the other name exists any more. Mix decides which file configures a
+release at runtime, initialises the providers a project declared with whatever
+term it declared them with, and expands runtime configuration in the booting VM.
 
 The two defects that interception carried —
 [#6](https://github.com/ausimian/forecastle/issues/6) — are gone with it rather

@@ -46,11 +46,11 @@ Take `Castle` 1.0 or later with a 1.x `Forecastle`, and do not pair a 1.x
 `Forecastle` with an older `Castle`. The two halves divide one job between them
 and the boundary moved in 1.0: `Forecastle` no longer intercepts configuration at
 build time, and `Castle` works out the configuration of the version being
-installed for itself, in a temporary VM running that version's own code.
-`Castle` tells the two worlds apart by whether a release has a `build.config`
-file — the file `Forecastle` used to create and no longer does — so an older
-`Castle` paired with this `Forecastle` finds no `build.config`, looks for a path
-it has not got, and refuses the install.
+installed for itself, in a temporary VM running that version's own code. That is
+`Castle` 1.0's only path: the branch that read the `build.config` `Forecastle`
+used to write is gone, along with the file. So a release assembled by a 1.x
+`Forecastle` carries the `sys.config` Mix wrote and nothing else, and an older
+`Castle` handed one looks for a file that is not there and refuses the install.
 
 Nothing in the build can enforce this. `Forecastle` is a dependency *of*
 `Castle`, so it cannot constrain the version of `Castle` that brought it in, and

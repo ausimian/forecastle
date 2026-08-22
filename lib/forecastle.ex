@@ -24,9 +24,10 @@ defmodule Forecastle do
   # `:env` key added, and renamed `sys.config` to `build.config` so that only
   # Castle could expand it at boot. That existed to give the version being
   # upgraded *to* a configuration resolved by its own providers, which
-  # castle#13 now does properly, in a `:peer` running the target's own code -
-  # and which is why `build.config` must no longer exist: its presence is what
-  # Castle dispatches on.
+  # castle#13 now does properly, in a `:peer` running the target's own code, for
+  # every version and by the only route Castle has left - there is no
+  # `build.config` and nothing that would read one, so renaming what Mix wrote
+  # would leave the standard launcher with no configuration to boot from.
   def pre_assemble(%Mix.Release{} = release) do
     release
     |> stage_relup()

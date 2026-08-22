@@ -146,10 +146,11 @@ defmodule Forecastle.AssemblyTest do
     test "leaves the configuration where Mix put it", %{forecastle: forecastle} do
       # Forecastle used to rename sys.config to build.config so that the stock
       # launcher could not boot from it and Castle had to expand it first.
-      # Castle now dispatches on whether build.config exists - present means a
-      # release whose configuration was intercepted at build time, absent means
-      # Mix's pipeline is intact and the target is evaluated in a peer - so the
-      # absence of that file is what selects the new path.
+      # Neither the rename nor anything that would read the renamed file exists
+      # any more: Mix's pipeline is intact, the launcher boots what Mix wrote,
+      # and Castle resolves the version it is installing in a peer. Both files
+      # are asserted because the defect could be either - the configuration
+      # withheld, or written twice under two names.
       version_path = Path.join(forecastle, "releases/#{@vsn}")
 
       refute File.exists?(Path.join(version_path, "build.config"))

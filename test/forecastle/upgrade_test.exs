@@ -218,10 +218,12 @@ defmodule Forecastle.UpgradeTest do
     end
 
     test "resolved the target's configuration in a peer", %{deploy: deploy} do
-      # The release has no build.config, which is what sends Castle down the
-      # peer path: it keeps what Mix wrote as sys.config.pristine, boots a VM on
-      # the target's own preboot script to run the target's own providers, and
-      # renames the result over sys.config with a line saying it did.
+      # How Castle configures every version it installs, and the only way it
+      # does: it keeps what Mix wrote as sys.config.pristine, boots a VM on the
+      # target's own preboot script to run the target's own providers, and
+      # renames the result over sys.config with a line saying it did. The
+      # preboot script this needs is what pre_assemble/1 contributes, which is
+      # why this is asserted from here.
       version_path = Path.join(deploy, "releases/#{@to}")
 
       assert File.read!(Path.join(version_path, "sys.config")) =~ "CASTLE_MATERIALISED=true"

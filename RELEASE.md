@@ -118,9 +118,11 @@
   properly: `install` and `commit` materialise the target's configuration in a
   temporary `:peer`, booted on the target's own code and running the target's
   own providers through Elixir's own pipeline. The two changes are atomic —
-  neither works without the other — and the absence of `build.config` is exactly
-  what tells Castle to take that path, so this release requires the Castle it
-  ships with.
+  neither works without the other. It is also the only path Castle 1.0 has: the
+  branch that read a `build.config` is gone along with the file, so a release
+  assembled by this Forecastle carries the `sys.config` Mix wrote and nothing
+  else, and an older Castle handed one looks for a file that is not there. This
+  release requires the Castle it ships with, and that Castle requires this one.
 
   What this fixes, what it costs, and what it means for an existing deployment
   are below.
@@ -356,9 +358,11 @@ Mix's own `bin/<release>` has always had.
 
 Configuration is decided per version directory, so a deployment part way through
 this migration is coherent rather than confused: the version it is running keeps
-its `build.config` and is still expanded the old way, while the version it is
-upgraded to has a `sys.config` and is resolved in a peer. Nothing has to be
-converted in place.
+its `build.config`, and a restart back into it is still expanded the old way — by
+that version's own `env.sh` and its own copy of Castle, both of which the upgrade
+leaves where they are — while the version it is upgraded to has a `sys.config`
+and is resolved in a peer. Nothing has to be converted in place, and nothing in
+the new version reads the old file.
 
 ### Known limitations
 
