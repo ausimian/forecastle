@@ -124,24 +124,30 @@
 
   What this fixes, what it costs, and what it means for an existing deployment
   are below.
-- The `env.sh` fragment does nothing on a normal start. It ran a preboot VM on
-  every `start`, `daemon` and `eval` — to expand `build.config` and to create
-  `releases/RELEASES` — and neither is needed now. It is still appended, after
-  any `env.sh` the project supplied, because
-  [#10](https://github.com/ausimian/forecastle/issues/10) needs somewhere to
-  consume the provisional restart marker that a relup restarting the emulator
-  leaves in `releases/new_start_erl.data`. Until then it is a comment.
+- The `env.sh` fragment no longer expands configuration, and no longer runs on
+  every start. It used to run a preboot VM on every `start`, `daemon` and
+  `eval`, to expand `build.config` and to create `releases/RELEASES`. The
+  configuration half is gone outright. What remains is `releases/RELEASES`, and
+  the fragment now creates it only when the release has not got one — the first
+  start of a deployment, and no start after it. It is still appended after any
+  `env.sh` the project supplied, and it is still where
+  [#10](https://github.com/ausimian/forecastle/issues/10) will consume the
+  provisional restart marker that a relup restarting the emulator leaves in
+  `releases/new_start_erl.data`.
 
-  A release therefore starts as quickly as a plain Mix release, and a start that
-  used to fail because configuration could not be expanded now fails, or does
-  not, wherever Mix would have it fail.
-- `releases/RELEASES`, which `release_handler` keeps its state in, is created by
-  `bin/castle unpack` rather than before every boot. OTP does not need it to
-  start — with the file missing it synthesises a permanent release from the boot
-  script it was started from — and `unpack` is both the one door a new version
-  comes in through and the first operation that writes that state out, so it is
-  the last moment the file can be created. There is a cost to this; see the
-  known limitations.
+  A release therefore starts as quickly as a plain Mix release every time bar
+  the first, and a start that used to fail because configuration could not be
+  expanded now fails, or does not, wherever Mix would have it fail. A start that
+  *cannot* create `releases/RELEASES` — a release root nothing may write to, say
+  — warns and carries on, rather than refusing to start a system that does not
+  need that file in order to run.
+- `bin/castle unpack` refuses to unpack a version into a system that has no
+  `releases/RELEASES`, and says to restart it first. `release_handler` reads that
+  file once, in its `init`, and builds a release record out of the boot script
+  when it is missing; the first operation that changes anything then writes the
+  record it is already holding straight back over the file. So a system that
+  started without one cannot be repaired while it runs, and upgrading it is not
+  safe — see the fix below for what it silently does.
 - Assembling a release that includes Windows executables still warns, but for a
   different reason, and the warning says so. The `.bat` launcher now boots: Mix
   writes the `sys.config` it reads and configures the system itself, which it
@@ -265,9 +271,21 @@
   and the executable is the one named at build time.
 - The `RELEASES` file was created relative to the working directory, so
   starting a release from anywhere other than its root left the system unable
-  to manage its own releases. It is now created by `bin/castle`, which changes
-  to the release root for the call, so where the launcher was invoked from makes
-  no difference.
+  to manage its own releases. Where the launcher is invoked from still makes no
+  difference.
+- An upgrade could silently leave an application running from the release it was
+  replacing. `release_handler` only replaces the code path of an application it
+  knows has changed version, and it knows that by comparing the release record it
+  is running against the one it is installing. Where `releases/RELEASES` was
+  missing at startup, the record it is running is one OTP builds out of the boot
+  script, which names no applications at all — so *nothing* compared as changed,
+  and every application whose new code the relup does not explicitly load was
+  left reachable only through the directory of the superseded release, which the
+  next `bin/castle remove` deletes. Nothing reported it. The file is now created
+  before the system starts, and `bin/castle unpack` refuses rather than upgrade a
+  system that started without one. The `:e2e` suite covers it with an application
+  whose version changes and whose appup asks for nothing, which is the shape that
+  used to go unnoticed.
 - The `GitHub` link in the Hex package metadata pointed at the Castle
   repository rather than Forecastle's.
 - The `:appup` compiler left `<app>.appup` behind in `ebin` once the project
@@ -327,19 +345,21 @@ converted in place.
   [#4](https://github.com/ausimian/forecastle/issues/4). `bin/castle install`
   handles it, and each branch of that handling is tested against a stub, but
   the real thing is unproven. See above.
-- **A system that boots without a `RELEASES` file manages its first upgrade with
-  less information than it used to have.** OTP synthesises a permanent release
-  record from the boot script when the file is missing, and that record has
-  neither the application versions nor the ERTS version out of the `.rel` file.
-  Only a *boot* can replace it — `release_handler` reads `RELEASES` once, at
-  startup — so creating the file from `bin/castle` cannot repair the system it is
-  run on, and the first `install` after a cold deployment therefore updates the
-  code path only for the applications its relup actually loads code for, rather
-  than for every application whose version changed. Restarting the deployment
-  once after the first `bin/castle` command, or committing an upgrade and letting
-  the next restart read the file, is enough to get the full record. This was not
-  a limitation while the file was created before every boot; it is the price of
-  the `env.sh` hook doing nothing on a normal start, and it is a good deal less
-  than a preboot VM per start.
+- **A system that cannot write `releases/RELEASES` cannot be upgraded.** The
+  release creates it on its first start; where that fails — a read-only release
+  root is the usual reason — the start warns, the system runs perfectly well, and
+  `bin/castle unpack` then refuses, because upgrading from the release record OTP
+  builds out of the boot script leaves applications on old code without saying
+  so. Make the release root writable, or the `releases` directory within it, and
+  restart once. There is no way to repair a running system: `release_handler`
+  reads that file only in its `init`.
+- **`bin/castle` tests for that file rather than asking the system.** A system
+  with no file has certainly started without one, so the refusal is never wrong;
+  the converse is not covered, so a file that appeared *after* the start that
+  looked for it would be accepted while the node was still working from the
+  synthesised record. Reaching that state takes deliberate work — nothing in
+  Forecastle or Castle creates the file after a start any more — and closing it
+  properly means asking the node what its release records hold, which belongs in
+  Castle alongside `which_releases/0`.
 - Windows releases are not supported; see above. What is missing is now
   `bin/castle` rather than a bootable release.

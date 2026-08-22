@@ -130,20 +130,29 @@ around it composes instead:
   still there. Interrupting `bin/castle install` therefore stops the waiting,
   not the upgrade; the release note says so, and points at `bin/castle
   releases` for finding out where the system got to.
-- `bin/castle unpack` creates `releases/RELEASES` first, if the release has not
-  got one, and that is the only place it happens. It used to happen in the
-  preboot VM before every start, which was the one placement that could actually
-  help — `release_handler` reads the file once, at startup, so a system that
-  booted without one is stuck with the release record it synthesised from its
-  boot script until it is restarted. `unpack` is where it belongs now: the one
-  door a new version comes in through, and the first operation that writes
-  `release_handler`'s state out over the top of the file. The residual gap is a
-  release note, not something to fix by putting a VM back in front of every boot.
-- The `env.sh` fragment does nothing on a normal start, deliberately. It is still
-  appended, so a project's own `rel/env.sh.eex` survives and runs first, and it
-  is where [#10](https://github.com/ausimian/forecastle/issues/10) consumes the
-  provisional restart marker. Until then it is a comment, and
-  `test/forecastle/assembly_test.exs` asserts that every line of it is one.
+- **`releases/RELEASES` is created before the system starts, and nowhere else.**
+  The `env.sh` fragment does it, guarded on the file's absence, so it runs on the
+  first start of a deployment and on no start after it. That is the only
+  placement that works, and the reasoning is worth keeping because a plausible
+  wrong answer was tried first. `release_handler` reads the file in its `init`,
+  and when it is missing it builds a release record out of the boot script's name
+  and version, with no applications in it. The first operation that changes
+  anything — `unpack` — then writes the record it is *already holding* straight
+  back over the file. So creating the file from `bin/castle` ahead of `unpack` is
+  not merely late: it is erased moments later, and a restart afterwards reads the
+  erased version. Create, restart, *then* unpack is the only order that helps,
+  and doing the create at boot is what takes the restart out of it.
+
+  Failure there is a warning rather than a refusal — a release does not need the
+  file in order to run, and a read-only release root is an ordinary way to run
+  one. `bin/castle unpack` is where the consequence is refused instead; see
+  `require_releases`, and the known limitation about what its test does and does
+  not cover.
+- The `env.sh` fragment expands no configuration and applies none of the
+  launcher's defaults; on every start after the first it does nothing at all. It
+  is appended, so a project's own `rel/env.sh.eex` survives and runs first, and
+  it is where [#10](https://github.com/ausimian/forecastle/issues/10) will
+  consume the provisional restart marker.
 - Version selection needs no code at all *after commit*: `release_handler` writes
   the committed version to `releases/start_erl.data`, which is where the standard
   launcher already reads `RELEASE_VSN` from. It does not hold for a transition
@@ -159,6 +168,7 @@ around it composes instead:
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release |
+| `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's |
 | `test/support` | The workspace the fixture is built in, and the case template for tests that build it |
 
 ## Working on this project
@@ -189,7 +199,7 @@ directory to start from a clean slate.
 | `test/forecastle/assembly_test.exs` | The assembled tree, including `bin/<name>` being byte-identical to the launcher plain Mix produces |
 | `test/forecastle/castle_cli_test.exs` | `bin/castle` as a shell script, against a launcher stub that records its arguments |
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
-| `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, tagged `:e2e` |
+| `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load, tagged `:e2e` |
 
 The `:e2e` suite is excluded by default and included by `mix precommit`. Run it
 on its own with `mix test --include e2e`. It needs no epmd daemon: the fixture
@@ -208,14 +218,23 @@ returns its argument, which is what makes the second observable at all.
   written for a release that asks for unix executables, so nothing on a Windows
   deployment can unpack, install or commit an upgrade. Assembly warns. Real
   support is a feature, not a fix.
-- **A system that boots with no `RELEASES` file upgrades with an incomplete
-  release record.** `release_handler` synthesises one from its boot script, and
-  that record has neither the application versions nor the ERTS version out of
-  the `.rel` file, so `get_new_libs/2` contributes nothing and only the
-  applications the relup loads code for get their code path replaced. It reads
-  `RELEASES` once, at startup, so `bin/castle` cannot repair the system it runs
-  on — a restart is what picks up the file. This was not true while a preboot VM
-  created the file before every start. Do not fix it by putting that VM back.
+- **`require_releases` tests for the file, not for the record.** A system with no
+  `releases/RELEASES` has certainly started without one, so refusing there is
+  never wrong. The converse is uncovered: a file that appeared *after* the start
+  that looked for it passes the test while the node is still working from the
+  record OTP built out of the boot script. Nothing in Forecastle or Castle
+  creates that file after a start any more, so reaching the state takes
+  deliberate work — but the complete test is to ask the node what its release
+  records hold, and that belongs in Castle beside `which_releases/0`, not in
+  shell-embedded Elixir here.
+
+  What the gap costs, if it is ever reached: `get_new_libs/2` is seeded from the
+  running record, so an empty one means nothing compares as changed, and only the
+  applications the relup explicitly loads code for get `code:replace_path`. Every
+  other application whose version moved stays reachable through the superseded
+  release's directory, which the next `remove` deletes. `test/forecastle/upgrade_test.exs`
+  covers it with `:sample_dep`, whose version changes and whose appup asks for
+  nothing.
 - **Root scripts do not update through a hot upgrade.** `release_handler`
   extracts with `keep_old_files`, so `bin/<release>` and `bin/castle` are
   whatever the deployment was first built with. New files do appear, so a
@@ -227,28 +246,22 @@ returns its argument, which is what makes the second observable at all.
   stub, but nothing can build a relup that asks for one until
   [#4](https://github.com/ausimian/forecastle/issues/4), so the `:e2e` suite
   only covers the hot-upgrade path.
-- **`Castle.Peer` refuses an unpacked Mix release.** `Castle.Peer.release_file/1`
-  takes the single `*.rel` in the target's version directory and refuses when it
-  finds more than one — and an unpacked release always has two.
+- **An unpacked release holds two `.rel` files, and that is normal.**
   `release_handler:do_unpack_release/4` copies `releases/<name>-<vsn>.rel` into
   `releases/<vsn>/` unconditionally, "for backwards compatibility reasons with
   older systools:make_tar" (OTP-9746), while Mix's own copy in that directory is
   called `<name>.rel`. For a tarball `systools` built the two names are the same
-  and the copy is a no-op, which is why nothing noticed; for a Mix release they
-  differ and both survive. So `bin/castle install` and `bin/castle commit` fail
-  on the peer path with "Found more than one release file", and the `:e2e` suite
-  fails in `setup_all` — the first thing this change made reachable, and the
-  reason `mix precommit` is not green against
-  [castle release/1.0.0](https://github.com/ausimian/castle/tree/release/1.0.0)
-  as pushed. It is one clause in `Castle.Peer`, and it belongs there: the two
-  files are byte-identical, so there is nothing genuinely ambiguous to refuse.
-  With that clause, the whole suite passes. Do not work it around here by
-  deleting a file OTP deliberately kept, or by contorting the release layout to
-  suit a glob.
+  and the copy is a no-op; for a Mix release they differ and both survive.
+  `Castle.Peer` used to take the single `*.rel` in the target's version directory
+  and refuse when it found more than one, which made every install on the peer
+  path fail — the first thing dropping `build.config` made reachable. Fixed in
+  Castle. Do not "tidy up" either file: both are wanted, and they are
+  byte-identical anyway.
 
-Do not work the concurrency or configuration questions around in this repo
-either: putting Castle's logic back into shell-embedded Elixir is the coupling
-`bin/castle` exists to remove.
+Do not work the configuration question around in this repo: putting Castle's
+logic back into shell-embedded Elixir is the coupling `bin/castle` exists to
+remove. `require_releases` is a file test for that reason — the moment it needs to
+interrogate the node, it becomes a Castle function.
 
 ## Compatibility
 
