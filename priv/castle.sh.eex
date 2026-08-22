@@ -210,6 +210,40 @@ scratch_dir () {
   echo "$dir"
 }
 
+# The other half of the rule that everything able to stop the script is settled
+# before the install: once it is not, whatever stops the script still has to say
+# that an install happened.
+#
+# The preflight cannot cover the whole function. The deadline has to be taken
+# after the install - anchoring it earlier would let a slow install eat the
+# window meant for confirming it - so the clock is asked again where a failure
+# can no longer be moved out of the way. And past the install there is always
+# something: a capture that cannot be read, a stream that cannot be written, a
+# sleep cut short, and whatever the next change adds.
+#
+# So this is a last word rather than a list of cases. Every exit runs it,
+# including the signal traps and the ones `set -e` takes without an exit
+# statement of its own, and if no terminal path has spoken it says what the
+# operator needs: an install was started, nobody confirmed it, go and ask the
+# system. Reporting comes before tidying up, and the tidying cannot fail, so
+# neither `set -e` nor a failed rm can lose the message. Terminal paths mark
+# themselves reported, so nothing is said twice.
+install_epilogue () {
+  if [ "$install_outcome" = unreported ]; then
+    install_outcome=reported
+
+    if [ -n "$held_output" ]; then
+      echo "$held_output" >&2
+    fi
+
+    echo "ERROR: install of $install_vsn was started and its outcome is not" \
+         "known - nothing above confirmed it. Ask the system what it is" \
+         "running: bin/castle releases" >&2
+  fi
+
+  rm -rf "$install_scratch" 2>/dev/null || true
+}
+
 # Installs a version and then confirms that it is the one running.
 #
 # release_handler replies as soon as it has accepted an upgrade, and for a
@@ -231,19 +265,25 @@ install_and_confirm () {
   # it: a timeout that turns out not to be a number, a date that cannot report
   # the time, nowhere to capture what the launcher says. None of those are
   # discovered late.
+  install_vsn=$1
+  install_outcome=""
+  held_output=""
+
   install_timeout=$(canonical_timeout "$CASTLE_INSTALL_TIMEOUT") || exit 1
   clock_now > /dev/null || exit 1
   install_scratch=$(scratch_dir) || exit 1
   install_stderr_file="$install_scratch/install.err"
   confirm_stderr_file="$install_scratch/confirm.err"
 
-  # Tidying up, and nothing more. An interrupt here stops the waiting, not the
-  # upgrade: the work runs in the release_handler server on the node being
-  # upgraded, which finishes whether or not anything is still listening for the
-  # reply. So a version may become the running one after this has gone, and
-  # `bin/castle releases` is what says where the system got to.
-  trap 'rm -rf "$install_scratch"' EXIT
-  trap 'rm -rf "$install_scratch"; exit 130' HUP INT TERM
+  # Installed before the install, so that every way out of what follows goes
+  # through the epilogue: it tidies up, and it is what says an install happened
+  # when nothing else has. An interrupt stops the waiting, not the upgrade - the
+  # work runs in the release_handler server on the node being upgraded, which
+  # finishes whether or not anything is still listening for the reply. So a
+  # version may become the running one after this has gone, which is why the
+  # epilogue points at `bin/castle releases` rather than guessing.
+  trap install_epilogue EXIT
+  trap 'install_epilogue; exit 130' HUP INT TERM
 
   # The two streams are captured apart, because they are read for different
   # things and merging them is not reversible. Standard output is what the
@@ -259,13 +299,16 @@ install_and_confirm () {
     install_status=$?
   fi
 
+  # Armed the moment the launcher has been asked: from here on, an install has
+  # happened or may have, and no exit may leave that unsaid. The epilogue is
+  # what enforces it; terminal paths below mark themselves reported.
+  install_outcome=unreported
+
   install_stderr=$(cat "$install_stderr_file")
 
   if [ -n "$install_stderr" ]; then
     echo "$install_stderr" >&2
   fi
-
-  held_output=""
 
   if [ "$install_status" -eq 0 ]; then
     # Held, not printed. What the install said is only a report of success once
@@ -291,6 +334,10 @@ install_and_confirm () {
     # confirmation would succeed and this would exit 0 on a launcher that had
     # failed.
     if ! printf '%s\n' "$install_stderr" | grep -q "$lost_connection_line"; then
+      # Reported already, and in full: the install failed, so there is no
+      # outcome left in doubt for the epilogue to raise.
+      install_outcome=reported
+
       exit "$install_status"
     fi
   fi
@@ -340,6 +387,8 @@ install_and_confirm () {
         echo "$held_output"
       fi
 
+      install_outcome=reported
+
       return 0
     fi
 
@@ -368,6 +417,8 @@ install_and_confirm () {
 
       echo "ERROR: $1 is not the running release, ${install_timeout}s after" \
            "installing it" >&2
+      install_outcome=reported
+
       exit 1
     fi
 

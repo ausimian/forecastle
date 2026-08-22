@@ -505,6 +505,68 @@ defmodule Forecastle.CastleCliTest do
     end
   end
 
+  describe "when something stops install after the install has run" do
+    # The preflight settles what it can, but the deadline has to be taken after
+    # the install - anchoring it earlier would let a slow install eat the window
+    # meant for confirming it - so the clock is asked again where a failure can
+    # no longer be moved out of the way. Whatever stops the script from here on
+    # still has to say that an install happened, or the operator is left with a
+    # diagnostic about the clock and no idea their system moved.
+
+    test "says the install happened when the clock fails on the deadline", context do
+      stub_launcher!(context, install_then_refuse(context))
+
+      # The second reading is the deadline anchor, taken once the install is
+      # already done. The first, in the preflight, still answers.
+      assert {out, err, status} =
+               castle_streams(context, ["install", "0.1.1"], failing_date(context, 2))
+
+      assert status != 0
+      assert out == ""
+      # What the install said, and that nothing confirmed it.
+      assert occurrences(err, "Now running 0.1.1") == 1
+      assert err =~ "outcome is not known"
+      assert err =~ "bin/castle releases"
+      # Not only the clock's own complaint, which was the whole defect.
+      assert err =~ "date +%s"
+    end
+
+    test "says it again when the clock fails between attempts", context do
+      stub_launcher!(context, install_then_refuse(context))
+
+      # The third reading is inside the polling loop, a distinct path from the
+      # anchor above.
+      assert {out, err, status} =
+               castle_streams(context, ["install", "0.1.1"], failing_date(context, 3))
+
+      assert status != 0
+      assert out == ""
+      assert occurrences(err, "Now running 0.1.1") == 1
+      assert err =~ "outcome is not known"
+      assert err =~ "bin/castle releases"
+    end
+
+    test "says nothing extra when a terminal path has already spoken", context do
+      # The timeout reports the held output itself, so the epilogue must not
+      # repeat it, and an install that simply failed has no outcome in doubt.
+      stub_launcher!(context, install_then_refuse(context))
+
+      assert {_out, err, 1} =
+               castle_streams(context, ["install", "0.1.1"], [
+                 {"CASTLE_INSTALL_TIMEOUT", "1"}
+               ])
+
+      assert occurrences(err, "Now running 0.1.1") == 1
+      assert occurrences(err, "is not the running release, 1s") == 1
+      refute err =~ "outcome is not known"
+
+      stub_launcher!(context, "echo '** (Castle.Error) Install of 0.1.1 failed.' >&2\nexit 3\n")
+
+      assert {_out, failed, 3} = castle_streams(context, ["install", "0.1.1"])
+      refute failed =~ "outcome is not known"
+    end
+  end
+
   describe "install's report of success" do
     # It is held until it is true. Printing what the install said on standard
     # output and only then failing to confirm would leave a success line on the
@@ -914,6 +976,31 @@ defmodule Forecastle.CastleCliTest do
     launcher = Enum.map_join([Path.join([context.root, "bin", "castle"]) | args], " ", &quoted/1)
 
     cmd("/bin/sh", ["-c", preamble <> "\nexec " <> launcher], env, cd: context.root)
+  end
+
+  # A launcher that installs once, reporting as it goes, and refuses every
+  # confirmation afterwards - so what happens next is decided by whatever else
+  # goes wrong.
+  defp install_then_refuse(context) do
+    """
+    if [ -f "#{context.root}/installed" ]; then exit 1; fi
+    : > "#{context.root}/installed"
+    echo 'Now running 0.1.1 (previously 0.1.0).'
+    exit 0
+    """
+  end
+
+  # An environment whose `date` answers until its nth invocation and fails from
+  # then on, so that a clock which satisfied the preflight can still fail where
+  # nothing can be moved out of the way.
+  defp failing_date(context, nth) do
+    shimmed_date(context, """
+    n=$(cat "#{context.root}/dates" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "#{context.root}/dates"
+    if [ "$n" -ge #{nth} ]; then exit 1; fi
+    exec #{System.find_executable("date")} "$@"
+    """)
   end
 
   # An environment whose `date` answers with the given shell body, and whose

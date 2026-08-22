@@ -33,6 +33,13 @@
   it is done. Past that point the system is on another release, and stopping
   there would leave that unsaid and unconfirmed.
 
+  And when something does go wrong past that point - the deadline has to be
+  timed from after the install, so not everything can be settled in advance -
+  what the install said is reported anyway, along with the fact that nothing
+  confirmed it and a pointer at `bin/castle releases`. A failure late in the
+  wait never leaves an operator holding a diagnostic about a clock or a
+  temporary file with no mention of the release that moved.
+
   One of those checks is worth spelling out, because it can refuse a directory
   that would have been used before: `RELEASE_TMP` must not be writable by
   everyone unless it is sticky. Where it is, another user can rename the capture

@@ -60,7 +60,24 @@ around it composes instead:
   the name, and private, so nothing inside can be swapped between one open and
   the next. Keep that ordering — past the install the system is on another
   release, so stopping from there leaves it unconfirmed with nothing said about
-  it. Five separate review findings have been that same shape.
+  it. Six separate review findings have been that same shape.
+
+  That rule has a second half, because the first cannot reach everywhere. The
+  deadline has to be anchored *after* the install — earlier, and a slow install
+  eats the window meant for confirming it — so the clock gets asked again where
+  a failure can no longer be moved out of the way, and past the install there is
+  always something else: a capture that cannot be read, a stream that cannot be
+  written, a sleep cut short, whatever the next change adds. So: **after the
+  install has run, no path may exit without reporting the held output.** Not the
+  clock, not the scratch file, not anything added later.
+  `install_and_confirm` enforces that structurally rather than case by case —
+  `install_outcome` is armed the moment the launcher has been asked, every exit
+  runs `install_epilogue` through the EXIT and signal traps, and a terminal path
+  that has already spoken marks itself `reported`. A bare `|| exit 1` past the
+  install is therefore safe *only* because the epilogue is there; do not remove
+  it, and do not add a path that reports the outcome without marking it. What
+  the operator gets when something breaks late is what the install said, that
+  nothing confirmed it, and `bin/castle releases` to go and find out.
 
   Claiming the name says nothing about who may *rename* it, which belongs to the
   parent, so the parent is checked too: a `RELEASE_TMP` that anyone may write to
