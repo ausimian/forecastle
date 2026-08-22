@@ -24,7 +24,7 @@ bring `Castle` in as a build-time dependency:
 ```elixir
 def deps do
   [
-    {:castle, "~> 0.3.0", runtime: false}
+    {:castle, "~> 1.0", runtime: false}
   ]
 end
 ```
@@ -35,10 +35,27 @@ as a runtime dependency:
 ```elixir
 def deps do
   [
-    {:castle, "~> 0.3.0"}
+    {:castle, "~> 1.0"}
   ]
 end
 ```
+
+### `Castle` and `Forecastle` are a matched pair
+
+Take `Castle` 1.0 or later with a 1.x `Forecastle`, and do not pair a 1.x
+`Forecastle` with an older `Castle`. The two halves divide one job between them
+and the boundary moved in 1.0: `Forecastle` no longer intercepts configuration at
+build time, and `Castle` works out the configuration of the version being
+installed for itself, in a temporary VM running that version's own code.
+`Castle` tells the two worlds apart by whether a release has a `build.config`
+file — the file `Forecastle` used to create and no longer does — so an older
+`Castle` paired with this `Forecastle` finds no `build.config`, looks for a path
+it has not got, and refuses the install.
+
+Nothing in the build can enforce this. `Forecastle` is a dependency *of*
+`Castle`, so it cannot constrain the version of `Castle` that brought it in, and
+`Castle`'s own requirement on `Forecastle` is the only constraint there is. Take
+both from the same release series.
 
 ## Integration
 
@@ -65,29 +82,39 @@ The following steps shape the release at build-time:
 
 In the pre-assembly step:
 
-  - The default evaluation of runtime configuration is disabled. `Forecastle` will
-    do its own equivalent expansion into `sys.config` prior to system start,
-    first with `runtime.exs` (if it exists) and then with any Config Providers.
-  - A 'preboot' boot script is created that starts only `Forecastle` and its
-    dependencies. This is used only during the aforementioned expansion.
+  - Any `relup` in the project root is read and checked against the version being
+    assembled, so that a stale upgrade plan fails the build rather than being
+    packaged as this version's.
+  - A 'preboot' boot script is created that starts `:sasl`, `:compiler`,
+    `:elixir` and `:castle`, and none of the release's own applications. Castle
+    boots a temporary VM on this script to work out the configuration of the
+    version being installed.
 
-The system is then assembled under the `:assemble` step as normal.
+The system is then assembled under the `:assemble` step as normal. Runtime
+configuration is Mix's business and is left entirely alone: the file named by
+`:runtime_config_path`, the providers declared through `:config_providers`, the
+`sys.config` Mix writes and the expansion the standard launcher performs at boot
+all behave exactly as they do without `Forecastle`.
 
 ### Post-assembly
 
 In the post-assembly step:
 
-  - The `sys.config` generated from build-time configuration is copied to 
-    `build.config`.
   - A `bin/castle` command is added, providing the commands that manage releases.
     The standard `bin/<release>` launcher that Mix generates is left untouched.
-  - The generated `env.sh` is extended, so that the configuration in
-    `build.config` is expanded into `sys.config` before the system boots. Any
-    `env.sh` the project supplies through `rel/env.sh.eex` is preserved, and
-    runs first.
-  - Any `runtime.exs` is copied into the version path of the release.
-  - The generated _name.rel_ is copied into the `releases` folder as _name-vsn.rel_.
-  - Any `relup` file is copied into the version path of the release.
+  - The generated `env.sh` is extended with a hook. On the **first** start of a
+    deployment it creates `releases/RELEASES`, which is what lets the system
+    manage its own releases — a short-lived VM, once, and only while that file
+    is absent. The release root has to be writable for it to succeed; if it is
+    not, the start still proceeds, with a warning, and `bin/castle unpack` will
+    later refuse rather than upgrade a system that cannot record what it is
+    running. Every start after the first does nothing at all. The hook is also
+    where the provisional version marker left by a relup that restarts the
+    emulator will be consumed. Any `env.sh` the project supplies through
+    `rel/env.sh.eex` is preserved, and runs first.
+  - The generated _name.rel_ is copied into the `releases` folder as _name-vsn.rel_,
+    which is where `release_handler` looks for it when unpacking a tarball.
+  - Any checked `relup` is written into the version path of the release.
 
 ## Managing Releases
 

@@ -88,6 +88,44 @@ castle_rpc () {
   exec "$RELEASE_LAUNCHER" rpc "$1"
 }
 
+# Refuses to go on when the system has no releases/RELEASES, the file
+# release_handler keeps its state in.
+#
+# It is not created here, and could not usefully be. release_handler reads that
+# file once, in its init, and when it is missing it builds a release record out
+# of the boot script's name and version instead - a record with no application
+# versions and no ERTS version in it. Creating the file afterwards changes
+# nothing about the record the running node is working from, and `unpack`, the
+# very next thing below, writes that record straight back over the file. So the
+# release's env.sh creates it before the system starts, on the first start of a
+# deployment, and all that is left here is to notice when that did not happen.
+#
+# What this protects against is upgrading from the synthesised record. It names
+# no application versions, so release_handler sees nothing change, and an
+# application whose version did change but whose code the relup does not load is
+# left reachable only through the directory of the release being replaced -
+# which the next `remove` deletes. That is silent, and it outlives the upgrade.
+#
+# The test is on the file rather than on the node. It is exact for the case that
+# arises, since a system with no file has certainly booted without one, and not
+# for the converse: a file created after the boot that looked for it would pass
+# this and still leave the node on the synthesised record. Asking the node what
+# its records actually hold is the complete test, and it belongs in Castle,
+# where which_releases/0 already is.
+require_releases () {
+  if [ ! -f "$RELEASE_ROOT/releases/RELEASES" ]; then
+    echo "ERROR: $RELEASE_ROOT/releases/RELEASES does not exist, so this system" \
+         "is running on a release record OTP built from its boot script, and" \
+         "that record names no application versions. Upgrading from it would" \
+         "leave any application whose version changed, but whose code the" \
+         "upgrade does not load, reachable only through the release being" \
+         "replaced. Restart the system - the release creates this file before it" \
+         "starts - and unpack again. A start that could not create it said so at" \
+         "the time; a release root nothing may write to is the usual reason." >&2
+    exit 1
+  fi
+}
+
 # The timeout as a plain decimal number of seconds, or a complaint and a
 # non-zero return if it is not one that can be worked with.
 #
@@ -452,6 +490,7 @@ case $1 in
 
   unpack)
     require_vsn "$1" "$2"
+    require_releases
     castle_rpc "Castle.unpack(~s($RELEASE_TARBALL_PREFIX-$2))"
     ;;
 

@@ -76,21 +76,51 @@ defmodule Forecastle.AssemblyTest do
       assert env_sh =~ "export SAMPLE_ENV_MARKER=preserved"
     end
 
-    test "installs the Castle integration", %{env_sh: env_sh} do
-      assert env_sh =~ "Castle.generate"
-      assert env_sh =~ "Castle.make_releases"
+    test "installs the Castle hook", %{env_sh: env_sh} do
+      assert env_sh =~ "Forecastle: Castle integration"
+      assert env_sh =~ "Forecastle: end Castle integration"
     end
 
-    test "runs the integration after the project's own customization", %{env_sh: env_sh} do
+    test "expands no configuration", %{env_sh: env_sh} do
+      # Configuration is Mix's own business again, so the hook neither runs the
+      # release's config providers nor applies the launcher's defaults ahead of
+      # doing so - the launcher assigns those itself, after sourcing this.
+      refute env_sh =~ "Castle.generate"
+      # How build.config used to be loaded into the preboot VM, and the last of
+      # the launcher defaults the fragment used to have to apply for itself.
+      refute env_sh =~ "--erl-config"
+      refute env_sh =~ "RELEASE_BOOT_SCRIPT_CLEAN"
+    end
+
+    test "creates the RELEASES file, once, before the system starts", %{env_sh: env_sh} do
+      # The only thing left for the hook on a normal start, and the only place it
+      # can be done at all: release_handler reads that file in its init, so a
+      # system that booted without one keeps the record it synthesised until it
+      # is restarted. Guarded on the file, so this is the first start of a
+      # deployment and nothing after it.
+      assert env_sh =~ "Castle.make_releases"
+      assert env_sh =~ ~s([ ! -f "$RELEASE_ROOT/releases/RELEASES" ])
+    end
+
+    test "only runs for the commands that start the system", %{env_sh: env_sh} do
+      # Not eval, which the configuration expansion needed and this does not: an
+      # eval VM manages no releases.
+      assert env_sh =~ ~r/case \$RELEASE_COMMAND in\n\s+start\|start_iex\|daemon\|daemon_iex\)/
+    end
+
+    test "warns rather than refuses when it cannot create the file", %{env_sh: env_sh} do
+      # A system does not need the file in order to boot, and a release root
+      # nothing may write to is an ordinary way to run one. bin/castle is where
+      # the consequence is refused, not the start.
+      assert env_sh =~ "warning: could not create"
+      refute env_sh =~ "exit 1"
+    end
+
+    test "comes after the project's own customization", %{env_sh: env_sh} do
       marker = :binary.match(env_sh, "export SAMPLE_ENV_MARKER") |> elem(0)
-      castle = :binary.match(env_sh, "Castle.generate") |> elem(0)
+      castle = :binary.match(env_sh, "Forecastle: Castle integration") |> elem(0)
 
       assert marker < castle
-    end
-
-    test "only expands configuration for commands that boot the system", %{env_sh: env_sh} do
-      assert env_sh =~
-               ~r/case \$RELEASE_COMMAND in\n\s+start\|start_iex\|daemon\|daemon_iex\|eval\)/
     end
 
     test "is left alone by a plain Mix release", %{mix: mix} do
@@ -102,25 +132,42 @@ defmodule Forecastle.AssemblyTest do
   end
 
   describe "the release layout" do
-    test "holds the build-time configuration back from Mix", %{forecastle: forecastle} do
+    test "leaves the configuration where Mix put it", %{forecastle: forecastle} do
+      # Forecastle used to rename sys.config to build.config so that the stock
+      # launcher could not boot from it and Castle had to expand it first.
+      # Castle now dispatches on whether build.config exists - present means a
+      # release whose configuration was intercepted at build time, absent means
+      # Mix's pipeline is intact and the target is evaluated in a peer - so the
+      # absence of that file is what selects the new path.
       version_path = Path.join(forecastle, "releases/#{@vsn}")
 
-      assert File.exists?(Path.join(version_path, "build.config"))
-      refute File.exists?(Path.join(version_path, "sys.config"))
+      refute File.exists?(Path.join(version_path, "build.config"))
+      assert File.exists?(Path.join(version_path, "sys.config"))
     end
 
-    test "records the config providers for Castle to run", %{forecastle: forecastle} do
-      config = Path.join(forecastle, "releases/#{@vsn}/build.config")
+    test "declares its config providers where Elixir reads them",
+         %{forecastle: forecastle, mix: mix} do
+      # Elixir's own key, holding Elixir's own provider state, and no trace of
+      # the list Forecastle used to stash under Castle's key for Castle to fold
+      # by hand. Compared against the plain Mix release: what is asserted is
+      # that Forecastle changed nothing about it.
+      assert {:ok, [terms]} = consult(forecastle, "sys.config")
+      assert {:ok, [plain]} = consult(mix, "sys.config")
 
-      assert {:ok, [terms]} = :file.consult(to_charlist(config))
-      assert [{Config.Reader, _state} | _] = terms[:castle][:config_providers]
+      assert %Config.Provider{} = terms[:elixir][:config_provider_init]
+      assert terms[:elixir] == plain[:elixir]
+      refute terms[:castle][:config_providers]
     end
 
-    test "carries a preboot script", %{forecastle: forecastle} do
+    test "carries the preboot script Castle's peer boots", %{forecastle: forecastle} do
       assert File.exists?(Path.join(forecastle, "releases/#{@vsn}/preboot.boot"))
     end
 
-    test "copies runtime.exs into the version path", %{forecastle: forecastle} do
+    test "has the runtime configuration Mix copied in", %{forecastle: forecastle} do
+      # Mix copies the file named by :runtime_config_path into the version
+      # directory itself, and points the Config.Reader it installs at that copy.
+      # Forecastle used to copy config/runtime.exs there a second time, which is
+      # how it ended up hardcoding a path Mix lets the project choose.
       assert File.exists?(Path.join(forecastle, "releases/#{@vsn}/runtime.exs"))
     end
 
@@ -131,11 +178,11 @@ defmodule Forecastle.AssemblyTest do
   end
 
   describe "Windows executables" do
-    # Configuration is withheld from Mix and expanded at boot by the env.sh
-    # integration, which has no env.bat counterpart, so the .bat launcher looks
-    # for a sys.config nothing creates. That predates this change, and assembly
-    # still succeeds, so the build has to say so out loud.
-    test "are warned about, since the release they produce cannot boot" do
+    # The .bat launcher boots now that Mix writes the sys.config it reads, but
+    # bin/castle is a POSIX shell script, so nothing on a Windows deployment can
+    # drive an upgrade. Assembly still succeeds, so the build has to say so out
+    # loud.
+    test "are warned about, since the release they produce cannot be upgraded" do
       output = assemble_output!("rel-windows", [{"SAMPLE_EXECUTABLES", "unix,windows"}])
 
       assert output =~ "Forecastle does not support Windows releases"
@@ -232,6 +279,10 @@ defmodule Forecastle.AssemblyTest do
       assert status == 0, "the corrected retry failed:\n\n#{output}"
       assert File.exists?(Path.join(path, "releases/#{@vsn}/relup"))
     end
+  end
+
+  defp consult(release, basename) do
+    :file.consult(to_charlist(Path.join([release, "releases", @vsn, basename])))
   end
 
   defp relup_for(vsn), do: ~s({"#{vsn}", [], []}.\n)

@@ -82,7 +82,12 @@ defmodule Forecastle.RelupTest do
         relup(["--target", rel(ctx.from, @from), "--fromto", rel(ctx.to, @to)], @from)
 
       assert status != 0, "a failed generation reported success:\n\n#{output}"
-      assert output =~ "No release upgrade script entry for sample-#{@from} to sample-#{@to}"
+
+      # Both of the fixture's applications lack a path back from 0.1.1, and
+      # systools reports whichever it reaches first, so which one it names is not
+      # the point here. The message and the two versions are.
+      assert output =~
+               ~r/No release upgrade script entry for \w+-#{Regex.escape(@from)} to \w+-#{Regex.escape(@to)}/
     end
 
     test "does not let an earlier run's relup pass for the one asked for", ctx do

@@ -27,17 +27,42 @@ defmodule Sample.MixProject do
       # TEMPORARY for the 1.0.0 cycle: the fixture needs Castle's in-progress API.
       # Flip back to {:castle, "~> 1.0"} before publishing.
       {:castle, github: "ausimian/castle", branch: "release/1.0.0"},
-      {:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), override: true}
+      {:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), override: true},
+      # An application the relup never mentions, versioned in step with this
+      # one, so that "release_handler knows its version changed" is observable
+      # from outside the system. See dep/mix.exs.
+      {:sample_dep, path: "dep"}
     ]
   end
 
   defp releases do
     [
-      sample: [
-        include_executables_for: executables(),
-        steps: steps()
-      ]
+      sample:
+        [
+          include_executables_for: executables(),
+          steps: steps()
+        ] ++ configuration()
     ]
+  end
+
+  # Switched by the test suite so that the fixture can be assembled as a project
+  # that configures itself in the two ways Forecastle used to get wrong: naming a
+  # runtime configuration file other than `config/runtime.exs` while that file
+  # also exists, and declaring providers whose init arguments are not keyword
+  # lists.
+  defp configuration do
+    if System.get_env("SAMPLE_CONFIG") == "custom" do
+      [
+        runtime_config_path: "config/prod_runtime.exs",
+        config_providers: [
+          {Sample.EchoProvider, "a binary"},
+          {Sample.EchoProvider, %{a: :map}},
+          {Sample.EchoProvider, [:not, :a, :keyword, :list]}
+        ]
+      ]
+    else
+      []
+    end
   end
 
   # Switched by the test suite so that the fixture can be built as a project

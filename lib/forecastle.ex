@@ -15,29 +15,31 @@ defmodule Forecastle do
     end
   end
 
+  # Nothing here touches configuration. Mix decides which file configures a
+  # release at runtime, initialises the providers a project declares, and writes
+  # the `sys.config` its own launcher boots from - and all of that is left
+  # exactly as Mix leaves it. Forecastle used to intercept the lot: it set
+  # `runtime_config_path: false`, installed a substitute `Config.Reader` of its
+  # own, rewrote every provider's init argument into a keyword list with an
+  # `:env` key added, and renamed `sys.config` to `build.config` so that only
+  # Castle could expand it at boot. That existed to give the version being
+  # upgraded *to* a configuration resolved by its own providers, which
+  # castle#13 now does properly, in a `:peer` running the target's own code -
+  # and which is why `build.config` must no longer exist: its presence is what
+  # Castle dispatches on.
   def pre_assemble(%Mix.Release{} = release) do
     release
-    |> initialize()
     |> stage_relup()
-    |> remove_runtime_configuration()
-    |> remove_config_providers()
     |> create_preboot_scripts()
   end
 
   def post_assemble(%Mix.Release{} = release) do
     release
-    |> tap(&add_config_providers/1)
-    |> tap(&rename_sys_config/1)
     |> tap(&install_castle_cli/1)
     |> tap(&extend_env_script/1)
-    |> tap(&copy_runtime_exs/1)
     |> tap(&copy_relfile/1)
     |> tap(&copy_relup/1)
     |> tap(&warn_unsupported_executables/1)
-  end
-
-  defp initialize(%Mix.Release{options: options} = release) do
-    %Mix.Release{release | options: [{__MODULE__, []} | options]}
   end
 
   # Before `:assemble`, deliberately. Checking the relup afterwards meant a
@@ -68,68 +70,23 @@ defmodule Forecastle do
     Mix.Project.project_file() |> Path.dirname() |> Path.join("relup")
   end
 
-  defp remove_runtime_configuration(%Mix.Release{options: options, version: vsn} = release) do
-    if File.exists?(get_runtime_exs()) and Keyword.get(options, :runtime_config_path, true) do
-      options =
-        options
-        |> Keyword.update(__MODULE__, [], &(&1 ++ [runtime_config_provider(vsn)]))
-        |> Keyword.put(:runtime_config_path, false)
-
-      %Mix.Release{release | options: options}
-    else
-      release
-    end
-  end
-
-  defp runtime_config_provider(vsn) do
-    {Config.Reader,
-     path: {:system, "RELEASE_ROOT", "/releases/#{vsn}/runtime.exs"}, env: Mix.env()}
-  end
-
-  defp remove_config_providers(%Mix.Release{} = release) do
-    providers =
-      release.config_providers
-      |> Enum.map(fn {mod, arg} -> if is_list(arg), do: {mod, arg}, else: {mod, path: arg} end)
-      |> Enum.map(fn {mod, args} -> {mod, Keyword.put(args, :env, Mix.env())} end)
-
-    options =
-      Keyword.update(release.options, __MODULE__, [], fn existing ->
-        existing ++ providers
-      end)
-
-    %Mix.Release{release | config_providers: [], options: options}
-  end
-
+  # The script `Castle.Peer` boots. It is `start_clean` plus the applications
+  # needed to run a release's own `Config.Provider` pipeline - and Castle - and
+  # notably *not* the release's own applications, which must not be started a
+  # second time in a VM that only exists to answer what the configuration is.
+  # Its final `path` instruction is still the release's whole code path, so a
+  # provider module belonging to one of those applications is loadable.
+  #
+  # It was written to expand configuration at boot, which is gone. It stays
+  # because it is what the peer that replaced that expansion boots from, and it
+  # has to be in the release being installed rather than in the one installing
+  # it: only the target can say what the target's configuration is.
   defp create_preboot_scripts(%Mix.Release{boot_scripts: scripts} = release) do
     preboot =
       scripts[:start_clean]
       |> Keyword.merge(for app <- [:sasl, :compiler, :elixir, :castle], do: {app, :permanent})
 
     %Mix.Release{release | boot_scripts: Map.put(scripts, :preboot, preboot)}
-  end
-
-  defp add_config_providers(%Mix.Release{options: options, version_path: vp}) do
-    provider_states =
-      for {mod, arg} <- Keyword.get(options, __MODULE__, []) do
-        {mod, mod.init(arg)}
-      end
-
-    sys_config_path = Path.join(vp, "sys.config")
-    {:ok, [sys_config]} = :file.consult(to_charlist(sys_config_path))
-
-    new_sys_config =
-      Keyword.update(
-        sys_config,
-        :castle,
-        [config_providers: provider_states],
-        &Keyword.put(&1, :config_providers, provider_states)
-      )
-
-    File.write!(sys_config_path, :io_lib.format(~c"~tp.~n", [new_sys_config]))
-  end
-
-  defp rename_sys_config(%Mix.Release{version_path: vp}) do
-    File.rename(Path.join(vp, "sys.config"), Path.join(vp, "build.config"))
   end
 
   defp install_castle_cli(%Mix.Release{path: path} = release) do
@@ -152,17 +109,22 @@ defmodule Forecastle do
     :unix in executables_for(release)
   end
 
-  # Configuration is withheld from Mix and expanded at boot instead, and the
-  # integration that expands it is installed into env.sh. There is no env.bat
-  # equivalent, so a Windows launcher looks for a sys.config that nothing
-  # creates. That has always been true, and assembly still succeeds, so say so
-  # rather than let a release that cannot boot leave the build quietly.
+  # `bin/castle` is a POSIX shell script and is written only for a release that
+  # asks for unix executables, so there is nothing on a Windows deployment to
+  # drive an upgrade with. The .bat launcher itself does now boot - Mix writes
+  # the `sys.config` it reads and expands configuration in the booting VM, which
+  # it did not while Forecastle was withholding both - so what is missing is
+  # release management rather than the release. Assembly succeeds either way, so
+  # say so rather than let a deployment that cannot be upgraded leave the build
+  # quietly.
   defp warn_unsupported_executables(%Mix.Release{} = release) do
     if :windows in executables_for(release) do
       Mix.shell().error(
-        "warning: Forecastle does not support Windows releases, and the .bat " <>
-          "launcher this release includes will not boot. Set " <>
-          "include_executables_for: [:unix] to stop building one."
+        "warning: Forecastle does not support Windows releases. The .bat " <>
+          "launcher this release includes will boot, but bin/castle is a POSIX " <>
+          "shell script, so nothing on a Windows deployment can unpack, install " <>
+          "or commit an upgrade. Set include_executables_for: [:unix] to stop " <>
+          "building one."
       )
     end
   end
@@ -176,14 +138,6 @@ defmodule Forecastle do
     |> :code.priv_dir()
     |> Path.join(template)
     |> EEx.eval_file(release: release)
-  end
-
-  defp copy_runtime_exs(%Mix.Release{version_path: vp}) do
-    runtime_exs = get_runtime_exs()
-
-    if File.exists?(runtime_exs) do
-      File.cp!(runtime_exs, Path.join(vp, "runtime.exs"))
-    end
   end
 
   defp copy_relfile(%Mix.Release{name: name, version: vsn, path: path, version_path: vp}) do
@@ -248,11 +202,5 @@ defmodule Forecastle do
       {:error, reason} ->
         Mix.raise("#{relup} could not be read as an upgrade plan: #{inspect(reason)}")
     end
-  end
-
-  defp get_runtime_exs do
-    "../config/runtime.exs"
-    |> Path.absname(Mix.Project.project_file())
-    |> Path.expand()
   end
 end
