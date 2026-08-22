@@ -88,41 +88,47 @@ castle_rpc () {
   exec "$RELEASE_LAUNCHER" rpc "$1"
 }
 
-# Refuses to go on when the system has no releases/RELEASES, the file
-# release_handler keeps its state in.
+# Refuses to go on when the release record the running system is working from is
+# not one an upgrade can be applied to.
 #
-# It is not created here, and could not usefully be. release_handler reads that
-# file once, in its init, and when it is missing it builds a release record out
-# of the boot script's name and version instead - a record with no application
-# versions and no ERTS version in it. Creating the file afterwards changes
-# nothing about the record the running node is working from, and `unpack`, the
-# very next thing below, writes that record straight back over the file. So the
-# release's env.sh creates it before the system starts, on the first start of a
-# deployment, and all that is left here is to notice when that did not happen.
+# The question is asked of the node, not of the filesystem. release_handler reads
+# releases/RELEASES once, in its init, and when the file is missing - or cannot
+# be read - it builds a release record out of the boot script's name and version
+# instead, a record with no applications in it. Nothing after that boot can
+# replace it: creating the file does not, and the first operation that changes
+# anything writes the record it is already holding straight back over the file.
+# So what is on disk says nothing about what the node holds. A file that appeared
+# after the boot that went looking for it passes a `[ -f ]` test and leaves the
+# node on the synthesised record regardless, which is exactly the case a gate
+# exists to catch, and only the node can tell them apart.
 #
-# What this protects against is upgrading from the synthesised record. It names
-# no application versions, so release_handler sees nothing change, and an
-# application whose version did change but whose code the relup does not load is
-# left reachable only through the directory of the release being replaced -
-# which the next `remove` deletes. That is silent, and it outlives the upgrade.
+# What it protects against: release_handler switches the code path of an
+# application it knows has changed version, and it knows that by comparing the
+# record it is running against the one being installed. A record naming no
+# applications compares nothing as changed, so an application whose version did
+# move but whose code the relup does not load is left reachable only through the
+# directory of the release being replaced - which the next `remove` deletes. That
+# is silent, and it outlives the upgrade. Castle's message says to restart the
+# system, because a restart is the only thing that changes the answer.
 #
-# The test is on the file rather than on the node. It is exact for the case that
-# arises, since a system with no file has certainly booted without one, and not
-# for the converse: a file created after the boot that looked for it would pass
-# this and still leave the node on the synthesised record. Asking the node what
-# its records actually hold is the complete test, and it belongs in Castle,
-# where which_releases/0 already is.
-require_releases () {
-  if [ ! -f "$RELEASE_ROOT/releases/RELEASES" ]; then
-    echo "ERROR: $RELEASE_ROOT/releases/RELEASES does not exist, so this system" \
-         "is running on a release record OTP built from its boot script, and" \
-         "that record names no application versions. Upgrading from it would" \
-         "leave any application whose version changed, but whose code the" \
-         "upgrade does not load, reachable only through the release being" \
-         "replaced. Restart the system - the release creates this file before it" \
-         "starts - and unpack again. A start that could not create it said so at" \
-         "the time; a release root nothing may write to is the usual reason." >&2
-    exit 1
+# Castle.upgradable() prints nothing when the system can be upgraded and raises
+# Castle.Error when it cannot, so the launcher exits non-zero and its message
+# reaches standard error. Both streams pass straight through: nothing here has
+# changed anything, so there is nothing to hold back until it is true.
+#
+# Not through castle_rpc, which execs. This is a gate, and every command that
+# has one has work to do after it. The status is the launcher's own rather than a
+# flat 1 - a refusal and a node that could not be reached are different failures,
+# and whatever drove this may care which.
+require_upgradable () {
+  if "$RELEASE_LAUNCHER" rpc "Castle.upgradable()"; then
+    upgradable_status=0
+  else
+    upgradable_status=$?
+  fi
+
+  if [ "$upgradable_status" -ne 0 ]; then
+    exit "$upgradable_status"
   fi
 }
 
@@ -298,11 +304,11 @@ install_epilogue () {
 # the install: the status this returns with is this function's to report.
 install_and_confirm () {
   # Everything that can refuse to go on is asked first, before the launcher is
-  # invoked at all. Once the install has run, the system is on another release,
-  # and an abort from here on leaves that unconfirmed with nothing said about
-  # it: a timeout that turns out not to be a number, a date that cannot report
-  # the time, nowhere to capture what the launcher says. None of those are
-  # discovered late.
+  # asked to install anything. Once the install has run, the system is on another
+  # release, and an abort from here on leaves that unconfirmed with nothing said
+  # about it: a timeout that turns out not to be a number, a date that cannot
+  # report the time, nowhere to capture what the launcher says, a release record
+  # nothing may be upgraded from. None of those are discovered late.
   install_vsn=$1
   install_outcome=""
   held_output=""
@@ -322,6 +328,23 @@ install_and_confirm () {
   # epilogue points at `bin/castle releases` rather than guessing.
   trap install_epilogue EXIT
   trap 'install_epilogue; exit 130' HUP INT TERM
+
+  # The last of the preflight, and the only part of it that has to ask the
+  # system anything. install_release is the operation that acts on the running
+  # release record, so the gate belongs here and not only ahead of the unpack
+  # that staged the version: the two are separate invocations of this script,
+  # and what happens between them - a restart, a RELEASES file that has gone
+  # away or gone unreadable, a version staged by an older launcher or by
+  # Castle.unpack/1 directly - can leave the node on the synthesised record with
+  # nothing having refused it. This is the last moment where refusing costs
+  # nothing.
+  #
+  # After the local checks, which need nothing from the system: a VM start is
+  # not the way to report a timeout that is not a number. And after the traps,
+  # so that a refusal here still takes the capture directory with it. Nothing
+  # has been installed yet, so the epilogue has nothing to report - which is
+  # what install_outcome being empty until the launcher has been asked says.
+  require_upgradable
 
   # The two streams are captured apart, because they are read for different
   # things and merging them is not reversible. Standard output is what the
@@ -490,7 +513,7 @@ case $1 in
 
   unpack)
     require_vsn "$1" "$2"
-    require_releases
+    require_upgradable
     castle_rpc "Castle.unpack(~s($RELEASE_TARBALL_PREFIX-$2))"
     ;;
 
