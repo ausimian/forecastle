@@ -24,7 +24,7 @@ bring `Castle` in as a build-time dependency:
 ```elixir
 def deps do
   [
-    {:castle, "~> 0.3.0", runtime: false}
+    {:castle, "~> 1.0", runtime: false}
   ]
 end
 ```
@@ -35,10 +35,27 @@ as a runtime dependency:
 ```elixir
 def deps do
   [
-    {:castle, "~> 0.3.0"}
+    {:castle, "~> 1.0"}
   ]
 end
 ```
+
+### `Castle` and `Forecastle` are a matched pair
+
+Take `Castle` 1.0 or later with a 1.x `Forecastle`, and do not pair a 1.x
+`Forecastle` with an older `Castle`. The two halves divide one job between them
+and the boundary moved in 1.0: `Forecastle` no longer intercepts configuration at
+build time, and `Castle` works out the configuration of the version being
+installed for itself, in a temporary VM running that version's own code.
+`Castle` tells the two worlds apart by whether a release has a `build.config`
+file — the file `Forecastle` used to create and no longer does — so an older
+`Castle` paired with this `Forecastle` finds no `build.config`, looks for a path
+it has not got, and refuses the install.
+
+Nothing in the build can enforce this. `Forecastle` is a dependency *of*
+`Castle`, so it cannot constrain the version of `Castle` that brought it in, and
+`Castle`'s own requirement on `Forecastle` is the only constraint there is. Take
+both from the same release series.
 
 ## Integration
 
