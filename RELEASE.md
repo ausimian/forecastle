@@ -168,7 +168,15 @@
   among them, writes the record it is already holding straight back over the
   file, so creating it by hand is erased moments later and a restart after
   *that* reads the erased version. Restart first, and the release creates the
-  file before the system starts. What the refusal says is exactly that.
+  file before the system starts.
+
+  **A restart is enough only when the file was missing.** The record is
+  synthesised when `RELEASES` was absent *or* unreadable, and the `env.sh`
+  fragment creates it only when it is absent — so a file that is there and cannot
+  be read is stepped over on every start, and the system comes back on another
+  synthesised record. Make that file readable, or remove it, before restarting;
+  otherwise the restart changes nothing and the refusal repeats. Castle's message
+  says which of the two applies.
 
   Nothing asks the question ahead of those operations, and a deployment script
   should not either. A check made in one call and acted on in another is a check
