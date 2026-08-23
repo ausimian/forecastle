@@ -322,17 +322,43 @@ environment variable. Castle cannot *complete* a restart transition yet:
 before the reboot, and the reboot would return on the old permanent version
 anyway. `auto` is the no-switch default, so emitting a restart edge from it means
 a routine invocation producing a relup that cannot be installed — worse than
-refusing and saying why. Both `settle_chosen_restarts!/1` and
-`settle_appup_restarts!/1` ask that predicate; flipping it to `true` when
-castle#14 and #10 land restores the announcements, which are still there.
-`--hot` and `--restart` are unaffected: both are explicit requests.
+refusing and saying why. `settle_restarts!/2` is the only caller of that
+predicate; flipping it to `true` when castle#14 and #10 land restores
+`announce_restarts/2`, which is still there. `--hot` and `--restart` are
+unaffected: both are explicit requests.
+
+**One verdict per invocation, and it comes after the relup exists.** A restart
+reaches an `auto` run two ways — `auto` classified the edge as one, or an appup
+named `restart_emulator` itself — and `settle_restarts!/2` takes both lists at
+once for that reason. Classification cannot see the second kind, so a run that
+announces from classification alone will say every transition is hot and then
+report a restart; that shipped once, and once the predicate is flipped it would
+be a *successful* run printing both. So `plan!(:auto, …)` generates the relup
+first, takes the appup-supplied restarts back from `plan_transitions/6`, and
+settles the two together. Do not add a second announcement anywhere else.
+`relup_test.exs` asserts the all-hot line is absent from every `auto` case that
+ends in a restart, which is the assertion that catches a regression here.
 
 Because of that refusal the split-and-merge — the path that puts hand-written
 restart entries and generated hot ones into one relup — is unreachable through
 the task. It is still the defining behaviour of `auto`, so
 `plan_transitions!/5` is `@doc false`-public and `relup_test.exs` drives it
-in process. Keep the refusal **in front of** that function rather than inside it;
-that is what keeps the merge testable and the flip a one-liner.
+in process. Keep the settling **outside** that function rather than inside it;
+that is what keeps the merge testable and the flip a one-liner. What must stay
+inside is the unconditional refusal of `restart_new_emulator`
+(`appup_restarts!/1`), which is not gated on the predicate at all: it returns the
+one-stage restarts and raises on the two-stage ones.
+
+**The merge tests have to pin the direction, not just the shape.** Both sections
+of the fixture's mixed relup carry the same from-versions, the same restart
+script and the same module, so the only thing that tells an up script from a down
+one is the application version in its `load_object_code`: `systools_rc` resolves
+the module against the target release's applications for `up` and against the
+from-release's for `dn`. Assert that version (`@hot_vsn` up, `@from_vsn` down), or
+swapping the two sections at the merge — downgrade code packaged as the
+upgrade — passes. There is also one deliberately asymmetric plan, with a restart
+edge on the way up and none on the way down, so that a merge which swapped or
+reused its up and down *arguments* cannot produce the same set twice and pass.
 
 **The fixture's default transition is hot.** `:sample_dep` is a dependency whose
 version moves with the sample's, but its appup covers `0.1.0` in both directions,

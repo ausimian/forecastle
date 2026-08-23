@@ -108,11 +108,13 @@
 - `mix forecastle.relup` now takes an upgrade strategy, because whether a
   transition can be hot is a property of the edge between two releases rather
   than of either release. `--hot` requires a genuine hot upgrade and fails,
-  having written nothing, if the transition cannot be one - which is what a
-  pipeline that promises zero downtime needs. `--restart` makes every transition
-  in the relup a single `restart_emulator` instruction, written directly, with no
-  appup read for any application, not even one the project owns: the escape hatch
-  for a change whose upgrade instructions are not worth maintaining. With
+  having written nothing, if the transition cannot be one - a missing appup
+  entry, an ERTS change, or an appup that asks for the emulator to be restarted -
+  which is what a pipeline that promises zero downtime needs. `--restart` makes
+  every transition in the relup a single `restart_emulator` instruction, written
+  directly, with no appup read for any application, not even one the project
+  owns: the escape hatch for a change whose upgrade instructions are not worth
+  maintaining. With
   neither, the strategy is `auto`, and each transition is generated from the
   appups unless something in it cannot be hot-upgraded - in which case that
   transition, and only that one, becomes a restart.
@@ -170,7 +172,9 @@
   points at `--restart` as the deliberate override. The same applies to a
   `restart_emulator` an appup asked for by name during an `auto` run: how the
   relup came by the instruction makes no difference to whether it can be
-  installed.
+  installed. The two kinds are settled together, after the relup has been
+  generated and inspected, so a run reports which transitions restart - or that
+  none of them do - exactly once.
 
   This is temporary and will be lifted, at which point `auto` will announce the
   restart it chose instead of refusing. `--hot` and `--restart` are unaffected in
@@ -291,24 +295,42 @@
 - The Castle integration is installed by extending the release's `env.sh`
   rather than by replacing the launcher. An `env.sh` supplied through
   `rel/env.sh.eex` is preserved and runs first.
-- `mix forecastle.relup` with no strategy switch is now `auto`, which changes
-  what an existing invocation produces for some transitions. Where the version of
-  an application the project does not own moved between the two releases - a
-  Castle bump, or anything else in `deps` - and *no appup covers that move*, the
-  default no longer asks `systools` for a hot relup. Such a transition can only be
-  a restart, and while a restart transition cannot be performed `auto` refuses it:
-  the generation exits non-zero, having written nothing, and names the application
-  and the missing appup entry.
+- `mix forecastle.relup` with no strategy switch is now `auto`, which changes what
+  an existing invocation does with some transitions. Case by case, against a task
+  that simply asked `systools` for the relup:
 
-  **This is the one change most likely to stop an existing build.** A dependency
-  bump with no appup behind it used to produce a relup; it now produces a
-  failure. That is deliberate - `systools` would have generated a plan that either
-  did nothing for that application or did something nobody here wrote, and the
-  honest alternative, a restart transition, cannot yet be installed. Pass `--hot`
-  for the previous behaviour, and to have the generation fail rather than degrade
-  if the transition cannot be hot; pass `--restart` to build the restart relup
-  anyway. Where the dependency *does* carry an appup covering the move, `auto`
-  generates the hot upgrade exactly as before.
+  - **A dependency bump whose appup covers the move** - an entry naming this
+    from-version, in the direction being generated - is a hot upgrade, exactly as
+    it was. **Unchanged.** This is the ordinary case, a Castle bump among them.
+  - **A dependency bump with no appup, or none that matches** already failed. The
+    task delegated to `systools_relup:get_script_from_appup/5`, which throws
+    `file_problem` for an appup that is not there and `no_relup` when no entry
+    matches the from-version, so this case produced no relup before either. It
+    still fails, and only the message changed: it names the application, both
+    versions and the appup entry that is missing, rather than reporting
+    `no_relup` against whichever application `systools` happened to reach first.
+  - **An ERTS change** did produce a relup, and the wrong kind.
+    `systools_relup:check_for_emulator_restart/5` inserts the two-stage
+    `restart_new_emulator` on its own whenever the ERTS version differs, warning
+    only that it changed - so the relup carried a transition nobody had chosen,
+    which replies `{continue_after_restart, Vsn, Descr}` and which Castle cannot
+    install. `auto` now decides this case for itself, as a one-stage restart
+    transition, which while such a transition cannot be performed means the
+    generation is refused. `--restart` generates it. **Materially changed.**
+  - **An appup that names an emulator restart itself** was passed straight
+    through, and the relup was written with the restart in it. `auto` now refuses
+    it, `--hot` refuses it, and `--restart` - which reads no appup at all - makes
+    the transition a `restart_emulator` by its own choosing. **Materially
+    changed.**
+
+  So the two cases that changed are the two that used to write a relup carrying
+  an emulator restart; the other two are a hot upgrade that is still a hot
+  upgrade, and a failure that is still a failure.
+
+  `--hot` is **not** the previous behaviour and is not the way back to it: it
+  refuses an appup-supplied emulator restart that the old task packaged. What it
+  is good for is a pipeline that wants the generation to fail rather than degrade.
+  `--restart` is the way to get a relup out of the two changed cases.
 - A `mix forecastle.relup` run that fails now writes nothing at all. It used to
   let `systools` write the relup and report afterwards, which was harmless while
   every refusal came from `systools` itself; the strategies add refusals that can

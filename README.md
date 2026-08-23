@@ -276,7 +276,9 @@ Each *direction* is classified on its own, because an appup's upgrade and
 downgrade lists are independent: a relup may carry a hot upgrade from a version
 and a restart back down to it. Applications merely added or removed are left
 alone, since starting or stopping one is hot. Which transitions were chosen, and
-why, is printed.
+why, is printed - once, after the relup has been generated and inspected, since
+an appup may itself ask for the emulator to be restarted and nothing knows that
+until there is a script to look at.
 
 `auto` does not fall back to a restart when an appup for an application you *do*
 own is missing. A transition it judged hot and `systools` then could not generate
@@ -286,8 +288,10 @@ upgrade it decided on.
 > **`auto` currently refuses a restart transition.** Castle can install a relup
 > that restarts the emulator but cannot yet complete the transition (see below),
 > so rather than write an upgrade plan that is known not to install, `auto` exits
-> non-zero and names the edge that forced the restart and why. This is temporary.
-> `--restart` is the deliberate override for anyone who wants the relup anyway.
+> non-zero and names the edge that forced the restart and why. That covers a
+> `restart_emulator` an appup asked for by name just as much - the same transition
+> arrived at another way. This is temporary. `--restart` is the deliberate
+> override for anyone who wants the relup anyway.
 
 **`--hot`** requires a genuine hot upgrade of every transition, and exits
 non-zero, having written nothing, if one cannot be: a missing appup entry, an

@@ -288,6 +288,7 @@ defmodule Forecastle.RelupTest do
       {output, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir], @to)
 
       assert status != 0, "a restart transition was written by auto:\n\n#{output}"
+      refute_all_hot(output)
       assert output =~ "auto would make a restart transition of the upgrade from #{@from}"
       assert output =~ "the downgrade to #{@from}"
       assert output =~ ":sample_dep is a dependency and changed from #{@from} to #{@to}"
@@ -322,6 +323,7 @@ defmodule Forecastle.RelupTest do
       {output, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir], @to)
 
       assert status != 0, "a restart transition was written by auto:\n\n#{output}"
+      refute_all_hot(output)
       assert output =~ "auto would make a restart transition of the downgrade to #{@from}"
       assert output =~ "sample_dep.appup has no downgrade instructions to #{@from}"
       refute output =~ "upgrade from #{@from}"
@@ -339,6 +341,7 @@ defmodule Forecastle.RelupTest do
       {output, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir], @to)
 
       assert status != 0, "an ERTS change was written as a restart transition:\n\n#{output}"
+      refute_all_hot(output)
       assert output =~ "auto would make a restart transition of the upgrade from #{@from}"
       assert output =~ "ERTS changed from 0.0.0 to"
       refute output =~ ":sample_dep"
@@ -369,6 +372,7 @@ defmodule Forecastle.RelupTest do
       {output, status} = relup(project_only(ctx) ++ ["--outdir", @outdir], @hot)
 
       assert status != 0, "a restart_new_emulator relup was accepted:\n\n#{output}"
+      refute_all_hot(output)
       assert output =~ "asks for the two-stage emulator restart"
       assert output =~ "restart_new_emulator on the upgrade from #{@from}"
       refute File.exists?(ctx.relup), "a refused relup was written anyway"
@@ -378,14 +382,44 @@ defmodule Forecastle.RelupTest do
       # The same refusal by another route. A restart_emulator an appup asked for
       # by name is the transition `auto` would have chosen for itself, and it is
       # just as uninstallable, so how the relup came by it makes no difference.
+      #
+      # Classification cannot see this one: nothing but :sample moves between
+      # these two releases, so every edge is classified hot and the restart only
+      # exists once :systools has produced a script. That is what the all-hot
+      # refutation is here for - announcing the verdict from classification alone
+      # had this run report a hot relup and a restart in the same breath, and
+      # would have it report both from a run that succeeded once a restart
+      # transition can be written.
       add_appup_instruction!(ctx.hot, @hot, :restart_emulator)
 
       {output, status} = relup(project_only(ctx) ++ ["--outdir", @outdir], @hot)
 
       assert status != 0, "an appup-supplied restart was accepted by auto:\n\n#{output}"
+      refute_all_hot(output)
       assert output =~ "an appup asks for the emulator to be restarted"
       assert output =~ "restart_emulator on the upgrade from #{@from}"
       assert output =~ "--restart"
+      refute File.exists?(ctx.relup), "a refused relup was written anyway"
+    end
+
+    test "settles a restart it chose and one an appup asked for in the same verdict", ctx do
+      # Both kinds of restart in one run, which is what makes "one verdict" mean
+      # anything. 0.1.1 is an edge `auto` classifies as a restart - the dependency
+      # moves between it and 0.1.2, whose copy of the dependency's appup covers
+      # nothing - while 0.1.0 is a hot edge whose appup then asks for the emulator
+      # to be restarted by name. Settling the two in separate passes reports one
+      # of them and leaves the other unsaid.
+      add_appup_instruction!(ctx.hot, @hot, :restart_emulator)
+
+      {output, status} =
+        relup(project_only(ctx) ++ ["--upfrom", rel(ctx.to, @to), "--outdir", @outdir], @hot)
+
+      assert status != 0, "a relup with two kinds of restart in it was accepted:\n\n#{output}"
+      refute_all_hot(output)
+      assert output =~ "auto would make a restart transition of the upgrade from #{@to}"
+      assert output =~ "sample_dep.appup has no upgrade instructions from #{@to}"
+      assert output =~ "an appup asks for the emulator to be restarted"
+      assert output =~ "restart_emulator on the upgrade from #{@from}"
       refute File.exists?(ctx.relup), "a refused relup was written anyway"
     end
   end
@@ -438,13 +472,39 @@ defmodule Forecastle.RelupTest do
       {@hot_vsn, [{@from_vsn, [], hot_up}, _restart_up],
        [{@from_vsn, [], hot_down}, _restart_down]} = plan
 
-      # The instruction :sample's appup asks for, translated. Its version differs
-      # between the two directions - a downgrade loads the code being returned to
-      # - so what is pinned is that each direction got a script of its own that
-      # loads the module the appup names.
-      for script <- [hot_up, hot_down] do
-        assert Enum.any?(script, &match?({:load_object_code, {:sample, _, [Sample.Counter]}}, &1))
-      end
+      # The instruction :sample's appup asks for, translated - and the version in
+      # it is the only thing in this relup that tells the two hot scripts apart.
+      # An upgrade loads the code being moved *to* and a downgrade the code being
+      # returned to, which is `systools_rc:translate_scripts/4` resolving the
+      # module against the target release's applications for `up` and against the
+      # from-release's for `dn`. So each direction names its own version, and
+      # accepting whatever version happened to be there would let the up and down
+      # scripts be swapped at the merge without a single test noticing: the
+      # from-versions, the restart scripts and the module are all identical
+      # between the two sections, and assembly only checks that a script is
+      # structurally valid.
+      assert {:load_object_code, {:sample, @hot_vsn, [Sample.Counter]}} in hot_up
+      assert {:load_object_code, {:sample, @from_vsn, [Sample.Counter]}} in hot_down
+    end
+
+    test "keeps the two directions' from-releases apart", ctx do
+      # Asymmetric on purpose, and the only shape here that is. Every other plan
+      # in this suite offers the same from-releases to both directions, so a merge
+      # that swapped its up and down arguments - or used one of them twice - would
+      # produce the same set twice and pass. Here 0.1.1 is a restart edge on the
+      # way up and nothing is offered as a restart on the way down, so either
+      # mistake moves an entry into a section it does not belong in.
+      plan =
+        Relup.plan_transitions!(
+          rel(ctx.hot, @hot),
+          [rel(ctx.from, @from)],
+          [rel(ctx.from, @from)],
+          [rel(ctx.to, @to)],
+          []
+        )
+
+      assert {@hot_vsn, [{@from_vsn, [], _hot_up}, {@to_vsn, [], [:restart_emulator]}],
+              [{@from_vsn, [], _hot_down}]} = plan
     end
 
     test "is accepted by assembly, and lands in the release", %{plan: plan, cwd_relup: relup} do
@@ -551,6 +611,18 @@ defmodule Forecastle.RelupTest do
       assert {:ok, [{@to_vsn, [{@from_vsn, [], [:restart_emulator]}], _down}]} =
                :file.consult(to_charlist(staged))
     end
+  end
+
+  # A run has one verdict about its strategy, so a run with a restart in it must
+  # not also have said that every transition was hot. Classification alone cannot
+  # answer that - an appup can ask for the emulator to be restarted by name, and
+  # nothing knows until :systools has produced a script - so this is asserted
+  # against every `auto` case that ends in a restart, whichever of the two ways
+  # the restart arrived. It has to keep holding when the refusal becomes an
+  # announcement: then it is a *successful* run that must not say both.
+  defp refute_all_hot(output) do
+    refute output =~ "every transition in this relup is a hot upgrade",
+           "auto announced an all-hot relup for a transition it restarts:\n\n#{output}"
   end
 
   # The appup in the assembled tree, not the fixture's source: this suite owns
