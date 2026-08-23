@@ -38,8 +38,10 @@ defmodule Forecastle.EnvScriptTest do
 
   And the sandbox holds a release's own `erts-16.2/bin/erl` - a script that records
   every invocation and then hands over to the real emulator. That is the binary the
-  fragment resolves its probe through, so `probes/1` is how a test sees *whether*
-  the fragment asked, which nothing about the resulting environment says; and
+  fragment resolves its probe through, so `probes/1` is how a test sees whether the
+  fragment asked *and what it asked with*, neither of which the resulting
+  environment says. It asks on every start, deliberately - there used to be a gate,
+  and the cases below that changed when it went say so one at a time; and
   `legacy_erl/1` replaces it with one that strips `-emu_args_exit`, which is the
   only way to exercise what the fragment does when an emulator does not know the
   flag it relies on.
@@ -76,10 +78,9 @@ defmodule Forecastle.EnvScriptTest do
       File.write!(Path.join(dir, "start.boot"), "")
 
       # The launcher passes this file to the emulator as -args_file, so it is a
-      # source of -heart exactly as the flag variables are. This one is inert *and
-      # unremarkable* - no quote, no backslash, no mention of heart or of another
-      # args file - which is what makes it the ordinary deployment the fragment's
-      # gate must not probe for. The cases that are about it write over this.
+      # source of -heart exactly as the flag variables are. This one is the
+      # ordinary deployment's: inert, so the probe reads it, finds no flag, and
+      # the fragment adds one. The cases that are about it write over this.
       File.write!(Path.join(dir, "vm.args"), "## nothing\n-start_epmd false\n")
     end
 
@@ -126,14 +127,25 @@ defmodule Forecastle.EnvScriptTest do
       assert start(root).stderr == ""
     end
 
-    test "asks the emulator nothing at all", %{root: root} do
+    test "asks the emulator anyway", %{root: root} do
       # The cost of the fix on an ordinary start, and it is stated as a property
-      # rather than left implied: with no flag variable set and a vm.args of plain
-      # flags and comments, there is nothing that could carry a -heart, so no
-      # emulator is asked. Recorded by the release's own erl, which is the binary
-      # the fragment resolves and the only place a probe could come from.
+      # rather than left implied: no flag variable is set and the vm.args is plain
+      # flags and comments, so there is nothing here that *could* carry a -heart,
+      # and the emulator is asked all the same.
+      #
+      # There used to be a gate - a `case` over the four flag variables and a
+      # `read` loop over the args file - so that a start like this forked nothing,
+      # and this test asserted exactly that. It went because it was the last thing
+      # in the fragment reasoning about the *text* of those values instead of
+      # measuring them, and because it could not see ERL_OTP<major>_FLAGS at all.
+      # So what every start now pays is this: one invocation, of a C program that
+      # exits without booting an emulator. It is deliberate, and it is asserted
+      # rather than tolerated.
+      #
+      # Recorded by the release's own erl, which is the binary the fragment
+      # resolves and the only place a probe could come from.
       assert start(root).env["CASTLE_HEART_FLAGS"] == "1"
-      assert probes(root) == []
+      assert [_probe] = probes(root)
     end
   end
 
@@ -179,20 +191,43 @@ defmodule Forecastle.EnvScriptTest do
       end
     end
 
+    test "is not added a second time for an ERL_OTP<major>_FLAGS", %{root: root} do
+      # **The fifth variable, and the one the fragment's gate could not see.**
+      # erlexec prepends ERL_OTP<major>_FLAGS exactly as it prepends ERL_AFLAGS, so
+      # a -heart in it reaches init:get_argument(heart) like any other - but its
+      # name carries the emulator's OTP major, and a POSIX shell looking for it
+      # would have to enumerate variable names, which `env` and `export -p` can
+      # only do by forking. So the gated fragment never probed for a deployment
+      # that set only this one: it appended a second flag and the boot hung having
+      # printed nothing. Removing the gate is what closes that, and this is the
+      # property it was removed for.
+      #
+      # The name is derived from the running emulator rather than written out. A
+      # hardcoded ERL_OTP28_FLAGS is inert on four of the six cells this repository
+      # is verified on, and a test that sets an inert variable measures nothing
+      # while passing.
+      run = start(root, [{otp_flags(), "-heart"}])
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
+      assert run.stderr == ""
+    end
+
     for source <- ~w(ELIXIR_ERL_OPTIONS ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS) do
       test "is still added when #{source} carries other flags but no -heart",
            %{root: root} do
         # The other direction, and what stops the fix from being "never add one".
         # A deployment with unrelated flags in these variables still needs the
-        # heart the restart transition depends on - and, because the value carries
-        # no quote, no backslash and no mention of heart or of an args file, it
-        # cannot become one, so the gate does not pay for an emulator to say so.
+        # heart the restart transition depends on - and the emulator is asked about
+        # them even though nothing in the value could become a -heart, because
+        # measuring is unconditional now. The count is what changed here; the
+        # outcome is the same one the gated version reached without asking.
         source = unquote(source)
         run = start(root, [{source, "-kernel shell_history enabled"}])
 
         assert run.env["CASTLE_HEART_FLAGS"] == "1"
         assert run.env["ELIXIR_ERL_OPTIONS"] =~ "-heart"
-        assert probes(root) == []
+        assert [_probe] = probes(root)
       end
     end
 
@@ -333,8 +368,9 @@ defmodule Forecastle.EnvScriptTest do
     test "is still added when vm.args carries other flags but no -heart",
          %{root: root} do
       # The ordinary deployment, whose vm.args is full of distribution settings and
-      # says nothing about heart. Nothing in it can become a -heart, so this pays
-      # for no emulator either.
+      # says nothing about heart. The probe reads it and finds nothing, so a flag
+      # is added - which is the outcome the gated version reached without asking.
+      # The count is what moved; the answer did not.
       vm_args(root, "-start_epmd false\n-erl_epmd_port 24601\n")
 
       run = start(root)
@@ -342,7 +378,7 @@ defmodule Forecastle.EnvScriptTest do
       assert run.env["CASTLE_HEART_FLAGS"] == "1"
       assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
       assert run.stderr == ""
-      assert probes(root) == []
+      assert [_probe] = probes(root)
     end
 
     test "is read from the file RELEASE_VM_ARGS names, not from the default",
@@ -367,17 +403,31 @@ defmodule Forecastle.EnvScriptTest do
     end
 
     test "adds one when the vm.args path does not exist at all", %{root: root} do
-      # Absent is not opaque: a path that is not there cannot carry a flag, so
-      # there is nothing to ask about and no probe. The start is going to fail on
-      # its own account when erlexec meets the same missing file - which is why
-      # the reported count is `?` rather than a number, since the emulator cannot
-      # be asked either.
+      # **The one thing about the measurement that is still conditional, and it is
+      # a fact about the filesystem rather than a judgement about contents.**
+      # erlexec refuses an args file it cannot open and exits non-zero, so handing
+      # over a path that is not there would report the measurement as impossible
+      # and decline to add a flag - on every release that ships no vm.args at all,
+      # which is a supported shape, since the launcher only defaults
+      # RELEASE_VM_ARGS after this fragment returns. So the question is asked
+      # without the file, and a flag is added.
+      #
+      # The reported count is `?` rather than a number because this suite's own
+      # reporting passes the missing path unconditionally and so cannot be
+      # answered. That is the launcher's position, not the fragment's.
       run = start(root, [{"RELEASE_VM_ARGS", Path.join(root, "nope.vm.args")}])
 
       assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
       assert run.env["CASTLE_HEART_FLAGS"] == "?"
       assert run.stderr == ""
-      assert probes(root) == []
+
+      # Asked, and asked *without* an args file. Both halves are the discriminator:
+      # the first says the fragment measured rather than assuming an absent file
+      # carries nothing, and the second says the existence check is what keeps that
+      # measurement answerable. Without it this start would take the unmeasurable
+      # branch and leave the release with no heart.
+      assert [probe] = probes(root)
+      refute probe =~ "-args_file"
     end
   end
 
@@ -527,9 +577,11 @@ defmodule Forecastle.EnvScriptTest do
       assert provisional?(root)
 
       # And no emulator was asked anything, which is the sharper half now that the
-      # heart guard can start one: `bin/castle` reaches every command through
-      # `rpc`, so a fragment that probed for those would put a fork of erl in front
-      # of every release-management call.
+      # heart guard asks on *every* start: `bin/castle` reaches every command
+      # through `rpc`, so a fragment that ran here would put a fork of erl in front
+      # of every release-management call. This is the assertion that keeps the
+      # probe's cost bounded to a node start, and it is the reason the removed gate
+      # was not the only thing standing between the fork and the common path.
       assert probes(root) == []
     end
   end
@@ -714,6 +766,12 @@ defmodule Forecastle.EnvScriptTest do
   # They matter more, not less: they are read by erlexec rather than by anything
   # Mix generates, so a developer or a CI image with one of them set would leak a
   # -heart into every case here and make the fragment's own additions invisible.
+  #
+  # `otp_flags()` is in the list for that reason and no other. It is a fifth
+  # variable erlexec reads, so it leaks the same way - and it is the one this
+  # environment could not have named while the fragment's gate existed, since the
+  # gate's whole limitation was that a shell cannot enumerate variable names.
+  # Cleared here and set by the one test that is about it.
   defp environment(root, command, env) do
     [
       {"RELEASE_COMMAND", command},
@@ -724,12 +782,19 @@ defmodule Forecastle.EnvScriptTest do
       {"ERL_AFLAGS", nil},
       {"ERL_FLAGS", nil},
       {"ERL_ZFLAGS", nil},
+      {otp_flags(), nil},
       {"RELEASE_VM_ARGS", nil},
       {"HEART_COMMAND", nil},
       {"HEART_NO_KILL", nil},
       {"HEART_BEAT_TIMEOUT", nil}
     ] ++ env
   end
+
+  # ERL_OTP<major>_FLAGS for the emulator the fragment will probe. That is the
+  # same one this suite reports with - the sandbox's erts-*/bin/erl hands over to
+  # `@erl` - so one name covers both, and it is resolved at run time rather than
+  # compiled in, because the major differs across the cells this is verified on.
+  defp otp_flags, do: "ERL_OTP#{:erlang.system_info(:otp_release)}_FLAGS"
 
   defp fragment do
     :forecastle

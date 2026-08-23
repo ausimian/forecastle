@@ -27,12 +27,16 @@
 ## by default lands in the middle of the output `Forecastle.ConfigurationTest`
 ## asserts on exactly. A suite that wants one passes it to `assemble!/1`.
 ##
-## One consequence worth stating rather than leaving to be rediscovered: these
-## comments say "heart", so the fragment's gate cannot rule this file out, and
-## every start of every release assembled from this fixture asks the emulator once
-## whether or not SAMPLE_HEART was set. That is a fork of erlexec, which exits
-## without starting a VM, and it is the direction the gate is deliberately wrong
-## in - a false positive costs a probe, a false negative would cost the boot.
+## One consequence worth stating rather than leaving to be rediscovered: every
+## start of every release assembled from this fixture asks the emulator once,
+## whether or not SAMPLE_HEART was set, because the fragment has no gate in front
+## of its probe. That is one fork of erlexec, which exits without starting a VM.
+## There used to be a gate, and these comments saying "heart" is what kept it from
+## ruling this file out; it was removed because it reasoned about the text of
+## values instead of measuring them, and because it could not see
+## ERL_OTP<major>_FLAGS at all. So these comments no longer have that job, and the
+## backslash in the flag below still has the one stated above: erlexec unescapes
+## it, and nothing reading this file can.
 ##
 ## Which means: do not "tidy" the spelling into a plain -heart, and do not add
 ## -heart to ELIXIR_ERL_OPTIONS or one of the ERL_*FLAGS in a suite that boots a

@@ -124,16 +124,16 @@ In the post-assembly step:
     restart, and that raises where no `heart` process exists.
 
     If your deployment already asks for `-heart` — in `rel/vm.args.eex`, in
-    `ELIXIR_ERL_OPTIONS`, or in one of `ERL_AFLAGS`, `ERL_FLAGS` and
-    `ERL_ZFLAGS` — that is fine, and nothing is added beside it: two of the flag
-    make `init:get_argument(heart)` answer `{ok, [[], []]}`, which heart's own
-    startup check has no clause for, so the boot would hang having printed
-    nothing. The hook settles it by asking `erl` what argument list it would
-    build, so quoting and escaping in those values are read the way `erl` reads
-    them. `ERL_OTP<major>_FLAGS` — undocumented, and reserved for OTP's own
-    use — is the exception: it is seen when the hook has some other reason to
-    ask, and not when it is the only place you set the flag, so do not put
-    `-heart` there.
+    `ELIXIR_ERL_OPTIONS`, in one of `ERL_AFLAGS`, `ERL_FLAGS` and `ERL_ZFLAGS`,
+    or in `ERL_OTP<major>_FLAGS` — that is fine, and nothing is added beside it:
+    two of the flag make `init:get_argument(heart)` answer `{ok, [[], []]}`,
+    which heart's own startup check has no clause for, so the boot would hang
+    having printed nothing. The hook settles it by asking `erl` what argument
+    list it would build, so quoting and escaping in those values are read the way
+    `erl` reads them, and all six places a flag can come from are covered at
+    once. It asks on every start, which costs one short-lived `erl` that exits
+    without booting anything; commands that do not start the system — `eval`,
+    `rpc`, `remote` — ask nothing.
 
     Those three are **assigned**, and `HEART_COMMAND` is **unset**, rather than
     defaulted — so a deployment that already has any of them in its environment

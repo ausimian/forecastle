@@ -394,7 +394,7 @@ around it composes instead:
   sources — it *is* the union, including `ERL_OTP<major>_FLAGS`, which the fragment
   can neither name nor needs to.
 
-  Four properties of that, each load bearing:
+  Five properties of that, each load bearing:
 
   - **It cannot hang, so it needs no timeout.** A deployment already carrying two
     `-heart` flags — the boot this guard exists to prevent — makes it print two
@@ -408,35 +408,54 @@ around it composes instead:
     contains a `-root` line, which every vector `erlexec` builds has. Both
     failures land in the same branch as an unreadable `-args_file`: add nothing,
     and say so on standard error.
-  - **The probe only runs when something could carry a flag.** The gate is the one
-    remaining judgement about text, and it is sound in the only direction that
-    matters: a value carrying none of `heart`, `args_file`, a quote, a backslash or
-    a glob character cannot become the token `-heart`, because the only
-    transformations applied are field splitting (which cuts), pathname expansion
-    (needs a glob character) and `erlexec`'s quote removal (needs a quote or a
-    backslash) — `build_args_from_string()` in `erlexec.c` removes nothing else.
-    The args file is read with the `read` builtin, not `grep` or `cat`, so an
-    ordinary start forks nothing at all. A comment with an apostrophe in it costs
-    one probe, and that is the trade.
-  - **`ERL_OTP<major>_FLAGS` is covered by the probe and not by the gate, so a
-    deployment that sets *only* that variable is unsupported and hangs.** POSIX sh
-    cannot enumerate environment variable names; `env` and `export -p` both need a
-    fork on the common path to look for a variable `erlexec`'s own source calls
-    "intentionally undocumented and intended for OTP internal use only". An earlier
-    note here said the fragment could not ask for the OTP major version without
-    starting the VM whose boot was at risk. **That was false** — `-emu_args_exit`
-    asks for the whole vector and starts nothing — and it is why this is a gate
-    limitation rather than an exclusion.
+  - **The probe always runs on a start, and there is deliberately no gate in front
+    of it.** There was one: a `case` over the four flag variables and a `read` loop
+    over the args file, looking for `heart`, `args_file`, a quote, a backslash or a
+    glob character, so that an ordinary deployment forked nothing. **It was removed
+    on purpose and it must not come back.** It was the last thing in the fragment
+    reasoning about the *text* of those values rather than measuring them, and its
+    soundness rested on a claim about `build_args_from_string()` in `erlexec.c`
+    removing nothing but quotes and backslashes — a claim about a C state machine,
+    of exactly the kind that was wrong three times above. And it left a hole it
+    could not close, which is the next point.
+
+    What every start now pays is **one `fork`+`exec` of a C program that exits
+    without booting an emulator** — about 11ms, measured — and it is paid once per
+    node start, because the whole fragment is gated on `$RELEASE_COMMAND` naming
+    `start`, `start_iex`, `daemon` or `daemon_iex`. An `eval` or an `rpc` reaches
+    none of it, which is what keeps the fork off `bin/castle`'s path.
+  - **All six sources are covered, `ERL_OTP<major>_FLAGS` included.** That is the
+    hole the gate could not close: POSIX sh cannot enumerate environment variable
+    *names*, and `env` and `export -p` both need a fork of their own to look for a
+    variable whose name carries the emulator's OTP major — one that `erlexec`'s own
+    source calls "intentionally undocumented and intended for OTP internal use
+    only". So a deployment setting only that variable never tripped the gate,
+    received a second `-heart`, and hung the boot having printed nothing. The probe
+    sees it because `erlexec` reads it, and `Forecastle.EnvScriptTest` pins that
+    with a case deriving the variable's name from the running OTP major.
+  - **The one condition left is a fact about the filesystem, not a judgement about
+    contents.** `-args_file` is passed only when the path exists, because `erlexec`
+    refuses an args file it cannot open and exits non-zero — which would make every
+    start of a release with no `vm.args` report the measurement as impossible and
+    decline to add the flag. A release with no `vm.args` is a supported shape: the
+    launcher only defaults `RELEASE_VM_ARGS` *after* it has sourced this fragment.
+    Every variable `erlexec` reads still reaches the probe, `ERL_OTP<major>_FLAGS`
+    among them, so nothing goes unmeasured; only a file that is not there goes
+    unmentioned. A path that exists and cannot be read is still handed over and
+    still reported, because that one is worth knowing about.
 
   The coverage follows the same rule: **do not validate any of this with a shell
   counter**, whatever shape it takes, because what such a counter measures is
   somebody's model of `erlexec`. `Forecastle.EnvScriptTest` counts by asking a real
   `erlexec` with `-emu_args_exit`, over a matrix of quoted, double-quoted,
   backslash-escaped and whitespace-separated values in each variable and in
-  `vm.args`, plus a nested args file, a commented flag, an emulator that does not
-  know the flag, and cases asserting that no probe happens at all. It also records
+  `vm.args`, plus `ERL_OTP<major>_FLAGS` under its real name, a nested args file, a
+  commented flag, and an emulator that does not know the flag. It also records
   every invocation of the release's own `erl`, which is the only way to see whether
-  the fragment probed.
+  the fragment probed and what it probed with — so an ordinary start asserts one
+  invocation rather than none, a missing `vm.args` asserts one carrying no
+  `-args_file`, and the only case left asserting *no* probe is a
+  `$RELEASE_COMMAND` that does not start the system.
 
   `Forecastle.RestartUpgradeTest` is the real boot, and the fixture's own
   `rel/vm.args.eex` carries the flag spelled **`-he\art`**. That is the point of
@@ -445,16 +464,18 @@ around it composes instead:
   it is to ask. `ERL_AFLAGS` carries `-env CASTLE_TAB_PROBE tabbed` behind tabs —
   `erlexec` splits that variable on tabs as readily as on spaces, measured — so the
   node answering with the value says the tabs really were separators, and the value
-  carrying no quote and no `heart` says the gate does not trip on an ordinary flag
-  variable. The suite additionally asserts `ELIXIR_ERL_OPTIONS` is **unset** in the
-  running node, which is what says the fragment added nothing beside a flag no
-  reading of that file could have found.
+  carrying no `heart` of its own says that asking about an unremarkable flag
+  variable does not manufacture a second flag. The suite additionally asserts
+  `ELIXIR_ERL_OPTIONS` is **unset** in the running node, which is what says the
+  fragment added nothing beside a flag no reading of that file could have found.
 
-  `Forecastle.Fixture` scrubs all four variables and both `RELEASE_*VM_ARGS`. The
-  three `ERL_*FLAGS` matter more than `ELIXIR_ERL_OPTIONS` does — they are read by
-  `erlexec` rather than by anything Mix generates — and the `RELEASE_*VM_ARGS` pair
-  matters differently again: those do not add a flag, they point the launcher at
-  another project's args file entirely.
+  `Forecastle.Fixture` scrubs all four variables, `ERL_OTP<major>_FLAGS`, and both
+  `RELEASE_*VM_ARGS`. The three `ERL_*FLAGS` matter more than `ELIXIR_ERL_OPTIONS`
+  does — they are read by `erlexec` rather than by anything Mix generates — and
+  `ERL_OTP<major>_FLAGS` is a fifth of that kind, appended at run time because its
+  name carries the emulator's OTP major and cannot be written into a module
+  attribute. The `RELEASE_*VM_ARGS` pair matters differently again: those do not
+  add a flag, they point the launcher at another project's args file entirely.
 
   **What holds this to the environment rather than to the text of the script is
   `Forecastle.EnvScriptTest`**, which sources the fragment in a release-shaped

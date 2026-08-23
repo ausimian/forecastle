@@ -249,20 +249,24 @@
   `"-heart"` and `-he\art` all arrive as `-heart` without containing the word.
   The hook therefore asks `erl` - with the start's own environment and args file,
   and without starting a VM - what argument list it would build, and adds a flag
-  only if that list has none. A start whose flag variables are unset or
-  unremarkable, and whose `vm.args` is ordinary, asks nothing and costs nothing.
+  only if that list has none. **It asks on every start**, whether or not anything
+  in the environment looks like it could carry a flag, which costs one
+  `fork`+`exec` of a C program that exits without booting an emulator - about
+  11ms, once per node start. Nothing is asked for an `eval`, an `rpc` or a
+  `remote`: the whole hook runs only for the commands that start the system.
+
+  `ERL_OTP<major>_FLAGS` is covered along with the rest. It is undocumented and
+  described by OTP's own source as for internal use, but `erl` reads it, so a
+  `-heart` there is a `-heart` the emulator gets - and because asking is
+  unconditional, one set only there is detected like any other.
 
   Where the question cannot be answered - an args file `erl` refuses to read, for
   instance - the hook adds nothing and says so on standard error. That direction
   is deliberate: adding a flag that turns out to be a second one hangs the boot
   in silence, while adding none makes an upgrade that restarts the emulator fail
-  loudly with the system still running.
-
-  `ERL_OTP<major>_FLAGS` is covered whenever the question is asked, but a
-  deployment that sets *only* that variable - undocumented, and described by
-  OTP's own source as for internal use - is not detected and will hang, because a
-  POSIX shell cannot look for a variable whose name it does not know without
-  making every ordinary start pay for the search.
+  loudly with the system still running. A `vm.args` that is simply *absent* is not
+  such a case: the file is passed to `erl` only when it exists, so a release
+  shipping none is asked about without it rather than reported unmeasurable.
 
   All three variables are **assigned**, and `HEART_COMMAND` is **unset**, rather
   than defaulted - so a deployment that already has any of them in its

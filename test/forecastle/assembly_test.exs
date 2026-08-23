@@ -240,7 +240,7 @@ defmodule Forecastle.AssemblyTest do
       # as it would on the boot.
       assert env_sh =~ "${ELIXIR_ERL_OPTIONS-} \\\n"
       refute env_sh =~ ~s("${ELIXIR_ERL_OPTIONS-}" \\\n)
-      assert env_sh =~ ~s(-args_file "$castle_vm_args")
+      assert env_sh =~ ~s(${castle_args_file:+-args_file "$castle_args_file"})
 
       # The args file is the effective one, and the default is spelled with
       # REL_VSN_DIR because the launcher does not set RELEASE_VM_ARGS until *after*
@@ -257,13 +257,25 @@ defmodule Forecastle.AssemblyTest do
       assert env_sh =~ ~s(grep -q '^-root$')
       assert env_sh =~ "ERL_CRASH_DUMP_SECONDS=0"
 
-      # The gate, which is what keeps an ordinary start from paying for any of
-      # this: a value carrying none of `heart`, `args_file`, a quote, a backslash
-      # or a glob character cannot become the token -heart. Read with the `read`
-      # builtin rather than with grep or cat, because on the common path the gate
-      # must not fork either.
-      assert env_sh =~ ~S(*heart* | *args_file* | *\'* | *\"* | *\\*)
-      assert env_sh =~ ~s(while IFS= read -r castle_line)
+      # And there is nothing in front of it. The fragment used to gate the probe on
+      # a `case` over the four flag variables and a `read` loop over the args file,
+      # so that an ordinary start forked nothing; that is refuted here rather than
+      # merely absent, because it reads as the obvious optimisation and would come
+      # back. It judged the *text* of those values - the modelling asking erlexec
+      # replaced - and it could not see ERL_OTP<major>_FLAGS at all, since POSIX sh
+      # cannot enumerate variable names without a fork of its own. What the probe
+      # costs, and that it really does run on an ordinary start, is
+      # `Forecastle.EnvScriptTest`'s; that it has no gate to run behind is here.
+      refute env_sh =~ "castle_ask"
+      refute env_sh =~ ~S(*heart* | *args_file*)
+      refute env_sh =~ ~s(while IFS= read -r castle_line)
+
+      # The one condition that is left, and it is about the filesystem rather than
+      # about contents: erlexec refuses an args file it cannot open, so a release
+      # that ships no vm.args is asked about without one instead of being reported
+      # unmeasurable. The `-e` test is deliberately not an `-f`/`-r` pair - anything
+      # that exists is handed over and answered for.
+      assert env_sh =~ ~s|if [ -e "$castle_vm_args" ]; then|
 
       # No timeout, no polling, no killing: the probe cannot hang, because it
       # starts no emulator. A deployment that already carries two -heart flags -

@@ -29,6 +29,13 @@ defmodule Forecastle.Fixture do
   # into every start these suites make. A suite that wants one there sets it
   # itself, which is what `Forecastle.RestartUpgradeTest` does.
   #
+  # `ERL_OTP<major>_FLAGS` is a fifth such variable - erlexec prepends it too -
+  # and it leaks the same way, but it cannot be written into this list because its
+  # name carries the emulator's OTP major. It is appended in `env/1` instead. The
+  # `env.sh` fragment measures that variable rather than modelling it now, which
+  # makes one leaked into an e2e start a way to hang a boot on two `-heart` flags
+  # rather than merely a way to add an unexpected one.
+  #
   # `RELEASE_VM_ARGS` and `RELEASE_REMOTE_VM_ARGS` name the args file, which
   # carries the same flags, and they belong here for a sharper reason than the
   # others: they do not merely *add* a flag, they redirect the launcher to a
@@ -112,6 +119,8 @@ defmodule Forecastle.Fixture do
   defp ensure_prepared(workspace), do: {workspace, workspace}
 
   defp env(extra) do
-    Enum.map(@scrubbed, &{&1, nil}) ++ [{"MIX_ENV", "prod"}, {"FORECASTLE_PATH", @root}] ++ extra
+    scrubbed = ["ERL_OTP#{:erlang.system_info(:otp_release)}_FLAGS" | @scrubbed]
+
+    Enum.map(scrubbed, &{&1, nil}) ++ [{"MIX_ENV", "prod"}, {"FORECASTLE_PATH", @root}] ++ extra
   end
 end

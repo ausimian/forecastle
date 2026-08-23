@@ -115,9 +115,12 @@ defmodule Forecastle.RestartUpgradeTest do
   # and vm.args would itself be the two-flag hang. `-env` is what makes the tab
   # observable - erlexec splits that variable into arguments on tabs as readily as
   # on spaces, measured - so a node answering with the value is a node whose
-  # argument list was really split on them. It is also what says the probe's gate
-  # does not trip on an ordinary flag variable: this value carries no quote, no
-  # backslash and no mention of heart, so the emulator is asked nothing about it.
+  # argument list was really split on them. It is also an ordinary flag variable
+  # standing beside the measurement, carrying no heart of its own: the probe reads
+  # it on every start here and the boot still gets exactly the one flag vm.args
+  # supplies. This used to be phrased as the probe's *gate* not tripping on it;
+  # there is no gate any more, and what the case says now is that asking about an
+  # unremarkable variable does not manufacture a second flag.
   @tabbed_heart [{"ERL_AFLAGS", "-env\tCASTLE_TAB_PROBE\ttabbed"}]
 
   @probe_report ~s|IO.puts(inspect(System.get_env("CASTLE_TAB_PROBE")))|
