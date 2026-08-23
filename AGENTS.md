@@ -322,22 +322,39 @@ environment variable. Castle cannot *complete* a restart transition yet:
 before the reboot, and the reboot would return on the old permanent version
 anyway. `auto` is the no-switch default, so emitting a restart edge from it means
 a routine invocation producing a relup that cannot be installed — worse than
-refusing and saying why. `settle_restarts!/2` is the only caller of that
-predicate; flipping it to `true` when castle#14 and #10 land restores
-`announce_restarts/2`, which is still there. `--hot` and `--restart` are
-unaffected: both are explicit requests.
+refusing and saying why. `--hot` and `--restart` are unaffected: both are
+explicit requests.
 
-**One verdict per invocation, and it comes after the relup exists.** A restart
-reaches an `auto` run two ways — `auto` classified the edge as one, or an appup
-named `restart_emulator` itself — and `settle_restarts!/2` takes both lists at
-once for that reason. Classification cannot see the second kind, so a run that
-announces from classification alone will say every transition is hot and then
-report a restart; that shipped once, and once the predicate is flipped it would
-be a *successful* run printing both. So `plan!(:auto, …)` generates the relup
-first, takes the appup-supplied restarts back from `plan_transitions/6`, and
-settles the two together. Do not add a second announcement anywhere else.
-`relup_test.exs` asserts the all-hot line is absent from every `auto` case that
-ends in a restart, which is the assertion that catches a regression here.
+**The predicate has two callers, and which one answers depends on when the answer
+becomes knowable.** `refuse_chosen_restarts!/1` asks it *before* generation, for
+edges classification has already decided must restart; `settle_restarts!/2` asks
+it *after*, for the all-hot verdict and for restarts an appup named itself. The
+split is not an accident — the paragraph below says why each sits where it does.
+Flipping the predicate to `true` when castle#14 and #10 land makes
+`refuse_chosen_restarts!/1` a no-op and restores `announce_restarts/2`, which is
+still there. **Its true branches are unexecuted today**, so the flip needs its own
+coverage rather than being assumed to work, and inverting the mixed-restart
+assertions is part of it: those tests deliberately pin today's single-cause
+behaviour and say so in their comments.
+
+**One verdict per invocation.** A restart reaches an `auto` run two ways — `auto`
+classified the edge as one, or an appup named `restart_emulator` itself — and only
+the first is knowable before the relup exists.
+
+The all-hot line therefore lives only in `settle_restarts!/2`'s `([], [])` clause,
+which runs after generation. Announcing from classification alone says every
+transition is hot and then reports a restart; that shipped once, and once the
+predicate is flipped it would be a *successful* run printing both. Do not add a
+second announcement anywhere else. `relup_test.exs` asserts the all-hot line is
+absent from every `auto` case that ends in a restart.
+
+While restarts are uninstallable, though, a classified restart edge makes the
+outcome a refusal *whatever* generation does — so generating first only lets a
+`:systools` failure on the hot remainder stand in front of the real reason, which
+a user would fix in order to be told about the restart anyway. Hence the
+pre-generation refusal. Its accepted cost: a mixed plan names the classified edge
+and stays silent about an appup-supplied restart in the hot half until the first
+one is gone.
 
 Because of that refusal the split-and-merge — the path that puts hand-written
 restart entries and generated hot ones into one relup — is unreachable through
