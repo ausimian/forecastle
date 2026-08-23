@@ -715,6 +715,37 @@ defmodule Forecastle.EnvScriptTest do
       assert claims(root) == []
     end
 
+    test "still boots when a marker cannot be removed", %{root: root} do
+      # A removal that fails must not take the launcher down with it. The launcher
+      # sources this fragment under `set -e`, and `rm -f` exits non-zero for a path
+      # it cannot unlink - a directory at the name being the easy case, since `-f`
+      # does not cover one. Unguarded, that ended the launcher here, *after* the
+      # `mv` had already claimed the pending marker: no warning, no fallback, and
+      # no boot at all. A service that stays down is worse than one on the wrong
+      # version, and the wrong version was never the risk here.
+      #
+      # So the pair is treated as unsettled and the fragment falls through to the
+      # mismatch path: it warns, execs nothing, and leaves the stock launcher to
+      # read start_erl.data - the permanent version, which is the safe direction
+      # and the one the rollback property rests on.
+      #
+      # **The discriminator is the exit status**, not the output. Under `set -e` an
+      # unguarded `rm` ends the sourcing shell where it stands, so the fragment
+      # neither warns nor returns: status is non-zero and the warning is absent.
+      # Both assertions below fail against the unguarded version, and the status is
+      # the one that says the launcher would have died rather than merely said
+      # something different.
+      arm(root, @next)
+      File.rm!(provisional(root))
+      File.mkdir_p!(provisional(root))
+
+      run = start(root)
+
+      assert run.status == 0, "the launcher was taken down while sourcing env.sh"
+      assert run.stderr =~ "the version to boot could not be settled"
+      refute run.stdout =~ @exec
+    end
+
     test "is not selected from Castle's marker alone", %{root: root} do
       # What a hard restart between the arming and release_handler's own write
       # leaves: Castle said a reboot was coming and the preparation never got to
