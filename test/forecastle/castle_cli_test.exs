@@ -201,7 +201,13 @@ defmodule Forecastle.CastleCliTest do
   end
 
   describe "commit without a version" do
-    test "resolves the version that is running now", context do
+    test "resolves the release awaiting commit, not whatever is running", context do
+      # `:current` and "running" are not the same set, which is what this test's
+      # name used to imply and what the usage text used to say outright. A system
+      # with only a permanent release *is* running one and has no `:current`, so
+      # the argumentless form has nothing to commit there and says so rather than
+      # committing the release it is already on. The assertion was always about
+      # `:current`; only the name was wrong.
       assert ["rpc", expression] = castle!(context, ["commit"])
 
       assert expression =~ ":release_handler.which_releases(:current)"

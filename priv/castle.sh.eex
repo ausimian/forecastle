@@ -540,7 +540,8 @@ The known commands are:
     unpack \"VSN\"   Unpacks $RELEASE_TARBALL_PREFIX-<VSN>.tar.gz
     install \"VSN\"  Installs VSN and waits until it is the version running now
     commit [VSN]   Commits VSN, so that it becomes the version that runs on restart.
-                   Defaults to the version that is running now.
+                   With no VSN, commits the release awaiting commit, and says so
+                   when there is none.
     remove \"VSN\"   Uninstalls VSN from the system
 
 unpack and install ask that same question themselves, and refuse rather than
