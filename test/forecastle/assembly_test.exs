@@ -227,8 +227,16 @@ defmodule Forecastle.AssemblyTest do
       # line, ERL_OTP<major>_FLAGS, ERL_AFLAGS, ERL_FLAGS, ERL_ZFLAGS and every
       # -args_file followed out of vm.args - with erlexec's own quoting, escaping
       # and comment handling.
+      #
+      # And that it reads that answer with the boundary `init` applies to it:
+      # everything after -extra is the application's arguments rather than emulator
+      # flags, so a plain argument spelled -heart is printed by -emu_args_exit and
+      # is not a flag. Counting it would suppress the one that should be added,
+      # which fails the opposite way to a duplicate - the release boots happily
+      # without heart and the damage surfaces at heart:set_cmd/1 much later.
       assert env_sh =~ "-emu_args_exit"
-      assert env_sh =~ ~s(grep -q '^-heart$')
+      assert env_sh =~ "/^-extra$/ { exit 1 }"
+      assert env_sh =~ "/^-heart$/ { found = 1; exit 0 }"
 
       # Asked of the emulator the launcher will run, and told which that is by the
       # file that decides it: the launcher execs `$REL_VSN_DIR/elixir`, and the
@@ -407,8 +415,15 @@ defmodule Forecastle.AssemblyTest do
       # A system does not need the file in order to boot, and a release root
       # nothing may write to is an ordinary way to run one. bin/castle is where
       # the consequence is refused, not the start.
+      #
+      # The refutation is anchored to a *shell* exit - a line whose whole content
+      # is `exit 1` - rather than to the substring. A bare `=~ "exit 1"` also
+      # matched `{ exit 1 }` inside the awk program that reads the probe's output,
+      # where it ends an awk pass and has nothing to do with the launcher. What
+      # this test is about is the fragment never taking the start down, so it has
+      # to say that rather than something that happens to be spelled like it.
       assert env_sh =~ "warning: could not create"
-      refute env_sh =~ "exit 1"
+      refute env_sh =~ ~r/^\s*exit 1\s*$/m
     end
 
     test "comes after the project's own customization", %{env_sh: env_sh} do

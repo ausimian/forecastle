@@ -349,6 +349,27 @@ defmodule Forecastle.EnvScriptTest do
       end
     end
 
+    test "is still added when a plain argument after -extra is spelled -heart",
+         %{root: root} do
+      # The boundary `init` applies and `-emu_args_exit` does not. Everything after
+      # -extra goes to the application rather than being parsed as an emulator
+      # flag, so `init:get_argument(heart)` answers `error` here - measured - while
+      # the probe's output still carries a `-heart` line for it. Counting that line
+      # would suppress the flag that *should* be added.
+      #
+      # Note which way this fails, because it is the opposite of every other case
+      # in this describe block and that is why it outlived them: those would add a
+      # second flag and hang the boot, this adds none, the release boots happily
+      # without heart, and the damage surfaces much later as heart:set_cmd/1
+      # refusing a restart transition on a system that looks entirely healthy.
+      vm_args(root, "-noinput\n-extra\n-heart\n")
+
+      run = start(root)
+
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.stderr == ""
+    end
+
     test "is not added a second time for one a nested args file supplies",
          %{root: root} do
       # erlexec follows a nested -args_file, so the flag is live and there is no
