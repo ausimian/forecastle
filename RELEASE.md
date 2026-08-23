@@ -187,9 +187,12 @@
 
   This is temporary and will be lifted, at which point `auto` will announce the
   restart it chose instead of refusing - and then, since the run proceeds, both
-  kinds are named in the one announcement. `--hot` and `--restart` are unaffected
-  in either direction; both are explicit requests, and it is fine for `--restart`
-  to produce a relup that cannot yet be deployed.
+  kinds are named in the one announcement. Lifting it is work still to do rather
+  than a switch to throw: there is no flag, environment variable or build option
+  that turns the refusal off, and no announcement waiting behind one. `--hot`
+  and `--restart` are unaffected in either direction; both are explicit
+  requests, and it is fine for `--restart` to produce a relup that cannot yet be
+  deployed.
 - A test suite. It assembles a real release from a fixture application and, in
   the `:e2e` suite, boots it and performs a hot upgrade.
 

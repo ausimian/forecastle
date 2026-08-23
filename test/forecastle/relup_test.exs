@@ -477,7 +477,7 @@ defmodule Forecastle.RelupTest do
     # dropped, or attached to the wrong direction, or one class's script applied
     # to the whole relup. So it is driven directly, in process, past the refusal
     # that sits in front of it. This is the test that has to keep working when
-    # that refusal is flipped back to an announcement.
+    # that refusal becomes an announcement.
     #
     # 0.1.2 is the target: 0.1.0 is a hot edge to it (only :sample moved, since
     # this assembly pins the dependency) and 0.1.1 is declared a restart edge,

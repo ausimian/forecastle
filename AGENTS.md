@@ -314,28 +314,83 @@ compare.** Verified against OTP 28.3, `sasl-4.3`:
   tests"), so **call it**; do not reimplement the matching, and do not compare
   strings, or `auto` and the `:systools` run a moment later will disagree.
 
-**`auto` currently refuses a restart edge, and that is temporary.**
-`restart_transitions_installable?/0` in `lib/mix/tasks/forecastle.relup.ex` is
-the single named predicate that decides it — not a version sniff, not an
-environment variable. Castle cannot *complete* a restart transition yet:
-`heart:set_cmd/1` raises `badarg` with no `heart` process, so the install fails
-before the reboot, and the reboot would return on the old permanent version
-anyway. `auto` is the no-switch default, so emitting a restart edge from it means
-a routine invocation producing a relup that cannot be installed — worse than
-refusing and saying why. `--hot` and `--restart` are unaffected: both are
-explicit requests.
+**`auto` refuses a restart edge unconditionally, and that is temporary.** Castle
+cannot *complete* a restart transition yet: `heart:set_cmd/1` raises `badarg`
+with no `heart` process, so the install fails before the reboot, and the reboot
+would return on the old permanent version anyway. `auto` is the no-switch
+default, so emitting a restart edge from it means a routine invocation producing
+a relup that cannot be installed — worse than refusing and saying why. `--hot`
+and `--restart` are unaffected: both are explicit requests.
 
-**The predicate has two callers, and which one answers depends on when the answer
-becomes knowable.** `refuse_chosen_restarts!/1` asks it *before* generation, for
-edges classification has already decided must restart; `settle_restarts!/2` asks
-it *after*, for the all-hot verdict and for restarts an appup named itself. The
-split is not an accident — the paragraph below says why each sits where it does.
-Flipping the predicate to `true` when castle#14 and #10 land makes
-`refuse_chosen_restarts!/1` a no-op and restores `announce_restarts/2`, which is
-still there. **Its true branches are unexecuted today**, so the flip needs its own
-coverage rather than being assumed to work, and inverting the mixed-restart
-assertions is part of it: those tests deliberately pin today's single-cause
-behaviour and say so in their comments.
+**There is no flag, predicate or environment variable that turns the refusal into
+an announcement, and adding one would be wrong.** An earlier revision of this
+branch had one — `restart_transitions_installable?/0`, a private function
+returning a literal `false`, consulted by `refuse_chosen_restarts!/1` and
+`settle_restarts!/2` — and it is gone. Elixir 1.20's type inference proves the
+`true` branch of both call sites dead and `mix compile --warnings-as-errors`
+fails on them, which is what took CI red on all six 1.20 cells. Every way of
+hiding that from inference is worse than deleting the branches: reading
+application env or a switch makes the gate user-flippable, and a user who flips
+it gets precisely the uninstallable relup the gate exists to prevent; a module
+attribute folds to the same literal; there is no suppression pragma. The
+warnings were also correct — nothing reached those branches, and nothing tested
+them. Do not reintroduce a gate.
+
+**What [castle#14](https://github.com/ausimian/castle/issues/14) (with
+[#10](https://github.com/ausimian/forecastle/issues/10)) has to add.** Not a
+flip: the announcement does not exist, and the code that decides *when* to speak
+has to move. In `lib/mix/tasks/forecastle.relup.ex`:
+
+- **`refuse_chosen_restarts!/1` goes away, and with it the pre-generation
+  refusal.** It sits before generation only because, while the outcome is a
+  refusal whatever the hot remainder turns out to be, a `:systools` error from
+  that remainder would otherwise stand in front of the real reason. Once the run
+  can proceed there is nothing to settle early — and settling early is what made
+  a run contradict itself once already (see *One verdict per invocation* below).
+- **`settle_restarts!/2` becomes the only verdict, and its second clause
+  announces instead of refusing.** That clause already receives both lists:
+  `chosen`, the edges classification decided must restart, and `found`, the
+  one-stage restarts `appup_restarts!/1` returned from the generated relup. Both
+  are the same kind of transition, so they are named together, in one
+  `Mix.shell().info/1`, built the way `refuse_restarts!/2` builds its message —
+  `describe_causes/3` with a phrase of its own, over the same
+  `describe_edges/1` and `describe_restarts/1`. `describe_causes/3` takes that
+  phrase as an argument for exactly this reason; it has a single caller today.
+  Say that each restart is one `restart_emulator`, so `install_release/1`
+  replies `{ok, Vsn, Descr}` rather than `{continue_after_restart, Vsn, Descr}`
+  and the emulator then reboots, and name `--hot` and `--restart` as the two
+  ways to choose otherwise.
+- **The `([], [])` clause does not move and does not gain a sibling.** It is the
+  all-hot line, and it is only true after generation.
+- **`refuse_restarts!/2` and `describe_remedies/2` go with the refusal.** Once
+  nothing refuses they have no caller, and keeping them against a hypothetical
+  regression is the same mistake as keeping a gate. What the announcement reuses
+  is `describe_causes/3`, `describe_edges/1` and `describe_restarts/1` — the
+  last of which `--hot`'s `refuse_hot_restarts!/1` and `appup_restarts!/1` share
+  and which is not going anywhere.
+- **`appup_restarts!/1`'s refusal of the two-stage `restart_new_emulator` must
+  not become conditional.** It is gated on nothing today and it stays that way:
+  Castle is built for the one-stage instruction, and that is independent of
+  whether a restart transition can be completed.
+
+The tests that have to change, in `test/forecastle/relup_test.exs`:
+
+- **The mixed-restart assertions invert.** "settles the restart it chose without
+  generating the rest of the relup" and "refuses the restart it chose rather
+  than a systools error from the rest" both pin today's *single*-cause
+  behaviour: a non-zero exit, one cause named, `refute output =~ "an appup asks
+  for the emulator to be restarted"`, and no relup on disk. Once the run
+  proceeds, all of that inverts — zero exit, a relup written, and **both** causes
+  in the one announcement. Their comments say as much.
+- **The all-hot refutation stays exactly as it is.** `refute_all_hot/1` matters
+  *more* afterwards, not less: a *successful* run printing both the all-hot line
+  and a restart is the contradiction that shipped once.
+- **The announcement needs coverage of its own.** Nothing executes it today, so
+  do not assume the wording works: assert it for a classified restart edge, for
+  an appup-supplied one, and for a plan carrying both.
+- **The merge tests keep working unchanged.** What changes is that
+  `plan_transitions!/5` stops being the *only* way to reach the merge, so the
+  task-level cases can assert the merged relup too.
 
 **One verdict per invocation.** A restart reaches an `auto` run two ways — `auto`
 classified the edge as one, or an appup named `restart_emulator` itself — and only
@@ -344,7 +399,7 @@ the first is knowable before the relup exists.
 The all-hot line therefore lives only in `settle_restarts!/2`'s `([], [])` clause,
 which runs after generation. Announcing from classification alone says every
 transition is hot and then reports a restart; that shipped once, and once the
-predicate is flipped it would be a *successful* run printing both. Do not add a
+announcement lands it would be a *successful* run printing both. Do not add a
 second announcement anywhere else. `relup_test.exs` asserts the all-hot line is
 absent from every `auto` case that ends in a restart.
 
@@ -361,10 +416,10 @@ restart entries and generated hot ones into one relup — is unreachable through
 the task. It is still the defining behaviour of `auto`, so
 `plan_transitions!/5` is `@doc false`-public and `relup_test.exs` drives it
 in process. Keep the settling **outside** that function rather than inside it;
-that is what keeps the merge testable and the flip a one-liner. What must stay
-inside is the unconditional refusal of `restart_new_emulator`
-(`appup_restarts!/1`), which is not gated on the predicate at all: it returns the
-one-stage restarts and raises on the two-stage ones.
+that is what keeps the merge testable, and it is where the announcement above
+will have to go. What must stay inside is the unconditional refusal of
+`restart_new_emulator` (`appup_restarts!/1`), which is not conditional on
+anything: it returns the one-stage restarts and raises on the two-stage ones.
 
 **The merge tests have to pin the direction, not just the shape.** Both sections
 of the fixture's mixed relup carry the same from-versions, the same restart
