@@ -269,8 +269,8 @@ around it composes instead:
   but nothing removes what pass 1 exported, so a target carrying its own `-heart`
   booted with two and hung. Measuring on both passes and appending on neither is
   not a fix for that; there being only one pass that decides anything is.
-  The same ordering is what makes "which emulator should the probe ask" a question
-  with one answer, since the release it belongs to is then the selected one.
+  The same ordering is what makes the probe's emulator unambiguous, since the
+  release whose `elixir` names it is then the selected one.
 
   A consequence worth stating: a target release whose `env.sh` is not Forecastle's
   gets no `heart` configuration at all, because the pass that would have set it
@@ -417,7 +417,32 @@ around it composes instead:
   sources — it *is* the union, including `ERL_OTP<major>_FLAGS`, which the fragment
   can neither name nor needs to.
 
-  Five properties of that, each load bearing:
+  Six properties of that, each load bearing:
+
+  - **The emulator asked is the one the launcher will run, and the fragment is told
+    which that is by the file that decides it.** The launcher execs
+    `$REL_VSN_DIR/elixir`, and the only thing in that script choosing an emulator
+    is its `ERTS_BIN`: `mix release` rewrites Mix's own `ERTS_BIN="$ERTS_BIN"` into
+    `ERTS_BIN="$SCRIPT_PATH"/../../erts-<vsn>/bin/` when the release brought an
+    ERTS, and leaves it alone when it did not — in which case `ERTS_BIN` is empty
+    and `erl` comes off `PATH`. That script's `SCRIPT_PATH` is the directory it is
+    in, which is `REL_VSN_DIR`, so the fragment reads the assignment out of the
+    same file the exec will read it out of and resolves it against `REL_VSN_DIR`.
+    Anything that does not come out executable falls back to `erl`, which is what
+    an un-rewritten assignment means anyway. **This is the resolution, not a model
+    of it, and that is the point** — the same rule as asking `erlexec` rather than
+    parsing the environment.
+
+    It used to expand a glob over the release root's `erts-*` directories and keep
+    the last executable it found. That is wrong the moment the root holds more than
+    one of them, which is what unpacking an ERTS-changing release leaves behind,
+    and the last one a glob yields is the *lexicographically* last — not even the
+    newest, since `erts-9.9` sorts after `erts-16.2`. `ERL_OTP<major>_FLAGS` is
+    named for the OTP version of whichever binary answers, and an args file may be
+    written for one emulator and not another, so asking the wrong one is a question
+    about a different deployment rather than a near miss. `Forecastle.AssemblyTest`
+    refutes the glob in the shipped file, and the fragment's own prose deliberately
+    does not repeat its spelling so that the refutation is about the code.
 
   - **It cannot hang, so it needs no timeout.** A deployment already carrying two
     `-heart` flags — the boot this guard exists to prevent — makes it print two
@@ -483,9 +508,15 @@ around it composes instead:
   commented flag, and an emulator that does not know the flag. It also records
   every invocation of the release's own `erl`, which is the only way to see whether
   the fragment probed and what it probed with — so an ordinary start asserts one
-  invocation rather than none, a missing `vm.args` asserts one carrying no
-  `-args_file`, and the only case left asserting *no* probe is a
-  `$RELEASE_COMMAND` that does not start the system.
+  invocation rather than none, and a missing `vm.args` asserts one carrying no
+  `-args_file`. Cases asserting *no* invocation of it mean one of three things,
+  and the distinction matters: a `$RELEASE_COMMAND` that does not start the
+  system probed nothing at all, while the `include_erts: false` shape and a
+  version directory with no `elixir` probed `PATH`'s emulator instead — which is
+  what the launcher would run. A second emulator installed under another `erts-*`
+  writes to its own log, which is the only way to see *which* one answered; that
+  is what pins the resolution against the glob it replaced, and it is also how a
+  provisional start is held to asking the target's.
 
   `Forecastle.RestartUpgradeTest` is the real boot, and the fixture's own
   `rel/vm.args.eex` carries the flag spelled **`-he\art`**. That is the point of

@@ -230,12 +230,31 @@ defmodule Forecastle.AssemblyTest do
       assert env_sh =~ "-emu_args_exit"
       assert env_sh =~ ~s(grep -q '^-heart$')
 
-      # Asked of the emulator the launcher will run: the release's own, resolved by
-      # the same glob Mix's `elixir` rewrites ERTS_BIN with, falling back to PATH
-      # for a release that brought no ERTS. ERL_OTP<major>_FLAGS is named for that
-      # binary's OTP version, so asking a different one would be asking about a
-      # different deployment.
-      assert env_sh =~ ~s|"$RELEASE_ROOT"/erts-*/bin/erl|
+      # Asked of the emulator the launcher will run, and told which that is by the
+      # file that decides it: the launcher execs `$REL_VSN_DIR/elixir`, and the
+      # ERTS_BIN line Mix rewrites in that script is the only thing in it choosing
+      # an emulator. Reading the assignment out of the same file the exec will read
+      # it out of is not a model of the resolution - it is the resolution.
+      # ERL_OTP<major>_FLAGS is named for the answering binary's OTP version, so
+      # asking a different one would be asking about a different deployment.
+      assert env_sh =~ ~s(sed -n 's|^ERTS_BIN="$SCRIPT_PATH"||p')
+      assert env_sh =~ ~s("$REL_VSN_DIR/elixir" 2>/dev/null)
+      assert env_sh =~ ~s([ -x "$REL_VSN_DIR${castle_erts_bin}erl" ])
+
+      # And it used to glob the release root for erts-* and keep the last match,
+      # which is the lexicographically last and so not even the newest. That is
+      # refuted rather than merely superseded: a root holds several erts-* the
+      # moment an ERTS-changing release is unpacked, and it reads as the obvious
+      # spelling. Both the loop and the pattern, because either alone would be a
+      # partial revert. The prose in the fragment deliberately does not repeat the
+      # pattern, so this refutation is about the code.
+      refute env_sh =~ "for castle_candidate in"
+      refute env_sh =~ ~s|"$RELEASE_ROOT"/erts-*/bin/erl|
+
+      # `erl` from PATH is the fallback, which is what a release built with
+      # `include_erts: false` needs: Mix leaves ERTS_BIN empty there, so the
+      # launcher runs PATH's emulator and the probe has to as well.
+      assert env_sh =~ ~s(castle_erl="erl")
 
       # And asked with what the start will be given. ELIXIR_ERL_OPTIONS is expanded
       # *unquoted* and before -args_file, because that is what Mix's `elixir` does
@@ -366,9 +385,8 @@ defmodule Forecastle.AssemblyTest do
       # init:get_argument(heart) == {ok, [[], []]}, which heart's startup check has
       # no clause for, and a boot that hangs having printed nothing.
       #
-      # The same order is what makes "which emulator should the probe ask" a
-      # question with one answer, since the release it belongs to is then the
-      # selected one.
+      # The same order is what makes the probe's emulator unambiguous, since the
+      # release whose `elixir` names it is the selected one.
       #
       # Which flag count each order produces is `Forecastle.EnvScriptTest`'s, over
       # a release-shaped directory whose two versions carry different vm.args - the

@@ -268,6 +268,16 @@
   `-heart` there is a `-heart` the emulator gets - and because asking is
   unconditional, one set only there is detected like any other.
 
+  The `erl` that is asked is the one the launcher is going to run, and the hook is
+  told which that is by the file that decides it: Mix's generated
+  `releases/<vsn>/elixir` resolves the emulator through an `ERTS_BIN` it rewrites
+  at build time, so the hook reads that assignment out of the same file the
+  launcher will, and falls back to `erl` on `PATH` - which is what an
+  un-rewritten `ERTS_BIN` means - for a release built with `include_erts: false`.
+  That matters because a release root holds more than one `erts-*` as soon as an
+  ERTS-changing release has been unpacked into it, and `ERL_OTP<major>_FLAGS` is
+  named for the OTP version of whichever emulator answers.
+
   Where the question cannot be answered - an args file `erl` refuses to read, for
   instance - the hook adds nothing and says so on standard error. That direction
   is deliberate: adding a flag that turns out to be a second one hangs the boot

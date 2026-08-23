@@ -37,14 +37,16 @@ defmodule Forecastle.EnvScriptTest do
   a VM. Nothing here parses a variable or an args file. See `reporting/0`.
 
   And the sandbox holds a release's own `erts-16.2/bin/erl` - a script that records
-  every invocation and then hands over to the real emulator. That is the binary the
-  fragment resolves its probe through, so `probes/1` is how a test sees whether the
-  fragment asked *and what it asked with*, neither of which the resulting
-  environment says. It asks on every start, deliberately - there used to be a gate,
-  and the cases below that changed when it went say so one at a time; and
-  `legacy_erl/1` replaces it with one that strips `-emu_args_exit`, which is the
-  only way to exercise what the fragment does when an emulator does not know the
-  flag it relies on.
+  every invocation and then hands over to the real emulator - named by an `elixir`
+  carrying the one line of Mix's generated launcher that decides which emulator it
+  runs. That is how the fragment resolves its probe, so `probes/2` is how a test
+  sees whether the fragment asked *and what it asked with*, neither of which the
+  resulting environment says. It asks on every start, deliberately - there used to
+  be a gate, and the cases below that changed when it went say so one at a time;
+  and `legacy_erl/1` replaces it with one that strips `-emu_args_exit`, which is
+  the only way to exercise what the fragment does when an emulator does not know
+  the flag it relies on. A second emulator installed under another `erts-*` writes
+  to its own log, which is the only way to see *which* one answered.
 
   The stub `bin/sample` sources the fragment again, as the real launcher sources
   `env.sh` again after the re-exec, so a provisional start is observed as two
@@ -70,6 +72,13 @@ defmodule Forecastle.EnvScriptTest do
   # suite's own reporting ask exactly one binary.
   @erl Path.join([to_string(:code.root_dir()), "bin", "erl"])
 
+  # The ERTS directory the sandbox's releases name, as a release that brought its
+  # own has one. Its version is not the running emulator's and does not have to
+  # be: nothing here reads a version out of the directory name, which is the
+  # point - the fragment is told which directory by the release's own `elixir`
+  # rather than left to work it out from the root.
+  @erts "erts-16.2"
+
   setup %{tmp_dir: root} do
     File.mkdir_p!(Path.join(root, "bin"))
 
@@ -88,14 +97,20 @@ defmodule Forecastle.EnvScriptTest do
       # ordinary deployment's: inert, so the probe reads it, finds no flag, and
       # the fragment adds one. The cases that are about it write over this.
       File.write!(Path.join(dir, "vm.args"), "## nothing\n-start_epmd false\n")
+
+      # The one line of Mix's generated `elixir` that decides which emulator the
+      # launcher runs, and where the fragment reads that decision from. Both
+      # versions name the same ERTS, as every release that did not change one
+      # does; the case that is about a root holding several writes over this.
+      elixir(root, vsn, @erts)
     end
 
     # The release's own emulator, as a release that brought its ERTS has it, and
     # the only way to see whether the fragment probed at all: it records the
     # invocation and then hands over to the real thing, so a probe is measured
-    # rather than reconstructed. The fragment resolves it by the same glob Mix's
-    # `elixir` resolves ERTS_BIN with, and this suite's own reporting deliberately
-    # does *not* go through it - otherwise every run would look like a probe.
+    # rather than reconstructed. The fragment resolves it out of the `elixir`
+    # written above, and this suite's own reporting deliberately does *not* go
+    # through it - otherwise every run would look like a probe.
     probing_erl(root)
 
     # Present so that the RELEASES bootstrap - the fragment's third part, which
@@ -454,6 +469,70 @@ defmodule Forecastle.EnvScriptTest do
     end
   end
 
+  # Which emulator answers, which is a question the resulting environment never
+  # says anything about - and one the fragment got wrong. It used to glob
+  # "$RELEASE_ROOT"/erts-*/bin/erl and keep the last match, which is fine while a
+  # release root holds one ERTS and wrong the moment an ERTS-changing release is
+  # unpacked into it. ERL_OTP<major>_FLAGS is named for the OTP version of
+  # whichever binary answers, so a probe that asked a different one would be
+  # answering about a different deployment.
+  describe "the emulator the probe asks" do
+    test "is the one the selected version's own launcher will run", %{root: root} do
+      # **The discriminator: the lexicographically last erts-* is deliberately not
+      # the one the release names.** `erts-9.9` sorts after `erts-16.2` - '1' comes
+      # before '9' - so this is also the case that shows the old glob was not even
+      # "the newest one", which is the reading that makes it sound harmless.
+      #
+      # The decoy is a working emulator writing to its own log, so the start
+      # succeeds either way and the only thing that differs is which log has an
+      # entry in it. A test that arranged for the wrong choice to *fail* would pass
+      # for the wrong reason.
+      probing_erl(root, "erts-9.9", "decoys")
+
+      run = start(root)
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert [_probe] = probes(root)
+      assert probes(root, "decoys") == []
+    end
+
+    test "is PATH's when the release brought no ERTS of its own", %{root: root} do
+      # `include_erts: false` leaves Mix's own `ERTS_BIN="$ERTS_BIN"` in place, so
+      # ERTS_BIN is empty and the launcher runs whatever `erl` is on PATH. The
+      # probe has to do the same - this is the shape the fallback exists for, and
+      # it has to keep working rather than merely not crash.
+      #
+      # The release's own erl is still sitting in the root, and its log staying
+      # empty is what says the fragment read the file instead of globbing. The
+      # measurement itself still lands: PATH's emulator answers, so a -heart is
+      # added and nothing is reported as unmeasurable.
+      no_erts_elixir(root, @vsn)
+
+      run = start(root)
+
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.stderr == ""
+      assert probes(root) == []
+    end
+
+    test "is PATH's when the version directory has no elixir at all", %{root: root} do
+      # Not a shape a release has - Mix always writes one - but the fragment reads
+      # a file to answer this and so has to answer when the file is not there. It
+      # falls back rather than reporting the measurement impossible: `erl` from
+      # PATH is what an empty ERTS_BIN means, and a start that has lost its
+      # `elixir` is one the launcher fails moments later anyway.
+      File.rm!(Path.join([root, "releases", @vsn, "elixir"]))
+
+      run = start(root)
+
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.stderr == ""
+      assert probes(root) == []
+    end
+  end
+
   # The two ways the measurement can fail, and they take the same branch: add
   # nothing and say so. Appending a flag that turns out to be a second one hangs
   # the boot with nothing printed, while adding none leaves heart:set_cmd/1 raising
@@ -733,8 +812,8 @@ defmodule Forecastle.EnvScriptTest do
   # on this start is the one that is being replaced.
   #
   # That is not a tidiness argument. It shipped the other way round, with the heart
-  # block ahead of the selection, and what that costs is below. The suite had no
-  # case where the two versions differed, which is why it shipped.
+  # block ahead of the selection, and the two halves of what that costs are below.
+  # The suite had no case where the two versions differed, which is why it shipped.
   describe "a provisional start decides for the version it boots" do
     test "counts the target's -heart rather than inheriting one for it",
          %{root: root} do
@@ -780,6 +859,30 @@ defmodule Forecastle.EnvScriptTest do
       assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
       assert run.env["CASTLE_HEART_FLAGS"] == "1"
       assert [_probe] = probes(root)
+    end
+
+    test "asks the target's own emulator, not the root's last erts-*",
+         %{root: root} do
+      # **The two defects meeting, and the one case that separates both of them at
+      # once.** An install that changes ERTS leaves a second erts-* in the root,
+      # and it is a provisional start that boots the version which brought it. The
+      # version being replaced names `erts-9.9` and the target names `erts-16.2`,
+      # so the wrong answer is the same either way round: the glob this replaced
+      # keeps the lexicographically last match, which is `erts-9.9`, and the order
+      # this replaced asked before the target was chosen, which is also `erts-9.9`.
+      probing_erl(root, "erts-9.9", "decoys")
+      elixir(root, @vsn, "erts-9.9")
+      arm(root, @next)
+
+      run = start(root)
+
+      assert run.stdout =~ "#{@exec}#{@next}"
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+
+      # The target's emulator answered, and the one belonging to the version being
+      # replaced was not asked at all.
+      assert [_probe] = probes(root)
+      assert probes(root, "decoys") == []
     end
 
     test "reports an overridden heart setting once", %{root: root} do
@@ -988,6 +1091,33 @@ defmodule Forecastle.EnvScriptTest do
     File.write!(Path.join([root, "releases", vsn, "vm.args"]), contents)
   end
 
+  # The one line of Mix's generated `elixir` that the fragment reads to find the
+  # emulator the launcher will run. `mix release` rewrites the stock
+  # `ERTS_BIN="$ERTS_BIN"` into this when the release brought an ERTS of its own,
+  # and leaves it alone when it did not - which `no_erts_elixir/2` is for. The
+  # rest of that script is a few hundred lines of argument parsing that nothing
+  # here reads, so only the assignment is written.
+  #
+  # `$SCRIPT_PATH` is left as the literal it is in the real file: the fragment
+  # resolves it against REL_VSN_DIR rather than expanding it, so writing anything
+  # else here would be testing a file Mix does not generate.
+  defp elixir(root, vsn, erts) do
+    File.write!(
+      Path.join([root, "releases", vsn, "elixir"]),
+      ~s|ERTS_BIN=\nERTS_BIN="$SCRIPT_PATH"/../../#{erts}/bin/\n|
+    )
+  end
+
+  # The same file as a release with `include_erts: false` has it, which is Mix's
+  # own two lines untouched. ERTS_BIN comes out empty, so the launcher runs `erl`
+  # from PATH and so must the probe.
+  defp no_erts_elixir(root, vsn) do
+    File.write!(
+      Path.join([root, "releases", vsn, "elixir"]),
+      ~s|ERTS_BIN=\nERTS_BIN="$ERTS_BIN"\n|
+    )
+  end
+
   # The release's own emulator, at the path Mix's generated `elixir` resolves
   # ERTS_BIN to and the fragment resolves its probe through. It records that it was
   # called, with its arguments, and then hands over to the real one - so whether
@@ -996,8 +1126,8 @@ defmodule Forecastle.EnvScriptTest do
   #
   # A recording wrapper rather than a stub answer, because a stub would make every
   # case about the wrapper's idea of erlexec instead of about erlexec.
-  defp probing_erl(root) do
-    install_erl(root, ~s|exec "#{@erl}" "$@"\n|)
+  defp probing_erl(root, erts \\ @erts, log \\ "probes") do
+    install_erl(root, erts, log, ~s|exec "#{@erl}" "$@"\n|)
   end
 
   # The same, for an emulator that does not know -emu_args_exit: it strips the flag
@@ -1006,7 +1136,7 @@ defmodule Forecastle.EnvScriptTest do
   # That is the case the fragment has to degrade safely on rather than answer
   # wrongly, and there is no other way to arrange it.
   defp legacy_erl(root) do
-    install_erl(root, """
+    install_erl(root, @erts, "probes", """
     castle_n=$#
     castle_i=0
     while [ $castle_i -lt $castle_n ]; do
@@ -1021,25 +1151,29 @@ defmodule Forecastle.EnvScriptTest do
     """)
   end
 
-  defp install_erl(root, body) do
-    path = Path.join([root, "erts-16.2", "bin", "erl"])
+  # The log is a parameter so that a second emulator in the same root can be told
+  # apart from the release's own. Which binary answered is not visible in the
+  # arguments - it is the same probe either way - so the only way to see it is for
+  # each to write somewhere different.
+  defp install_erl(root, erts, log, body) do
+    path = Path.join([root, erts, "bin", "erl"])
     File.mkdir_p!(Path.dirname(path))
 
     File.write!(path, """
     #!/bin/sh
-    echo "probe: $*" >> "#{Path.join(root, "probes")}"
+    echo "probe: $*" >> "#{Path.join(root, log)}"
     #{body}
     """)
 
     File.chmod!(path, 0o755)
   end
 
-  # One entry per invocation of the release's own erl, each the arguments it was
-  # given. Split on the marker rather than on newlines, because an argument may
-  # carry one.
-  defp probes(root) do
-    case File.read(Path.join(root, "probes")) do
-      {:ok, log} -> String.split(log, "probe: ", trim: true)
+  # One entry per invocation of the erl that writes to this log, each the
+  # arguments it was given. Split on the marker rather than on newlines, because
+  # an argument may carry one.
+  defp probes(root, log \\ "probes") do
+    case File.read(Path.join(root, log)) do
+      {:ok, contents} -> String.split(contents, "probe: ", trim: true)
       {:error, :enoent} -> []
     end
   end
