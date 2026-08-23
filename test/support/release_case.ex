@@ -4,6 +4,9 @@ defmodule Forecastle.ReleaseCase do
 
   Assembling a release shells out to `mix`, so these tests are slow by unit-test
   standards and are never async.
+
+  Driving a release once it is assembled - starting it, upgrading it, asking it
+  questions - is `Forecastle.Deployment`, which a suite imports for itself.
   """
 
   use ExUnit.CaseTemplate

@@ -172,8 +172,10 @@ defmodule Forecastle do
   # one for another version is worse than packaging none at all: nothing checks
   # it again, and `release_handler` applies it as this version's upgrade plan.
   # `mix forecastle.relup --outdir` makes that reachable - generation succeeds
-  # elsewhere and an older relup is left sitting here - and so does a write
-  # interrupted partway through. Fail the build instead.
+  # elsewhere and an older relup is left sitting here - and so does anything that
+  # left a partial one behind: the task itself publishes by renaming a staging
+  # file over the relup, and so cannot, but a copy or an editor interrupted
+  # partway through can. Fail the build instead.
   defp verify_relup!(relup, vsn) do
     wanted = to_charlist(vsn)
 
