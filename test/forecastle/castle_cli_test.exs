@@ -32,8 +32,35 @@ defmodule Forecastle.CastleCliTest do
   end
 
   setup %{release: release} do
-    root = Path.join(System.tmp_dir!(), "castle-cli-#{System.unique_integer([:positive])}")
+    # The operating system pid as well as a unique integer, and the root removed
+    # before it is created as well as after.
+    #
+    # `System.unique_integer/1` is unique within a *VM run* and no further than
+    # that: a fresh VM starts its counter at very nearly the same place as the
+    # last one - measured, three consecutive runs handing out 2690, 2693 and
+    # 2694 - so the names recur across runs. And `File.mkdir_p!/1` succeeds on a
+    # directory that is already there. So a run killed part-way - a timeout, a
+    # signal, an interrupted matrix cell - leaves its `argv` behind, and a later
+    # run's `setup` can adopt it. Eleven assertions in this file read
+    # `File.exists?(record)` to say the launcher was *not* reached, and a stale
+    # file answers yes.
+    #
+    # It does not reproduce on demand, because it needs the earlier run to have
+    # died *and* the counter to land on the same value - which is what makes it
+    # worth removing by construction rather than chasing.
+    #
+    # `on_exit` cannot cover this, since the case being defended against is
+    # precisely the one where `on_exit` did not run. The `rm_rf!` is what makes
+    # the directory this run's own; the pid is what stops two VMs running at once
+    # from choosing the same name and deleting each other's.
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "castle-cli-#{System.pid()}-#{System.unique_integer([:positive])}"
+      )
+
     bin = Path.join(root, "bin")
+    File.rm_rf!(root)
     File.mkdir_p!(bin)
     on_exit(fn -> File.rm_rf!(root) end)
 
