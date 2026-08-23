@@ -407,10 +407,15 @@ defmodule Forecastle.EnvScriptTest do
       # a fact about the filesystem rather than a judgement about contents.**
       # erlexec refuses an args file it cannot open and exits non-zero, so handing
       # over a path that is not there would report the measurement as impossible
-      # and decline to add a flag - on every release that ships no vm.args at all,
-      # which is a supported shape, since the launcher only defaults
-      # RELEASE_VM_ARGS after this fragment returns. So the question is asked
-      # without the file, and a flag is added.
+      # and decline to add a flag. So the question is asked without the file, and a
+      # flag is added.
+      #
+      # The condition is defensive, not load-bearing: `mix release` always renders
+      # rel/vm.args.eex, so a stock build's launcher default always resolves to a
+      # file that exists. What this covers is a RELEASE_VM_ARGS pointing at a
+      # missing path, or a hand-deleted vm.args - starts the launcher fails on
+      # moments later anyway. It is pinned here because it is free and because the
+      # refutation below is what makes it observable at all.
       #
       # The reported count is `?` rather than a number because this suite's own
       # reporting passes the missing path unconditionally and so cannot be

@@ -436,9 +436,16 @@ around it composes instead:
   - **The one condition left is a fact about the filesystem, not a judgement about
     contents.** `-args_file` is passed only when the path exists, because `erlexec`
     refuses an args file it cannot open and exits non-zero — which would make every
-    start of a release with no `vm.args` report the measurement as impossible and
-    decline to add the flag. A release with no `vm.args` is a supported shape: the
-    launcher only defaults `RELEASE_VM_ARGS` *after* it has sourced this fragment.
+    start with no readable args file report the measurement as impossible and
+    decline to add the flag. **It is defensive rather than load-bearing**, and an
+    earlier note here overstated it as covering "a release with no `vm.args`, a
+    supported shape". A stock build does not produce that: `mix release` always
+    renders `rel/vm.args.eex` into `releases/<vsn>/vm.args`, so the launcher's own
+    `${RELEASE_VM_ARGS:-…}` default always resolves to a file that exists. What is
+    reachable is a deployment exporting `RELEASE_VM_ARGS` to a missing path, or a
+    hand-deleted `vm.args` — both starts the launcher fails on moments later
+    anyway. So it costs nothing and spares a doomed start a confusing warning,
+    rather than holding up the common case.
     Every variable `erlexec` reads still reaches the probe, `ERL_OTP<major>_FLAGS`
     among them, so nothing goes unmeasured; only a file that is not there goes
     unmentioned. A path that exists and cannot be read is still handed over and
