@@ -67,6 +67,49 @@ defmodule Forecastle.AssemblyTest do
     end
   end
 
+  describe "bin/start" do
+    test "is installed, executable, and does nothing", %{forecastle: forecastle} do
+      # The path release_handler composes into heart's temporary reboot command,
+      # and returns unexamined: init/1 yields {no_check, $ROOT/bin/start} when
+      # {sasl, start_prg} is unset, and check_start_prg/2 does not look at it. So
+      # it has to exist, and it has to do nothing - heart really does run it, both
+      # on init:reboot() and on a heart-beat time-out, where HEART_NO_KILL means
+      # the old VM is still alive.
+      start = Path.join(forecastle, "bin/start")
+
+      assert File.exists?(start)
+      assert Bitwise.band(File.stat!(start).mode, 0o111) != 0
+      assert {"", 0} = System.cmd(start, ["releases/new_start_erl.data"], cd: forecastle)
+    end
+
+    test "starts nothing", %{forecastle: forecastle} do
+      # Asserted on the script rather than on its behaviour, because "it did not
+      # start the release" is not observable from a single run of something that
+      # exits 0. What must never appear here is an invocation of the launcher: a
+      # bin/start that started the release would be a second restart authority
+      # beside the supervisor, and with HEART_NO_KILL it could start one node
+      # beside another that is still alive.
+      start = File.read!(Path.join(forecastle, "bin/start"))
+
+      refute start =~ "bin/sample"
+      refute start =~ "exec"
+      assert start =~ "exit 0"
+    end
+
+    test "is not installed by a plain Mix release", %{mix: mix} do
+      refute File.exists?(Path.join(mix, "bin/start"))
+    end
+
+    test "ships in the release tarball", %{forecastle: forecastle} do
+      # Which is what puts it into a deployment that migrates by hot upgrade:
+      # release_handler extracts with keep_old_files, so a new file appears.
+      tarball = Path.join(forecastle, "sample-#{@vsn}.tar.gz")
+
+      assert {:ok, entries} = :erl_tar.table(to_charlist(tarball), [:compressed])
+      assert ~c"bin/start" in entries
+    end
+  end
+
   describe "env.sh" do
     setup %{forecastle: forecastle} do
       {:ok, env_sh: File.read!(Path.join(forecastle, "releases/#{@vsn}/env.sh"))}
@@ -115,16 +158,272 @@ defmodule Forecastle.AssemblyTest do
 
     test "only runs for the commands that start the system", %{env_sh: env_sh} do
       # Not eval, which the configuration expansion needed and this does not: an
-      # eval VM manages no releases.
+      # eval VM manages no releases - and, since #10, must not consume the
+      # provisional marker or start a heart process either. bin/castle drives
+      # every command through `rpc`, so a fragment that ran for those would
+      # consume the marker while an install was still waiting for the reboot.
       assert env_sh =~ ~r/case \$RELEASE_COMMAND in\n\s+start\|start_iex\|daemon\|daemon_iex\)/
+    end
+
+    test "runs heart, and assigns the whole of its configuration", %{env_sh: env_sh} do
+      # heart exists only so that heart:set_cmd/1 returns ok instead of raising
+      # badarg while release_handler prepares a reboot. Everything else about it
+      # is switched off: no HEART_COMMAND, no kill, and a beat timeout at the
+      # documented maximum, because HEART_NO_KILL does not make a time-out
+      # harmless - the port program exits after running its command, heart is a
+      # kernel process, and init halts the node when one of those dies.
+      #
+      # **What the fragment does to the environment is asserted in
+      # `Forecastle.EnvScriptTest`, by running it.** This test used to be the
+      # whole of the coverage and it asserted that the `${VAR:-default}`
+      # expressions were *present* - which is exactly how a deployment with
+      # HEART_COMMAND in its environment kept an active watchdog while this
+      # passed. What is left here is the assembly-level claim: the heart
+      # configuration is in the release's own env.sh, and it assigns.
+      assert env_sh =~ ~s(ELIXIR_ERL_OPTIONS:+$ELIXIR_ERL_OPTIONS }-heart)
+      assert env_sh =~ "unset HEART_COMMAND"
+      assert env_sh =~ "HEART_NO_KILL=TRUE"
+      assert env_sh =~ "HEART_BEAT_TIMEOUT=65535"
+
+      # And the defect refuted by shape: a default is a value a deployment may
+      # override, and there is nothing here it may override. Mix ships the
+      # HEART_COMMAND assignment commented out in its own generated env.sh,
+      # pointing at the launcher, which is the one thing that must never be
+      # assigned here.
+      refute env_sh =~ ~s(HEART_NO_KILL="${HEART_NO_KILL:-)
+      refute env_sh =~ ~s(HEART_BEAT_TIMEOUT="${HEART_BEAT_TIMEOUT:-)
+      refute env_sh =~ ~s(HEART_COMMAND="$)
+      refute env_sh =~ "export HEART_COMMAND"
+
+      # Nor may either of them be *read* with a colon, anywhere. The two are
+      # compared against the value that replaces them so that a deployment which
+      # already agrees is not warned at, and `${VAR:-default}` cannot make that
+      # comparison: it treats a variable set to nothing as absent, so an empty
+      # value is displaced in silence. `${VAR-default}` is the form that tells
+      # unset from set-and-empty.
+      refute env_sh =~ ~s(${HEART_NO_KILL:-)
+      refute env_sh =~ ~s(${HEART_BEAT_TIMEOUT:-)
+    end
+
+    test "adds -heart only once", %{env_sh: env_sh} do
+      # Load bearing rather than hygiene: two -heart flags make
+      # init:get_argument(heart) answer {ok, [[], []]}, which heart's own startup
+      # check has no clause for, and the boot hangs with nothing printed. What the
+      # guard is for is a deployment supplying its own flag - in its vm.args, or in
+      # one of the variables erlexec reads. The fragment's *own* flag used to be a
+      # second source of one, because the heart block ran ahead of the provisional
+      # selection and so on both passes of a re-exec; the order that stops that is
+      # asserted below.
+      #
+      # The assembly-level claim is that the guard in the shipped env.sh *asks the
+      # emulator* rather than reading the environment and deciding for itself, and
+      # that it asks with everything the start will be given. Which values it
+      # recognises is `Forecastle.EnvScriptTest`'s, by running it against a real
+      # erlexec, and whether a real boot survives an inherited flag is
+      # `Forecastle.RestartUpgradeTest`'s.
+      #
+      # `erl -emu_args_exit` prints the argument vector erlexec assembled and exits
+      # without starting a VM, so it covers all six sources at once - the command
+      # line, ERL_OTP<major>_FLAGS, ERL_AFLAGS, ERL_FLAGS, ERL_ZFLAGS and every
+      # -args_file followed out of vm.args - with erlexec's own quoting, escaping
+      # and comment handling.
+      #
+      # And that it reads that answer with the boundary `init` applies to it:
+      # everything after -extra is the application's arguments rather than emulator
+      # flags, so a plain argument spelled -heart is printed by -emu_args_exit and
+      # is not a flag. Counting it would suppress the one that should be added,
+      # which fails the opposite way to a duplicate - the release boots happily
+      # without heart and the damage surfaces at heart:set_cmd/1 much later.
+      assert env_sh =~ "-emu_args_exit"
+      assert env_sh =~ "/^-extra$/ { exit 1 }"
+      assert env_sh =~ "/^-heart$/ { found = 1; exit 0 }"
+
+      # Asked of the emulator the launcher will run, and told which that is by the
+      # file that decides it: the launcher execs `$REL_VSN_DIR/elixir`, and the
+      # ERTS_BIN line Mix rewrites in that script is the only thing in it choosing
+      # an emulator. Reading the assignment out of the same file the exec will read
+      # it out of is not a model of the resolution - it is the resolution.
+      # ERL_OTP<major>_FLAGS is named for the answering binary's OTP version, so
+      # asking a different one would be asking about a different deployment.
+      assert env_sh =~ ~s(sed -n 's|^ERTS_BIN="$SCRIPT_PATH"||p')
+      assert env_sh =~ ~s("$REL_VSN_DIR/elixir" 2>/dev/null)
+      assert env_sh =~ ~s([ -x "$REL_VSN_DIR${castle_erts_bin}erl" ])
+
+      # And it used to glob the release root for erts-* and keep the last match,
+      # which is the lexicographically last and so not even the newest. That is
+      # refuted rather than merely superseded: a root holds several erts-* the
+      # moment an ERTS-changing release is unpacked, and it reads as the obvious
+      # spelling. Both the loop and the pattern, because either alone would be a
+      # partial revert. The prose in the fragment deliberately does not repeat the
+      # pattern, so this refutation is about the code.
+      refute env_sh =~ "for castle_candidate in"
+      refute env_sh =~ ~s|"$RELEASE_ROOT"/erts-*/bin/erl|
+
+      # `erl` from PATH is the fallback, which is what a release built with
+      # `include_erts: false` needs: Mix leaves ERTS_BIN empty there, so the
+      # launcher runs PATH's emulator and the probe has to as well.
+      assert env_sh =~ ~s(castle_erl="erl")
+
+      # And asked with what the start will be given. ELIXIR_ERL_OPTIONS is expanded
+      # *unquoted* and before -args_file, because that is what Mix's `elixir` does
+      # with it, so an -extra in that variable swallows the args file here exactly
+      # as it would on the boot.
+      assert env_sh =~ "${ELIXIR_ERL_OPTIONS-} \\\n"
+      refute env_sh =~ ~s("${ELIXIR_ERL_OPTIONS-}" \\\n)
+      assert env_sh =~ ~s(${castle_args_file:+-args_file "$castle_args_file"})
+
+      # The args file is the effective one, and the default is spelled with
+      # REL_VSN_DIR because the launcher does not set RELEASE_VM_ARGS until *after*
+      # it has sourced this file.
+      assert env_sh =~ ~s(${RELEASE_VM_ARGS:-$REL_VSN_DIR/vm.args})
+
+      # The probe must never boot anything, and the -boot it carries is what makes
+      # that true even if -emu_args_exit - which is undocumented - ever stops being
+      # recognised: erlexec would pass it through, and the emulator would then fail
+      # on a boot file that cannot exist instead of starting a node. The -root test
+      # is the other half, refusing to read an answer out of output that is not an
+      # argument vector.
+      assert env_sh =~ "-boot /nonexistent/castle-heart-probe"
+      assert env_sh =~ ~s(grep -q '^-root$')
+      assert env_sh =~ "ERL_CRASH_DUMP_SECONDS=0"
+
+      # And there is nothing in front of it. The fragment used to gate the probe on
+      # a `case` over the four flag variables and a `read` loop over the args file,
+      # so that an ordinary start forked nothing; that is refuted here rather than
+      # merely absent, because it reads as the obvious optimisation and would come
+      # back. It judged the *text* of those values - the modelling asking erlexec
+      # replaced - and it could not see ERL_OTP<major>_FLAGS at all, since POSIX sh
+      # cannot enumerate variable names without a fork of its own. What the probe
+      # costs, and that it really does run on an ordinary start, is
+      # `Forecastle.EnvScriptTest`'s; that it has no gate to run behind is here.
+      refute env_sh =~ "castle_ask"
+      refute env_sh =~ ~S(*heart* | *args_file*)
+      refute env_sh =~ ~s(while IFS= read -r castle_line)
+
+      # The one condition that is left, and it is about the filesystem rather than
+      # about contents: erlexec refuses an args file it cannot open, so a release
+      # that ships no vm.args is asked about without one instead of being reported
+      # unmeasurable. The `-e` test is deliberately not an `-f`/`-r` pair - anything
+      # that exists is handed over and answered for.
+      assert env_sh =~ ~s|if [ -e "$castle_vm_args" ]; then|
+
+      # No timeout, no polling, no killing: the probe cannot hang, because it
+      # starts no emulator. A deployment that already carries two -heart flags -
+      # which is the boot this whole block exists to prevent - makes it print two
+      # lines and exit 0.
+      refute env_sh =~ "sleep"
+
+      # And the three shapes this has been wrong in, refuted rather than merely
+      # superseded, because each of them reads as the obvious spelling and each
+      # shipped with a test in this repository that agreed with it.
+      #
+      # A match bounded by literal spaces: the launcher expands these variables
+      # unquoted, so tabs and newlines separate fields as surely as spaces do.
+      refute env_sh =~ ~s(case " ${ELIXIR_ERL_OPTIONS:-} " in)
+      refute env_sh =~ ~s(*" -heart "*)
+
+      # A split into fields, compared against the literal flag: erlexec unquotes
+      # what it reads out of the environment, so `'-heart'`, `"-heart"` and
+      # `-he\art` are all -heart to the emulator and none of them to that.
+      refute env_sh =~ ~s|[ "$castle_opt" = "-heart" ]|
+      refute env_sh =~ ~s(for castle_opt in ${ELIXIR_ERL_OPTIONS:-}; do)
+
+      # And a literal scan of the args file, which misses the same escapes, misses
+      # a nested -args_file, and cannot tell a commented flag from a live one
+      # without a comment rule erlexec does not share.
+      refute env_sh =~ ~s|for castle_opt in $(cat "$castle_vm_args")|
+      refute env_sh =~ "sed 's/#"
+    end
+
+    test "selects a provisional version from two markers, and consumes them",
+         %{env_sh: env_sh} do
+      # new_start_erl.data is written before the reboot and never removed, so on
+      # its own it is not evidence that a reboot was asked for. Castle's marker is
+      # the other half, and the two have to name one version.
+      #
+      # Which selection each state produces is asserted in
+      # `Forecastle.EnvScriptTest`, by running the fragment over a release-shaped
+      # directory; what is here is that the two names are the ones Castle and
+      # release_handler write, and that the marker is claimed by rename.
+      assert env_sh =~ "releases/castle-restart-pending"
+      assert env_sh =~ "releases/new_start_erl.data"
+      assert env_sh =~ ~s(mv "$castle_pending" "$castle_claim")
+      assert env_sh =~ ~s([ "$castle_usable" = "$castle_target" ])
+      assert env_sh =~ ~s(rm -f "$castle_provisional")
+
+      # The claim is per process, so two starts racing for the marker cannot read
+      # each other's - only one of them wins the rename, and the loser must not
+      # find a file the winner is still working through.
+      assert env_sh =~ ~s(castle-restart-consumed.$$)
+    end
+
+    test "refuses a version that could name something other than a release",
+         %{env_sh: env_sh} do
+      # The version comes out of a file and is used to build a path and exported
+      # into the VM's environment, so an empty one or one carrying a separator is
+      # refused rather than resolved. Kept apart from the value that was read, so
+      # that the warning can still say what was actually in the file.
+      assert env_sh =~ ~s(case $castle_armed in)
+      assert env_sh =~ ~s("" | */*)
+      assert env_sh =~ ~s([ -f "$RELEASE_ROOT/releases/$castle_usable/env.sh" ])
+      assert env_sh =~ ~s([ -f "$RELEASE_ROOT/releases/$castle_usable/start.boot" ])
+    end
+
+    test "re-execs the launcher rather than assigning the version", %{env_sh: env_sh} do
+      # The launcher has already resolved REL_VSN_DIR by the time it sources this,
+      # and vm.args, sys.config, the boot script and the elixir launcher all hang
+      # off it. Assigning RELEASE_VSN here and returning boots the old version's
+      # everything under the new version's name.
+      assert env_sh =~ ~s(exec "$RELEASE_ROOT/bin/sample" "$@")
+
+      # And the consumption comes first, which is what stops the second pass
+      # recurring.
+      claim = :binary.match(env_sh, ~s(mv "$castle_pending")) |> elem(0)
+      reexec = :binary.match(env_sh, ~s(exec "$RELEASE_ROOT/bin/sample")) |> elem(0)
+
+      assert claim < reexec
+    end
+
+    test "settles the version before it configures the boot", %{env_sh: env_sh} do
+      # The re-exec means the fragment is read again, so anything it decides ahead
+      # of the selection it decides about the version being *replaced*. heart is
+      # the decision that made that fatal: the earlier order probed the permanent
+      # version's args, found no flag and exported ELIXIR_ERL_OPTIONS=-heart, and
+      # the second pass then counted that beside the target's own. Two flags is
+      # init:get_argument(heart) == {ok, [[], []]}, which heart's startup check has
+      # no clause for, and a boot that hangs having printed nothing.
+      #
+      # The same order is what makes the probe's emulator unambiguous, since the
+      # release whose `elixir` names it is the selected one.
+      #
+      # Which flag count each order produces is `Forecastle.EnvScriptTest`'s, over
+      # a release-shaped directory whose two versions carry different vm.args - the
+      # case that suite did not have, which is why this shipped. What is asserted
+      # here is the order itself, in the file that ships, and against the code
+      # rather than the prose either side of it.
+      reexec = :binary.match(env_sh, ~s(exec "$RELEASE_ROOT/bin/sample" "$@")) |> elem(0)
+      probe = :binary.match(env_sh, "castle_argv=$(ERL_CRASH_DUMP_SECONDS=0") |> elem(0)
+
+      heart =
+        :binary.match(env_sh, ~s(ELIXIR_ERL_OPTIONS:+$ELIXIR_ERL_OPTIONS }-heart)) |> elem(0)
+
+      assert reexec < probe
+      assert reexec < heart
     end
 
     test "warns rather than refuses when it cannot create the file", %{env_sh: env_sh} do
       # A system does not need the file in order to boot, and a release root
       # nothing may write to is an ordinary way to run one. bin/castle is where
       # the consequence is refused, not the start.
+      #
+      # The refutation is anchored to a *shell* exit - a line whose whole content
+      # is `exit 1` - rather than to the substring. A bare `=~ "exit 1"` also
+      # matched `{ exit 1 }` inside the awk program that reads the probe's output,
+      # where it ends an awk pass and has nothing to do with the launcher. What
+      # this test is about is the fragment never taking the start down, so it has
+      # to say that rather than something that happens to be spelled like it.
       assert env_sh =~ "warning: could not create"
-      refute env_sh =~ "exit 1"
+      refute env_sh =~ ~r/^\s*exit 1\s*$/m
     end
 
     test "comes after the project's own customization", %{env_sh: env_sh} do

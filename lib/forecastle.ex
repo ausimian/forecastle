@@ -37,6 +37,7 @@ defmodule Forecastle do
   def post_assemble(%Mix.Release{} = release) do
     release
     |> tap(&install_castle_cli/1)
+    |> tap(&install_start_program/1)
     |> tap(&extend_env_script/1)
     |> tap(&copy_relfile/1)
     |> tap(&copy_relup/1)
@@ -95,6 +96,28 @@ defmodule Forecastle do
       castle = Path.join([path, "bin", "castle"])
       File.write!(castle, render("castle.sh.eex", release))
       File.chmod!(castle, 0o755)
+    end
+  end
+
+  # `bin/start` is the path `release_handler` hands to `heart:set_cmd/1` while
+  # preparing an emulator restart, and it does nothing. The script itself says
+  # why; what belongs here is why it is at *this* path.
+  #
+  # `init/1` resolves the start program as `{do_check, Configured}` when
+  # `{sasl, start_prg}` is set and `{no_check, filename:join([Root, "bin",
+  # "start"])}` otherwise, and `check_start_prg/2` returns the second
+  # unexamined. So the default needs no configuration at all, whereas naming a
+  # path of our own would mean injecting `:sasl` application configuration into
+  # the release - which is exactly the interception
+  # [#6](https://github.com/ausimian/forecastle/issues/6) removed and which
+  # nothing here may reintroduce. `Root` is `code:root_dir()`, which for a Mix
+  # release that brought its own ERTS is the release root; a release that did not
+  # is refused by Castle's ERTS guard long before any of this.
+  defp install_start_program(%Mix.Release{path: path} = release) do
+    if unix_executables?(release) do
+      start = Path.join([path, "bin", "start"])
+      File.write!(start, render("start.sh.eex", release))
+      File.chmod!(start, 0o755)
     end
   end
 

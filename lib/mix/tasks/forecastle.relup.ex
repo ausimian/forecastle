@@ -78,37 +78,22 @@ defmodule Mix.Tasks.Forecastle.Relup do
   could not generate is a failure, so that `auto` never silently ships something
   other than the upgrade it decided on; ask for the restart with `--restart`.
 
-  ### `auto` refuses a restart, for now
+  ### `auto` announces a restart
 
-  Castle can install a relup that restarts the emulator but cannot yet *complete*
-  the transition, so while that holds `auto` refuses rather than writes a restart
-  transition. It exits non-zero, having written nothing, naming the edge that
-  forced the restart and why. `auto` is what a run with no switches gets, and a
-  default that quietly produces an upgrade plan which cannot be installed is
-  worse than one that stops and says so.
+  A restart transition is a legitimate outcome of `auto`, not a failure, so a run
+  that produces one writes the relup and says so. What it says names every edge
+  that will restart and why, whether `auto` classified it or an appup asked for
+  `restart_emulator` by name - the same transition arrived at two ways, and the
+  run has one verdict about it either way.
 
-  That covers a `restart_emulator` an appup asked for by name just as much as one
-  `auto` chose for itself - the same transition arrived at another way. Which of
-  the two a run reports is decided by when it can be known:
+  Both kinds are settled after generation, because only one of them is knowable
+  before it: an appup that names the instruction is invisible until `:systools`
+  has produced a script. Announcing from classification alone is how a run came
+  to say that every transition was a hot upgrade and then report a restart in the
+  same breath.
 
-    - An edge *classification* found to need a restart settles the run on its own,
-      because the outcome is a refusal whatever the rest of the relup turns out to
-      be. So it is refused before anything is generated, and a hot remainder
-      `:systools` cannot produce - a missing entry in an appup the project owns -
-      cannot report its own error in place of a refusal that was already known.
-    - An appup that asks for the restart by name is invisible until there is a
-      script to look at, so it is settled after generation, together with whatever
-      classification chose. A run therefore has one verdict, and cannot announce
-      an all-hot relup and a restart in the same breath.
-
-  While this refusal stands, then, a relup with both kinds in it names the
-  classified edge and generates nothing: anything an appup in the hot remainder
-  asks for is reported by the run that follows, once that edge is gone. When the
-  refusal becomes an announcement the run proceeds, and both kinds are named in
-  the one announcement.
-
-  This is temporary, and `--hot` and `--restart` are unaffected. `--restart` is
-  the deliberate override for anyone who wants the relup anyway.
+  `--hot` and `--restart` remain the ways to insist. `--hot` fails on a
+  transition that would restart; `--restart` makes every transition one.
 
   ### `--hot`
 
@@ -217,14 +202,13 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # `auto` is what merges hand-written restart entries into the same relup as the
   # ones `:systools` generated, and it is where an edge could be dropped, or
   # attached to the wrong direction, or one strategy applied to the whole relup.
-  # While a restart transition cannot be performed `auto` refuses to emit one at
-  # all (see `refuse_chosen_restarts!/1`), so the merge is not reachable through
-  # the task - the refusal deliberately sits outside the merge rather than inside
-  # it, which is what keeps this callable, and is where the announcement that
-  # replaces it will have to go.
+  # It is reachable through the task now that a restart transition can be
+  # installed, and it stays reachable on its own: the announcement deliberately
+  # sits outside the merge rather than inside it, so that the merge can be driven
+  # without a shell and asserted on as a term.
   #
   # What `auto` settles is not settled here: this returns the merged relup, and
-  # nothing is said about the strategy or refused on account of it.
+  # nothing is said about the strategy on account of it.
   @spec plan_transitions!(binary(), [binary()], [binary()], [binary()], [binary()]) ::
           {charlist(), list(), list()}
   def plan_transitions!(target_path, hot_ups, hot_downs, restart_ups, restart_downs) do
@@ -406,26 +390,24 @@ defmodule Mix.Tasks.Forecastle.Relup do
     |> refuse_hot_restarts!()
   end
 
-  # Two things decide what `auto` does, and they become knowable at different
-  # times, so they are settled at different points - in the order in which the
-  # answer is certain.
+  # Two things decide what `auto` does, and only one of them is knowable before
+  # the relup exists - so nothing is said until both are.
   #
   # A restart classification chose is knowable from the two `.rel` files and the
-  # appups, and while such a transition cannot be performed it decides the whole
-  # run: the outcome is a refusal whatever the hot remainder turns out to be, and
-  # so the refusal comes first. Generating first meant a hot remainder
-  # `:systools` could not produce reported that error instead, hiding a refusal
-  # that was already known and that fixing the error would not avoid.
+  # appups. An appup that asks for the emulator to be restarted by name is not:
+  # it is invisible until `:systools` has produced a script. Announcing after
+  # classification alone is how a run said every transition was a hot upgrade and
+  # then reported a restart in the same breath. So generation comes first and the
+  # two kinds are settled together, which is what makes one verdict per
+  # invocation possible at all.
   #
-  # Where the run may proceed - today only because classification chose nothing -
-  # the relup is generated before anything is said about the strategy, because
-  # classification is only half of what decides it: an appup can ask for the
-  # emulator to be restarted by name, and that is not visible until `:systools`
-  # has produced a script. Announcing after classification alone is how a run
-  # said every transition was a hot upgrade and then reported a restart in the
-  # same breath - and, once a restart transition can be written, would have said
-  # both in a run that succeeded. So the two kinds are settled together there,
-  # and there is one verdict per invocation either way.
+  # This used to refuse a classified restart *before* generating, because while
+  # such a transition could not be installed the classification was already the
+  # whole answer and a `:systools` error from the hot remainder would have stood
+  # in front of it. It can be installed now
+  # ([castle#14](https://github.com/ausimian/castle/issues/14) and
+  # [#10](https://github.com/ausimian/forecastle/issues/10)), so there is nothing
+  # to settle early and the ordering above is the only one that can be right.
   defp plan!(:auto, target, froms, ups, downs) do
     {restart_ups, hot_ups} = split_edges(:up, ups, froms, target)
     {restart_downs, hot_downs} = split_edges(:down, downs, froms, target)
@@ -433,8 +415,6 @@ defmodule Mix.Tasks.Forecastle.Relup do
     chosen =
       label_edges("upgrade from", restart_ups, froms) ++
         label_edges("downgrade to", restart_downs, froms)
-
-    refuse_chosen_restarts!(chosen)
 
     {plan, appup_restarts} =
       plan_transitions(
@@ -775,10 +755,14 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # `{continue_after_restart, ...}`, and Castle is built for the one-stage one.
   # The one-stage ones are handed back, because a plain `restart_emulator` from an
   # appup is the transition `auto` would have generated for itself, and is
-  # settled together with `auto`'s own choices - announced, or refused while such
-  # a transition cannot be performed. Getting there by way of an appup rather
-  # than by classification makes no difference to whether the relup can be
-  # installed, and it must not make a difference to what the run says either.
+  # settled together with `auto`'s own choices, in the one announcement. Getting
+  # there by way of an appup rather than by classification makes no difference to
+  # the transition, and it must not make a difference to what the run says
+  # either.
+  #
+  # The two-stage refusal is gated on nothing and stays that way. It is not about
+  # whether a restart can be completed - the one-stage one can - but about which
+  # instruction Castle is built for, which no amount of restart support changes.
   defp appup_restarts!(plan) do
     case Enum.split_with(found_restarts(plan), &(elem(&1, 2) == :restart_new_emulator)) do
       {[], one_stage} ->
@@ -840,85 +824,32 @@ defmodule Mix.Tasks.Forecastle.Relup do
     end)
   end
 
-  ## While a restart transition cannot be performed
-
-  # Why `auto` refuses a restart transition at all, rather than writing one.
-  #
-  # A restart relup can be generated and packaged, but the transition it
-  # describes cannot yet be completed. `release_handler` calls `heart:set_cmd/1`
-  # while preparing the reboot - from `prepare_restart_new_emulator/7`, which
-  # both restart instructions go through - and that raises `badarg` where there
-  # is no `heart` process, so the install fails before anything reboots. Past
-  # that, the reboot would come back on the old permanent version anyway, because
-  # only `commit` writes `releases/start_erl.data`.
-  # [castle#14](https://github.com/ausimian/castle/issues/14) and
-  # [#10](https://github.com/ausimian/forecastle/issues/10) close those halves.
-  #
-  # `auto` is the strategy a run with no switches gets. Emitting a restart
-  # transition from it would mean a routine invocation producing an upgrade plan
-  # that is known not to install - worse than one that refuses and says why. So
-  # it refuses, naming the edge, the reason, and `--restart` as the override.
-  # `--hot` and `--restart` are unaffected either way: both are explicit
-  # requests, and it is fine for `--restart` to produce a relup that cannot yet
-  # be deployed.
-  #
-  # The refusal is unconditional, and there is no switch or predicate that turns
-  # it into an announcement: an announcement whose branches nothing reaches is a
-  # claim the code cannot support, and one a deployment could flip is exactly the
-  # uninstallable relup the refusal exists to prevent. AGENTS.md sets out what
-  # castle#14 has to add here instead.
-
-  # The transitions classification chose to restart, refused before the relup is
-  # generated, because that is already the whole answer: nothing `:systools` goes
-  # on to produce for the transitions that are still hot can make this run
-  # succeed, so generating them can only fail in a way that reports something
-  # other than the reason the run is failing.
-  #
-  # It is deliberately the *only* thing settled here. An appup that asks for a
-  # restart by name is not knowable yet, so nothing is said about an all-hot
-  # classification: that is settled after generation, where it can be true.
-  defp refuse_chosen_restarts!([]), do: :ok
-  defp refuse_chosen_restarts!(chosen), do: refuse_restarts!(chosen, [])
-
   # One verdict per invocation, arrived at once the relup exists: the transitions
   # `auto` classified as restarts and the emulator restarts an appup asked for by
-  # name are the same kind of transition, so they are settled together. Saying
-  # every transition is hot before the second kind has been looked for is how a
-  # run came to contradict itself.
+  # name are the same kind of transition, so they are settled together and named
+  # in one message. Saying every transition is hot before the second kind has been
+  # looked for is how a run came to contradict itself, and the all-hot line lives
+  # in the first clause here for exactly that reason - it is only true after
+  # generation.
   #
-  # While a restart transition cannot be performed, `chosen` is empty here - a
-  # non-empty one was refused before generation - so what this settles is the
-  # all-hot relup and the restart only an appup could have asked for. Both lists
-  # arrive together, and the second clause becomes an announcement rather than a
-  # refusal, only once castle#14 lands; the parameter is kept because it is what
-  # the verdict is about, not because anything reaches it with a value today.
+  # This is where `auto` refused, while a restart transition could not be
+  # completed. It announces now, and what it says is what the operator has to know
+  # to read the install back: a `restart_emulator` is replied to with
+  # `{ok, Vsn, Descr}`, indistinguishably from a hot upgrade, and the emulator
+  # then reboots.
   defp settle_restarts!([], []) do
     Mix.shell().info("auto: every transition in this relup is a hot upgrade.")
   end
 
-  defp settle_restarts!(chosen, found), do: refuse_restarts!(chosen, found)
-
-  defp refuse_restarts!(chosen, found) do
-    Mix.raise(
-      describe_causes("auto would make a restart transition of ", chosen, found) <>
-        ". A restart transition cannot yet be performed: release_handler calls " <>
-        "heart:set_cmd/1 while preparing the reboot, which fails where there is no heart " <>
-        "process, so the install fails before rebooting - and the reboot would come back " <>
-        "on the old permanent version even if it did not. castle#14 and forecastle#10 " <>
-        "close that. Rather than write an upgrade plan that cannot be installed, auto " <>
-        "refuses. Pass --restart to generate it anyway, which is the deliberate override; " <>
-        "pass --hot to fail on the transition itself instead; or " <>
-        describe_remedies(chosen, found) <> "."
+  defp settle_restarts!(chosen, found) do
+    Mix.shell().info(
+      describe_causes("auto made a restart transition of ", chosen, found) <>
+        ". Each of those is a single restart_emulator, so install_release/1 replies " <>
+        "{ok, Vsn, Descr} rather than {continue_after_restart, Vsn, Descr} and the " <>
+        "emulator then reboots; the system comes back on the version that was installed, " <>
+        "which stays provisional until it is committed. Pass --hot to fail on such a " <>
+        "transition instead, or --restart to make every transition in the relup one."
     )
-  end
-
-  defp describe_remedies(chosen, found) do
-    [
-      {chosen, "take the change that forced the restart out of this release"},
-      {found, "take the restart instruction out of the appup"}
-    ]
-    |> Enum.reject(fn {causes, _remedy} -> causes == [] end)
-    |> Enum.map_join(" and ", fn {_causes, remedy} -> remedy end)
   end
 
   ## Writing the relup
