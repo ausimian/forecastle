@@ -229,7 +229,11 @@
   live one. The external supervisor remains the only thing that starts this
   release. `-heart` is added to `ELIXIR_ERL_OPTIONS` only when it is not already
   there: two of them make `init:get_argument(heart)` answer `{ok, [[], []]}`,
-  which heart's own startup check has no clause for, and the boot hangs.
+  which heart's own startup check has no clause for, and the boot hangs. An
+  inherited flag is recognised however it is spaced. The launcher expands that
+  variable unquoted, so its fields - separated by spaces, tabs or newlines
+  alike - are what reach the emulator, and the hook splits it the same way rather
+  than looking for text between two spaces.
 
   All three variables are **assigned**, and `HEART_COMMAND` is **unset**, rather
   than defaulted - so a deployment that already has any of them in its
@@ -243,16 +247,21 @@
   it displaced and why, because a setting that silently stops taking effect is
   worse than one that is refused - and refusing is what it does *not* do: a
   conflicting variable is a configuration mistake, not a reason to fail a boot. A
-  deployment that sets none of them, which is the ordinary case, says nothing.
+  deployment that sets none of them, which is the ordinary case, says nothing. A
+  variable that is *set to nothing* counts as a value for the two that are
+  assigned, and is reported as `[]`: neither an empty `HEART_NO_KILL` nor an empty
+  `HEART_BEAT_TIMEOUT` is the value that replaces it. An empty `HEART_COMMAND`
+  stays silent, because unsetting a variable that was already empty changes
+  nothing heart can read.
 - A test suite. It assembles a real release from a fixture application and, in
   the `:e2e` suite, boots it and upgrades it - once hot, asserting that the
   operating system pid does not change, and once through an emulator restart,
   asserting that it does, that an uncommitted provisional release rolls back when
   it is killed, and that committing makes it the version an ordinary start boots.
   The restart suite runs the whole transition on a deployment whose environment
-  already carries a `HEART_COMMAND`, a `HEART_NO_KILL` of `FALSE` and an
-  11-second beat timeout, and asks the running node what it was actually started
-  with. The `env.sh` hook is also run directly, over a release-shaped directory,
+  already carries a `HEART_COMMAND`, a `HEART_NO_KILL` of `FALSE`, an 11-second
+  beat timeout and an `ELIXIR_ERL_OPTIONS` whose `-heart` is separated by a tab,
+  and asks the running node what it was actually started with. The `env.sh` hook is also run directly, over a release-shaped directory,
   so that what it selects and what environment it leaves behind are asserted by
   observation rather than by reading the script.
 

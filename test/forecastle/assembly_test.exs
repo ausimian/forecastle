@@ -194,6 +194,15 @@ defmodule Forecastle.AssemblyTest do
       refute env_sh =~ ~s(HEART_BEAT_TIMEOUT="${HEART_BEAT_TIMEOUT:-)
       refute env_sh =~ ~s(HEART_COMMAND="$)
       refute env_sh =~ "export HEART_COMMAND"
+
+      # Nor may either of them be *read* with a colon, anywhere. The two are
+      # compared against the value that replaces them so that a deployment which
+      # already agrees is not warned at, and `${VAR:-default}` cannot make that
+      # comparison: it treats a variable set to nothing as absent, so an empty
+      # value is displaced in silence. `${VAR-default}` is the form that tells
+      # unset from set-and-empty.
+      refute env_sh =~ ~s(${HEART_NO_KILL:-)
+      refute env_sh =~ ~s(${HEART_BEAT_TIMEOUT:-)
     end
 
     test "adds -heart only once", %{env_sh: env_sh} do
@@ -202,8 +211,20 @@ defmodule Forecastle.AssemblyTest do
       # check has no clause for, and the boot hangs with nothing printed. The
       # fragment is read twice on a provisional start, because it re-execs the
       # launcher, so without this guard every such boot would hang.
-      assert env_sh =~ ~s(case " ${ELIXIR_ERL_OPTIONS:-} " in)
-      assert env_sh =~ ~s(*" -heart "*)
+      #
+      # The assembly-level claim is that the guard is in the shipped env.sh and
+      # that it looks at *fields* rather than at text. Which values it recognises
+      # is `Forecastle.EnvScriptTest`'s, by running it, and whether a real boot
+      # survives an inherited one is `Forecastle.RestartUpgradeTest`'s.
+      assert env_sh =~ ~s(for castle_opt in ${ELIXIR_ERL_OPTIONS:-}; do)
+      assert env_sh =~ ~s|[ "$castle_opt" = "-heart" ]|
+
+      # And the defect refuted by shape. The launcher expands this variable
+      # unquoted, so tabs and newlines separate fields as surely as spaces do,
+      # and a pattern bounded by literal spaces misses a -heart on either side of
+      # one - appends a second, and hangs the boot.
+      refute env_sh =~ ~s(case " ${ELIXIR_ERL_OPTIONS:-} " in)
+      refute env_sh =~ ~s(*" -heart "*)
     end
 
     test "selects a provisional version from two markers, and consumes them",

@@ -17,7 +17,9 @@ defmodule Forecastle.RestartUpgradeTest do
       before anything rebooted. The `env.sh` fragment runs the real heart,
       defanged: `HEART_NO_KILL`, no `HEART_COMMAND`, and an inert
       `$ROOT/bin/start` to neutralise the temporary command `release_handler`
-      installs.
+      installs. The first start also inherits a tab-separated `-heart` in
+      `ELIXIR_ERL_OPTIONS`, because *two* of them hang the boot and no e2e start
+      used to set that variable at all.
     * `release_handler` writes the target to `releases/new_start_erl.data` and
       leaves `releases/start_erl.data` naming the version that is still
       permanent, so the reboot would come back on the old version. The `env.sh`
@@ -82,6 +84,26 @@ defmodule Forecastle.RestartUpgradeTest do
     {"HEART_BEAT_TIMEOUT", "11"}
   ]
 
+  # And an ELIXIR_ERL_OPTIONS that already has -heart in it, tab-separated, which
+  # the fragment must recognise rather than add a second one beside. Two of them
+  # make init:get_argument(heart) answer {ok, [[], []]}, which heart's own
+  # check_start_heart/0 has no clause for: the boot hangs with nothing printed, so
+  # this start would time out in await_boot!/2 and take the suite with it.
+  #
+  # It has to be exercised on a real boot. The unit test that covered this
+  # asserted the exact string "-heart", which is what let a match bounded by
+  # literal spaces through, and no e2e start set the variable at all - the fixture
+  # scrubs it, so the fragment had always assigned it here rather than found one.
+  #
+  # `-env` is what makes the tab itself observable: the launcher expands this
+  # variable unquoted, so the tabs are field separators and the flag reaches the
+  # emulator as three arguments. A node that answers with the value is a node
+  # whose argument list was really split on them, which is the half of the defect
+  # a boot alone would not distinguish.
+  @tabbed_heart [{"ELIXIR_ERL_OPTIONS", "-heart\t-env\tCASTLE_TAB_PROBE\ttabbed"}]
+
+  @probe_report ~s|IO.puts(inspect(System.get_env("CASTLE_TAB_PROBE")))|
+
   # What the running node says about the environment it was started with, and
   # about the command heart is actually holding. The environment is what heart's
   # port program reads, so it is the effective configuration rather than a
@@ -122,13 +144,19 @@ defmodule Forecastle.RestartUpgradeTest do
     # Captured rather than discarded: the fragment warns when it overrides an
     # inherited heart setting, and that warning is part of what this suite
     # asserts.
-    hostile_start = start!(deploy, [{"SAMPLE_GREETING", @first_greeting} | @hostile_heart])
+    hostile_start =
+      start!(
+        deploy,
+        [{"SAMPLE_GREETING", @first_greeting}] ++ @hostile_heart ++ @tabbed_heart
+      )
 
     booted = %{
       os_pid: os_pid(deploy),
       heart: rpc!(deploy, "IO.puts(inspect(:erlang.whereis(:heart)))"),
       heart_cmd: rpc!(deploy, "IO.puts(inspect(:heart.get_cmd()))"),
       heart_env: rpc!(deploy, @heart_report),
+      heart_args: rpc!(deploy, "IO.puts(inspect(:init.get_argument(:heart)))"),
+      tab_probe: rpc!(deploy, @probe_report),
       start_output: hostile_start,
       counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
       releases: castle!(deploy, ["releases"]),
@@ -270,6 +298,21 @@ defmodule Forecastle.RestartUpgradeTest do
       refute restarted.start_output =~ "HEART_NO_KILL"
       refute restarted.start_output =~ "HEART_BEAT_TIMEOUT"
       assert restarted.heart_env == ~s({nil, "TRUE", "65535"})
+    end
+
+    test "was given exactly one -heart, having inherited a tab-separated one",
+         %{booted: booted} do
+      # The boot happening at all is most of this: two -heart flags leave
+      # heart:check_start_heart/0 with no clause for {ok, [[], []]} and the node
+      # never finishes starting, so the suite's own start! would have timed out
+      # before any assertion ran. What is left to assert is the argument the
+      # emulator actually got, which is the thing that clause matches on.
+      assert booted.heart_args == "{:ok, [[]]}"
+
+      # And that the tabs really were separators rather than characters in a
+      # word - otherwise the flag the fragment had to recognise was never a flag,
+      # and this would pass against a fragment that recognised nothing.
+      assert booted.tab_probe == ~s("tabbed")
     end
 
     test "is handed an inert bin/start", %{deploy: deploy} do

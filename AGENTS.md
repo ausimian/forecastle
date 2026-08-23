@@ -318,6 +318,24 @@ around it composes instead:
   on the *value* rather than on the variable being set: `HEART_NO_KILL=TRUE`
   already agrees, and an empty `HEART_COMMAND` displaces nothing.
 
+  **A variable set to nothing is a value, and `${VAR:-default}` cannot see
+  that.** It treats set-and-empty as absent, which is what these were written
+  with, so `HEART_NO_KILL=` and `HEART_BEAT_TIMEOUT=` were displaced in silence —
+  neither is the value that gets assigned, so both were being overridden while
+  the promise above is to name every value that stops taking effect. The two
+  assigned ones therefore use `${VAR-default}`, without the colon: unset takes
+  the default and says nothing, set-and-empty compares unequal and is reported as
+  `[]`. An empty `HEART_COMMAND` stays silent, and that is a *different* rule
+  rather than the same one — unsetting a variable that was already empty changes
+  nothing heart can read, so there is nothing to tell an operator. Do not
+  "consistently" collapse the two back together.
+
+  Note for whoever writes the next test here: an empty value in `System.cmd/3`'s
+  `:env` **removes** the variable, the same as `nil` does, so the case that named
+  this state could not be arranged that way and the test that claimed to was
+  really testing the unset one. `Forecastle.EnvScriptTest` prefixes shell
+  assignments to the command for the empty ones instead.
+
   Measured, and worth having written down because it makes the `HEART_COMMAND`
   case sharper than "an unexpected death would start something": heart runs the
   command on an **orderly** halt as well. On OTP 28.4 with `HEART_COMMAND` set,
@@ -335,6 +353,31 @@ around it composes instead:
   `heart:check_start_heart/0` has no clause for, and the boot hangs with nothing
   printed — measured. The fragment is read twice on a provisional start, so
   without the guard the re-exec would hang every such boot.
+
+  **The guard tests the variable's fields, not its text, and a
+  `case " $VAR " in *" -heart "*` is not that.** Mix's generated `elixir` expands
+  `$ELIXIR_ERL_OPTIONS` **unquoted** — `set -- … $ELIXIR_ERL_OPTIONS $ERL "$@"` —
+  so what reaches the emulator is that variable's fields under `$IFS`: space,
+  tab and newline, all three of them. A match bounded by literal spaces does not
+  see the flag in `-heart<TAB>-noshell`, appends a second one, and produces
+  exactly the hang above; measured against the assembled script. So the fragment
+  iterates over the unquoted expansion — `for opt in ${ELIXIR_ERL_OPTIONS:-}` —
+  which is the launcher's own splitting rather than an approximation of it, and
+  compares each field. Do not put a string match back: it reads as the simpler
+  thing and it is wrong on two of the three separators.
+
+  This is also why the coverage is a flag *count* and a real boot, rather than an
+  assertion that the variable equals `-heart`. That assertion is what let the
+  defect through — it was true of the one value it named and said nothing about
+  any other — so `Forecastle.EnvScriptTest` counts how many `-heart` fields the
+  emulator would be given (a value with a newline in it cannot be reported a line
+  at a time anyway), and `Forecastle.RestartUpgradeTest`'s first start inherits a
+  tab-separated one, since the hostile e2e environment never set the variable at
+  all and so had the fragment assigning it rather than finding one. That start
+  also carries `-env CASTLE_TAB_PROBE tabbed` behind the tab, so the node
+  answering with the value is what says the tabs really were separators — without
+  it a boot proves only that the fragment did no harm to something that was never
+  a flag.
 
   **What holds this to the environment rather than to the text of the script is
   `Forecastle.EnvScriptTest`**, which sources the fragment in a release-shaped
@@ -646,6 +689,25 @@ a fragment that only *defaulted* them would have this suite exercising a release
 with a live watchdog beside its supervisor. What is asserted is what the node
 says it was started with — `{nil, "TRUE", "65535"}` — plus the warning naming
 each displaced value, and, on the one start with a clean environment, silence.
+
+That first start also inherits `ELIXIR_ERL_OPTIONS` with a **tab-separated**
+`-heart` in it, which no e2e start used to set at all: the fixture scrubs the
+variable, so every boot here had the fragment *assigning* it rather than finding
+one, and the case where it has to recognise an inherited flag was covered only by
+a unit test asserting the exact string `-heart`. Two `-heart` flags hang the boot,
+so the suite failing to start is the regression. The value carries
+`-env CASTLE_TAB_PROBE tabbed` behind the tab so that the node answering with
+`"tabbed"` says the tabs were field separators, and
+`:init.get_argument(heart) == {ok, [[]]}` says the emulator got one flag.
+
+**Which is why `Forecastle.Deployment.start!/2` puts a deadline on the launcher.**
+That regression does not fail, it *hangs*, and it hangs inside `daemon` rather
+than after it: `env.sh` runs the preboot VM synchronously on a first start and
+that VM inherits the same options, so the whole suite stops there.
+`System.cmd/3` has no deadline and `setup_all` has no ExUnit timeout, so the
+deadline is the only thing turning it into a named failure. Measured by putting
+the old guard back — the run had to be killed. Do not remove it as
+belt-and-braces.
 
 `env_script_test.exs` is the other half of that, and the division between the two
 is worth keeping: this suite proves the effective configuration survives a real

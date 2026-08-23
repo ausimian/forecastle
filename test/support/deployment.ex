@@ -20,6 +20,11 @@ defmodule Forecastle.Deployment do
 
   alias Forecastle.Fixture
 
+  # How long `daemon` itself is given to return. Generous, because on a first
+  # start it sources `env.sh`, which runs a preboot VM to create
+  # `releases/RELEASES` and waits for it.
+  @start_timeout 180_000
+
   @doc """
   Generates a relup between two assembled releases, into the workspace.
 
@@ -60,11 +65,42 @@ defmodule Forecastle.Deployment do
   said on the way past - the two streams merged, the way `Forecastle.Fixture`
   merges them. `launcher!/3` raises if the start itself failed, so a caller that
   ignores the return value still gets that.
+
+  **The launcher is given a deadline, and that is not belt-and-braces.** A boot
+  that hangs is a real failure mode of what this suite covers - two `-heart`
+  flags leave `heart:check_start_heart/0` with no clause for `{ok, [[], []]}` and
+  the node never finishes starting, having printed nothing - and it hangs
+  *inside* `daemon` rather than after it, because `env.sh` runs a preboot VM
+  synchronously on a first start and that VM inherits the same options.
+  `System.cmd/3` has no deadline of its own and `setup_all` has no ExUnit
+  timeout, so without this a regression in the `-heart` guard stops the suite for
+  as long as whatever is running it will wait. Measured, by putting the guard
+  back the way it was.
   """
   def start!(deploy, env \\ []) do
-    output = launcher!(deploy, ["daemon"], env)
+    started = Task.async(fn -> launcher!(deploy, ["daemon"], env) end)
+
+    output =
+      case Task.yield(started, @start_timeout) do
+        {:ok, output} -> output
+        _no_answer -> abandoned!(started, deploy)
+      end
+
     await_boot!(deploy)
     output
+  end
+
+  defp abandoned!(started, deploy) do
+    Task.shutdown(started, :brutal_kill)
+
+    flunk(
+      "#{deploy} did not finish starting within #{div(@start_timeout, 1000)}s. " <>
+        "A launcher that never returns is a boot that hung rather than one that " <>
+        "failed, and the usual cause is the VM being given two -heart flags: " <>
+        "init:get_argument(heart) reports {ok, [[], []]}, which heart's own " <>
+        "startup check has no clause for. Nothing is printed when that happens, " <>
+        "so there is no output to report here."
+    )
   end
 
   @doc """

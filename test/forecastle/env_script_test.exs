@@ -78,6 +78,7 @@ defmodule Forecastle.EnvScriptTest do
       run = start(root)
 
       assert run.env["ELIXIR_ERL_OPTIONS"] =~ "-heart"
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
       assert run.env["HEART_COMMAND"] == "<unset>"
       assert run.env["HEART_NO_KILL"] == "TRUE"
       assert run.env["HEART_BEAT_TIMEOUT"] == "65535"
@@ -99,6 +100,40 @@ defmodule Forecastle.EnvScriptTest do
       run = start(root, [{"ELIXIR_ERL_OPTIONS", "-heart"}])
 
       assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+    end
+
+    test "finds a -heart that is separated by a tab", %{root: root} do
+      # The variable is expanded *unquoted* by the launcher, so what reaches the
+      # emulator is its fields under $IFS - and a tab is one of the three
+      # separators, not a character inside a word. A match bounded by literal
+      # spaces, which is what this was, sees "-heart<TAB>-noshell" as a single
+      # word that is not -heart, appends another one, and hangs the boot.
+      inherited = "-heart\t-noshell"
+      run = start(root, [{"ELIXIR_ERL_OPTIONS", inherited}])
+
+      assert run.env["ELIXIR_ERL_OPTIONS"] == inherited
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+    end
+
+    test "finds a -heart that is separated by a newline", %{root: root} do
+      # The third separator, and the one an inherited value acquires from a
+      # systemd unit or a Dockerfile that spread its options over lines. Only the
+      # flag count is asserted, because a value with a newline in it cannot be
+      # reported a line at a time - and the count is the property anyway: it is
+      # what init:get_argument(heart) will be built from.
+      run = start(root, [{"ELIXIR_ERL_OPTIONS", "-noshell\n-heart\n"}])
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+    end
+
+    test "finds a -heart among runs of whitespace", %{root: root} do
+      # Empty fields are not fields: the launcher's expansion collapses them, so
+      # a value that is spaced out or padded still carries exactly one -heart and
+      # this must not add a second.
+      run = start(root, [{"ELIXIR_ERL_OPTIONS", " \t -heart \n  -noshell  "}])
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
     end
   end
 
@@ -155,10 +190,31 @@ defmodule Forecastle.EnvScriptTest do
       # HEART_COMMAND= is a variable that is set and means nothing, so unsetting
       # it changes nothing an operator would notice. Warning about it would be
       # noise on a deployment that has no conflict.
+      #
+      # Set and empty, which is not the same thing as unset and is what this
+      # test used to arrange by accident: an empty value in `System.cmd/3`'s
+      # `:env` *removes* the variable, so the case it named was never run. See
+      # `run/3`.
       run = start(root, [{"HEART_COMMAND", ""}])
 
       assert run.stderr == ""
       assert run.env["HEART_COMMAND"] == "<unset>"
+    end
+
+    test "says what it overrode when the inherited value is empty", %{root: root} do
+      # The two assigned values have no such exemption. An empty HEART_NO_KILL is
+      # not TRUE and an empty HEART_BEAT_TIMEOUT is not 65535, so both are being
+      # displaced, and the promise is to name every value that stops taking
+      # effect. `${VAR:-default}` cannot keep that promise, because it treats a
+      # variable set to nothing as absent - which is what these were written with,
+      # and why this went unsaid.
+      run = start(root, [{"HEART_NO_KILL", ""}, {"HEART_BEAT_TIMEOUT", ""}])
+
+      assert run.stderr =~ "overriding HEART_NO_KILL=[] with TRUE"
+      assert run.stderr =~ "overriding HEART_BEAT_TIMEOUT=[] with 65535"
+
+      assert run.env["HEART_NO_KILL"] == "TRUE"
+      assert run.env["HEART_BEAT_TIMEOUT"] == "65535"
     end
   end
 
@@ -312,12 +368,23 @@ defmodule Forecastle.EnvScriptTest do
 
     File.write!(script, fragment() <> reporting())
 
+    {empty, set} = Enum.split_with(environment(root, command, env), &(elem(&1, 1) == ""))
+
     # Redirected inside the shell rather than merged by System.cmd/3, because
     # which stream a warning went to is one of the things being asserted.
+    #
+    # A variable that has to arrive *set and empty* cannot go through
+    # `System.cmd/3`'s `:env`, and this is measured rather than assumed: an empty
+    # value there removes the variable, the same as `nil` does. So the empty ones
+    # are shell assignments prefixed to the command instead, which is the one
+    # place the distinction can be made - and it has to be made, because
+    # `${VAR:-default}` cannot tell the two apart and that is the defect these
+    # tests are here for. Without `exec`, so that they prefix an ordinary command
+    # and are exported to it by the rules for one.
+    assignments = Enum.map_join(empty, "", fn {name, _} -> "#{name}= " end)
+
     {_, status} =
-      System.cmd("sh", ["-c", ~s(sh "#{script}" > "#{out}" 2> "#{err}")],
-        env: environment(root, command, env)
-      )
+      System.cmd("sh", ["-c", ~s(#{assignments}sh "#{script}" > "#{out}" 2> "#{err}")], env: set)
 
     stdout = File.read!(out)
 
@@ -356,6 +423,15 @@ defmodule Forecastle.EnvScriptTest do
   # the launcher. `${VAR-<unset>}` rather than `${VAR:-<unset>}`, because a
   # variable set to nothing and a variable that is not set are different answers
   # and one of them is what unsetting HEART_COMMAND has to produce.
+  #
+  # CASTLE_HEART_FLAGS is not one of the variables: it is how many -heart flags
+  # the emulator would be given, which is the property the fragment's check
+  # exists for and the only one that survives a value with a tab or a newline in
+  # it, since those cannot be reported a line at a time. Counted by iterating
+  # over the unquoted expansion, which is what Mix's `elixir` does with this
+  # variable on the way to `erl` - so this measures the argument list rather than
+  # re-asking the fragment's own question. Two of them is
+  # init:get_argument(heart) == {ok, [[], []]}, which hangs the boot.
   defp reporting do
     """
 
@@ -363,6 +439,14 @@ defmodule Forecastle.EnvScriptTest do
       eval "castle_val=\\${$castle_var-<unset>}"
       echo "env $castle_var=$castle_val"
     done
+
+    castle_flags=0
+    for castle_word in ${ELIXIR_ERL_OPTIONS:-}; do
+      if [ "$castle_word" = "-heart" ]; then
+        castle_flags=$((castle_flags + 1))
+      fi
+    done
+    echo "env CASTLE_HEART_FLAGS=$castle_flags"
     """
   end
 
