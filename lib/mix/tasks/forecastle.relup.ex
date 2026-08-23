@@ -29,7 +29,11 @@ defmodule Mix.Tasks.Forecastle.Relup do
   The task fails if the relup could not be generated, so that a build pipeline
   does not carry on and package whatever relup happened to be lying around. It
   writes nothing when it fails, so a relup already in the output directory is
-  left as it was rather than replaced by one that was then refused.
+  left as it was rather than replaced by one that was then refused. The relup
+  itself is never opened for writing: the bytes go to a staging file beside it
+  which is renamed over it once it is whole, so a failure with a file open cannot
+  leave half an upgrade plan behind either. A reader sees the whole of the old
+  relup or the whole of the new one.
 
   `--outdir` must already exist, and a relative one is resolved from the
   directory the task is run in, not from the project root. It only ever affects
@@ -84,10 +88,24 @@ defmodule Mix.Tasks.Forecastle.Relup do
   worse than one that stops and says so.
 
   That covers a `restart_emulator` an appup asked for by name just as much as one
-  `auto` chose for itself, and the two are settled together rather than one after
-  the other: the relup is generated first, and only then does the run say which
-  transitions restart - or that none of them do. So a run has one verdict, and
-  cannot announce an all-hot relup and a restart in the same breath.
+  `auto` chose for itself - the same transition arrived at another way. Which of
+  the two a run reports is decided by when it can be known:
+
+    - An edge *classification* found to need a restart settles the run on its own,
+      because the outcome is a refusal whatever the rest of the relup turns out to
+      be. So it is refused before anything is generated, and a hot remainder
+      `:systools` cannot produce - a missing entry in an appup the project owns -
+      cannot report its own error in place of a refusal that was already known.
+    - An appup that asks for the restart by name is invisible until there is a
+      script to look at, so it is settled after generation, together with whatever
+      classification chose. A run therefore has one verdict, and cannot announce
+      an all-hot relup and a restart in the same breath.
+
+  While this refusal stands, then, a relup with both kinds in it names the
+  classified edge and generates nothing: anything an appup in the hot remainder
+  asks for is reported by the run that follows, once that edge is gone. When the
+  refusal becomes an announcement the run proceeds, and both kinds are named in
+  the one announcement.
 
   This is temporary, and `--hot` and `--restart` are unaffected. `--restart` is
   the deliberate override for anyone who wants the relup anyway.
@@ -388,17 +406,36 @@ defmodule Mix.Tasks.Forecastle.Relup do
     |> refuse_hot_restarts!()
   end
 
-  # The relup is generated *before* anything is said about the strategy, because
-  # classification is only half of what decides it: an appup can ask for the
-  # emulator to be restarted by name, and that is not visible until `:systools`
-  # has produced a script. Announcing after classification alone is how a run
-  # said every transition was a hot upgrade and then reported a restart in the
-  # same breath - and, once a restart transition can be written, would have said
-  # both in a run that succeeded. So the two kinds are settled together, once,
-  # and there is one verdict per invocation.
+  # Two things decide what `auto` does, and they become knowable at different
+  # times, so they are settled at different points - in the order in which the
+  # answer is certain.
+  #
+  # A restart classification chose is knowable from the two `.rel` files and the
+  # appups, and while such a transition cannot be performed it decides the whole
+  # run: the outcome is a refusal whatever the hot remainder turns out to be, and
+  # so the refusal comes first. Generating first meant a hot remainder
+  # `:systools` could not produce reported that error instead, hiding a refusal
+  # that was already known and that fixing the error would not avoid.
+  #
+  # Where the run may proceed - because that refusal has been lifted, or because
+  # classification chose nothing - the relup is generated before anything is said
+  # about the strategy, because classification is only half of what decides it:
+  # an appup can ask for the emulator to be restarted by name, and that is not
+  # visible until `:systools` has produced a script. Announcing after
+  # classification alone is how a run said every transition was a hot upgrade and
+  # then reported a restart in the same breath - and, once a restart transition
+  # can be written, would have said both in a run that succeeded. So the two
+  # kinds are settled together there, and there is one verdict per invocation
+  # either way.
   defp plan!(:auto, target, froms, ups, downs) do
     {restart_ups, hot_ups} = split_edges(:up, ups, froms, target)
     {restart_downs, hot_downs} = split_edges(:down, downs, froms, target)
+
+    chosen =
+      label_edges("upgrade from", restart_ups, froms) ++
+        label_edges("downgrade to", restart_downs, froms)
+
+    refuse_chosen_restarts!(chosen)
 
     {plan, appup_restarts} =
       plan_transitions(
@@ -410,11 +447,7 @@ defmodule Mix.Tasks.Forecastle.Relup do
         edge_paths(restart_downs)
       )
 
-    settle_restarts!(
-      label_edges("upgrade from", restart_ups, froms) ++
-        label_edges("downgrade to", restart_downs, froms),
-      appup_restarts
-    )
+    settle_restarts!(chosen, appup_restarts)
 
     plan
   end
@@ -848,11 +881,38 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # `auto` says instead, and nothing else has to change.
   defp restart_transitions_installable?, do: false
 
+  # The transitions classification chose to restart, refused before the relup is
+  # generated, because that is already the whole answer: nothing `:systools` goes
+  # on to produce for the transitions that are still hot can make this run
+  # succeed, so generating them can only fail in a way that reports something
+  # other than the reason the run is failing.
+  #
+  # It is deliberately the *only* thing settled here. An appup that asks for a
+  # restart by name is not knowable yet, so nothing is said about an all-hot
+  # classification: that is settled after generation, where it can be true.
+  defp refuse_chosen_restarts!([]), do: :ok
+
+  defp refuse_chosen_restarts!(chosen) do
+    if restart_transitions_installable?() do
+      # The run carries on, and these edges are announced after generation
+      # together with whatever the generated half asks for - one verdict, and it
+      # cannot be given yet.
+      :ok
+    else
+      refuse_restarts!(chosen, [])
+    end
+  end
+
   # One verdict per invocation, arrived at once the relup exists: the transitions
   # `auto` classified as restarts and the emulator restarts an appup asked for by
   # name are the same kind of transition, so they are settled together. Saying
   # every transition is hot before the second kind has been looked for is how a
   # run came to contradict itself.
+  #
+  # While a restart transition cannot be performed, `chosen` is empty here - a
+  # non-empty one was refused before generation - so what this settles is the
+  # all-hot relup and the restart only an appup could have asked for. Both lists
+  # arrive together again once the predicate above is `true`.
   defp settle_restarts!([], []) do
     Mix.shell().info("auto: every transition in this relup is a hot upgrade.")
   end
@@ -894,14 +954,102 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # which is the format `systools_relup:write_relup_file/2` writes and that
   # `release_handler` - and `Forecastle.verify_relup!/2`, on the way into a
   # release - reads back.
-  defp write_relup!(plan, outdir) do
-    File.write!(Path.join(outdir, "relup"), encode!(plan))
-  end
+  defp write_relup!(plan, outdir), do: publish_relup!(encode!(plan), outdir)
 
   defp encode!(plan) do
     case :unicode.characters_to_binary(:io_lib.format(~c"%% coding: utf-8~n~tp.~n", [plan])) do
       bytes when is_binary(bytes) -> bytes
       _not_encodable -> Mix.raise("the relup cannot be encoded as UTF-8: #{inspect(plan)}")
+    end
+  end
+
+  @doc false
+  # Publication, reachable on its own.
+  #
+  # Every refusal happens before this is called, so the run has decided to
+  # replace the relup by the time it gets here - and replacement is the whole
+  # point: a new relup is meant to supersede the one in the directory, so this is
+  # a rename *over* the destination rather than an exclusive create.
+  #
+  # What must not happen is a reader, or a build, finding neither. `File.write!/2`
+  # opens the destination for truncating replacement, so a failure once it is
+  # open - out of space, a killed process, a close that failed, another run
+  # writing the same path - leaves `relup` empty or half a plan even though the
+  # invocation failed. That is exactly the case the documented guarantee is about,
+  # and the one the stale-relup tests cannot see, because they fail before the
+  # write. So the bytes go to a staging file in the same directory - the same
+  # filesystem, which is what makes the rename atomic - and the destination is
+  # only ever replaced whole.
+  #
+  # `write` is a seam, and it is here because standing in the window between
+  # opening the staging file and renaming it is the only way to test that the
+  # previous relup survives it.
+  @spec publish_relup!(binary(), Path.t(), (:file.io_device(), binary() -> :ok | {:error, term()})) ::
+          :ok
+  def publish_relup!(bytes, outdir, write \\ &IO.binwrite/2) do
+    staging = staging_path(outdir)
+
+    try do
+      stage!(staging, bytes, write)
+      rename!(staging, Path.join(outdir, "relup"))
+    after
+      # On every path out, including the one that succeeded - where the rename
+      # has already moved it and this finds nothing. A staging file is not a
+      # relup and nothing else will ever read it, which is also why nothing else
+      # would ever clean it up.
+      File.rm(staging)
+    end
+  end
+
+  # Unique per run: two `mix forecastle.relup` invocations sharing an `--outdir`
+  # must not stage over each other, so the name carries both the OS process and a
+  # counter within it. And unmistakable for a relup - a leading dot and a `.tmp`
+  # suffix - because post-assembly reads the path `relup`, and a staging file
+  # taken for an upgrade plan by anything that scans the directory would be worse
+  # than the failure this exists to prevent.
+  defp staging_path(outdir) do
+    Path.join(outdir, ".relup-#{System.pid()}-#{System.unique_integer([:positive])}.tmp")
+  end
+
+  # `:exclusive`, though the name is unique by construction: if that name is
+  # somehow taken, it is not doing its job, and opening the file anyway would
+  # mean writing this relup over whatever else is in there.
+  defp stage!(staging, bytes, write) do
+    handle = open!(staging)
+    written = write.(handle, bytes)
+
+    # Closed before either result is looked at, since bytes can still be
+    # buffered - so a close that fails means the staging file is not the whole
+    # relup, and a handle left open on the failing path would keep the file alive
+    # after it has been removed.
+    closed = File.close(handle)
+
+    with :ok <- written, :ok <- closed do
+      :ok
+    else
+      {:error, reason} ->
+        Mix.raise(
+          "the relup could not be written to #{staging}: #{inspect(reason)}. The relup " <>
+            "itself was not touched: it is replaced only once the whole of it has been " <>
+            "staged."
+        )
+    end
+  end
+
+  defp open!(staging) do
+    case File.open(staging, [:write, :binary, :exclusive]) do
+      {:ok, handle} -> handle
+      {:error, reason} -> Mix.raise("#{staging} could not be opened: #{inspect(reason)}")
+    end
+  end
+
+  defp rename!(staging, relup) do
+    case File.rename(staging, relup) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Mix.raise("#{staging} could not be renamed to #{relup}: #{inspect(reason)}")
     end
   end
 end

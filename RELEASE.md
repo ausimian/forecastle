@@ -172,14 +172,24 @@
   points at `--restart` as the deliberate override. The same applies to a
   `restart_emulator` an appup asked for by name during an `auto` run: how the
   relup came by the instruction makes no difference to whether it can be
-  installed. The two kinds are settled together, after the relup has been
-  generated and inspected, so a run reports which transitions restart - or that
-  none of them do - exactly once.
+  installed.
+
+  A run says which transitions restart - or that none of them do - exactly once,
+  and the two kinds are settled at the point each becomes knowable. An edge
+  classification found to need a restart is refused before anything is generated,
+  because that already decides the run: nothing the remaining transitions turn out
+  to be can change it, so generating them can only fail in a way that reports
+  something other than the reason the run is failing. An appup that asks for the
+  restart by name is invisible until `systools` has produced a script, so it is
+  settled after generation. A relup with both kinds in it therefore names the
+  classified edge and generates nothing; anything an appup in the rest of it asks
+  for is reported by the run that follows, once that edge is gone.
 
   This is temporary and will be lifted, at which point `auto` will announce the
-  restart it chose instead of refusing. `--hot` and `--restart` are unaffected in
-  either direction; both are explicit requests, and it is fine for `--restart` to
-  produce a relup that cannot yet be deployed.
+  restart it chose instead of refusing - and then, since the run proceeds, both
+  kinds are named in the one announcement. `--hot` and `--restart` are unaffected
+  in either direction; both are explicit requests, and it is fine for `--restart`
+  to produce a relup that cannot yet be deployed.
 - A test suite. It assembles a real release from a fixture application and, in
   the `:e2e` suite, boots it and performs a hot upgrade.
 
@@ -340,6 +350,14 @@
   a failure, rather than one that was replaced by a plan that was then rejected.
   The bytes are unchanged: the same encoding comment and single term `systools`
   writes and `release_handler` reads.
+
+  The relup is also never opened for writing. It is published by renaming a
+  staging file written beside it in the same directory, so the guarantee holds
+  for a failure with a file already open too: a truncating write that then failed
+  - out of space, a killed process, a close that failed - would leave the earlier
+  relup empty or half a plan even though the run failed. A reader now sees the
+  whole of one relup or the whole of the other, and a build that reads it while a
+  generation is running cannot read a partial one.
 - `mix forecastle.relup` now requires at least one of `--fromto`, `--upfrom` or
   `--downto`. It used to accept none and write a relup with no transitions in it,
   which is not an upgrade plan and which `release_handler` can do nothing with.

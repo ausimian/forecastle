@@ -234,10 +234,14 @@ no transitions in it is not an upgrade plan.
 The task fails if it could not generate the relup, so a build pipeline can tell,
 and a failure writes nothing at all - so any earlier relup is still sitting where
 post-assembly looks for one, rather than having been replaced by a plan that was
-then refused. Assembly then checks the relup it is about to package really is
-this release's upgrade plan - the right target version, with the upgrade and
-downgrade sections `release_handler` will read - and fails if it is not. Between
-them, a build cannot quietly ship the previous version's plan.
+then refused. The relup itself is never opened for writing: the bytes are staged
+in a file beside it and renamed over it once they are all there, so a run that
+dies with the file open cannot leave half a plan either. A reader sees the whole
+of the old relup or the whole of the new one. Assembly then checks the relup it
+is about to package really is this release's upgrade plan - the right target
+version, with the upgrade and downgrade sections `release_handler` will read -
+and fails if it is not. Between them, a build cannot quietly ship the previous
+version's plan.
 
 ### Upgrade strategy
 
@@ -276,9 +280,10 @@ Each *direction* is classified on its own, because an appup's upgrade and
 downgrade lists are independent: a relup may carry a hot upgrade from a version
 and a restart back down to it. Applications merely added or removed are left
 alone, since starting or stopping one is hot. Which transitions were chosen, and
-why, is printed - once, after the relup has been generated and inspected, since
-an appup may itself ask for the emulator to be restarted and nothing knows that
-until there is a script to look at.
+why, is printed once per run. Where the run goes on to succeed that is after the
+relup has been generated and inspected, since an appup may itself ask for the
+emulator to be restarted and nothing knows that until there is a script to look
+at.
 
 `auto` does not fall back to a restart when an appup for an application you *do*
 own is missing. A transition it judged hot and `systools` then could not generate
@@ -288,10 +293,17 @@ upgrade it decided on.
 > **`auto` currently refuses a restart transition.** Castle can install a relup
 > that restarts the emulator but cannot yet complete the transition (see below),
 > so rather than write an upgrade plan that is known not to install, `auto` exits
-> non-zero and names the edge that forced the restart and why. That covers a
-> `restart_emulator` an appup asked for by name just as much - the same transition
-> arrived at another way. This is temporary. `--restart` is the deliberate
-> override for anyone who wants the relup anyway.
+> non-zero and names the edge that forced the restart and why. It names it before
+> generating anything: an edge classification found to need a restart decides the
+> run on its own, so a `systools` error from the transitions that were still going
+> to be hot cannot be reported in its place. A `restart_emulator` an appup asked
+> for by name is refused just as much - the same transition arrived at another
+> way - but only becomes visible once there is a script to look at, so it is
+> reported after generation. A relup with both kinds in it therefore names the
+> classified edge, and the appup's own restart is reported by the run that follows
+> once that edge is gone. This is temporary; when the refusal is lifted the run
+> proceeds and both kinds are named in one announcement. `--restart` is the
+> deliberate override for anyone who wants the relup anyway.
 
 **`--hot`** requires a genuine hot upgrade of every transition, and exits
 non-zero, having written nothing, if one cannot be: a missing appup entry, an

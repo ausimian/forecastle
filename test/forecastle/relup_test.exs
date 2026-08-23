@@ -23,6 +23,12 @@ defmodule Forecastle.RelupTest do
   transition in which *only* project-owned applications moved gets built. It is
   the target of the tests about appup-supplied instructions, and of the
   split-and-merge test, where it supplies a hot edge to sit beside a restart one.
+
+  Two things here are driven in process rather than as a command, for the same
+  reason: the split-and-merge, which the refusal in front of it puts out of the
+  task's reach, and publication, whose promise - that a failed run leaves the
+  previous relup whole - can only be tested from inside the window in which it
+  could be broken.
   """
 
   use Forecastle.ReleaseCase
@@ -402,13 +408,20 @@ defmodule Forecastle.RelupTest do
       refute File.exists?(ctx.relup), "a refused relup was written anyway"
     end
 
-    test "settles a restart it chose and one an appup asked for in the same verdict", ctx do
-      # Both kinds of restart in one run, which is what makes "one verdict" mean
-      # anything. 0.1.1 is an edge `auto` classifies as a restart - the dependency
-      # moves between it and 0.1.2, whose copy of the dependency's appup covers
-      # nothing - while 0.1.0 is a hot edge whose appup then asks for the emulator
-      # to be restarted by name. Settling the two in separate passes reports one
-      # of them and leaves the other unsaid.
+    test "settles the restart it chose without generating the rest of the relup", ctx do
+      # Both kinds of restart in one run. 0.1.1 is an edge `auto` classifies as a
+      # restart - the dependency moves between it and 0.1.2, whose copy of the
+      # dependency's appup covers nothing - while 0.1.0 is a hot edge whose appup
+      # then asks for the emulator to be restarted by name.
+      #
+      # While a classified restart is refused, that classification is already the
+      # whole answer: the run fails whatever the hot half turns out to be. So it
+      # is settled first and the hot half is never generated, which is why the
+      # appup's own restart goes unmentioned - it is reported by the run that
+      # follows, once the classified edge is gone. This test used to assert both
+      # in one refusal, which is what put generation in front of a decision that
+      # had already been made; when the refusal becomes an announcement the run
+      # proceeds and the two are named together again.
       add_appup_instruction!(ctx.hot, @hot, :restart_emulator)
 
       {output, status} =
@@ -418,8 +431,40 @@ defmodule Forecastle.RelupTest do
       refute_all_hot(output)
       assert output =~ "auto would make a restart transition of the upgrade from #{@to}"
       assert output =~ "sample_dep.appup has no upgrade instructions from #{@to}"
-      assert output =~ "an appup asks for the emulator to be restarted"
-      assert output =~ "restart_emulator on the upgrade from #{@from}"
+      refute output =~ "an appup asks for the emulator to be restarted"
+      refute File.exists?(ctx.relup), "a refused relup was written anyway"
+    end
+
+    test "refuses the restart it chose rather than a systools error from the rest", ctx do
+      # The same mixed plan, with a hot half that cannot be generated at all.
+      # :sample is the project's own application, so classification never reads
+      # its appup and the 0.1.0 edge is still classified hot - and :systools then
+      # has nothing to generate that transition from.
+      remove_appup!(ctx.hot, @hot, "sample")
+
+      # The control, which is what makes the refutation below mean anything: the
+      # hot half of that plan, on its own, really does fail in :systools.
+      {control, status} = relup(project_only(ctx) ++ ["--outdir", @outdir], @hot)
+
+      assert status != 0, "the hot half was generated without an appup:\n\n#{control}"
+      assert control =~ "sample-#{@hot}/ebin/sample.appup"
+
+      {output, status} =
+        relup(project_only(ctx) ++ ["--upfrom", rel(ctx.to, @to), "--outdir", @outdir], @hot)
+
+      # The restart on the 0.1.1 edge is the reason this run cannot succeed, and
+      # it is what the user is shown. Generating first reported the systools error
+      # instead - an error about the other half of the relup, in front of a
+      # refusal that was already known - and fixing it only uncovered this
+      # refusal on the next run.
+      assert status != 0, "a mixed relup with an ungeneratable half was accepted:\n\n#{output}"
+      refute_all_hot(output)
+      assert output =~ "auto would make a restart transition of the upgrade from #{@to}"
+      assert output =~ "sample_dep.appup has no upgrade instructions from #{@to}"
+
+      refute output =~ "sample-#{@hot}/ebin/sample.appup",
+             "a systools error preempted the restart refusal:\n\n#{output}"
+
       refute File.exists?(ctx.relup), "a refused relup was written anyway"
     end
   end
@@ -519,6 +564,56 @@ defmodule Forecastle.RelupTest do
 
       assert File.exists?(staged), "the merged relup was not copied into the release"
       assert {:ok, [^plan]} = :file.consult(to_charlist(staged))
+    end
+  end
+
+  describe "publishing the relup" do
+    # The last thing the task does, and the one step whose failure the stale-relup
+    # tests above cannot see: they fail before anything is written, where every
+    # refusal is. Once the write itself is under way the destination is what is at
+    # risk, so this is driven in process, past the refusals, with the write made
+    # to fail in the window that matters. The relup is published by renaming a
+    # staging file over it, so there is no window in which the destination is
+    # neither the old plan nor the new one.
+    test "leaves the previous relup byte-identical when the write fails partway", ctx do
+      previous = encode_term({@from_vsn, [{@to_vsn, [], [:restart_emulator]}], []})
+      File.write!(ctx.relup, previous)
+
+      # Half the bytes out and then a failure, which is what running out of space
+      # looks like. `File.write!/2` opens the destination for truncating
+      # replacement, so this is where it left a relup that was neither: empty, or
+      # half a plan, behind a run that failed.
+      assert_raise Mix.Error, fn ->
+        Relup.publish_relup!(new_relup(), outdir(ctx), &half_written/2)
+      end
+
+      assert File.read!(ctx.relup) == previous
+      assert File.ls!(outdir(ctx)) == ["relup"], "a staging file was left behind"
+    end
+
+    test "replaces the previous relup, and leaves nothing else behind", ctx do
+      File.write!(ctx.relup, encode_term({@from_vsn, [], []}))
+      published = new_relup()
+
+      assert :ok = Relup.publish_relup!(published, outdir(ctx))
+
+      assert File.read!(ctx.relup) == published
+      assert File.ls!(outdir(ctx)) == ["relup"], "a staging file was left behind"
+    end
+
+    test "does not collide with another run publishing into the same directory", ctx do
+      # The staging file is named per run for this: two `mix forecastle.relup`
+      # invocations sharing an --outdir must not stage into the same file, or one
+      # could publish a relup that is partly the other's. Whichever wins the
+      # rename, the file is one of them whole.
+      published = for n <- 1..8, do: encode_term({to_charlist("0.1.#{n}"), [], []})
+
+      published
+      |> Enum.map(fn bytes -> Task.async(fn -> Relup.publish_relup!(bytes, outdir(ctx)) end) end)
+      |> Task.await_many()
+
+      assert File.read!(ctx.relup) in published
+      assert File.ls!(outdir(ctx)) == ["relup"], "a staging file was left behind"
     end
   end
 
@@ -689,9 +784,26 @@ defmodule Forecastle.RelupTest do
     :file.consult(to_charlist(file))
   end
 
-  defp write_term!(file, term) do
-    File.write!(file, :io_lib.format(~c"%% coding: utf-8~n~tp.~n", [term]))
+  defp write_term!(file, term), do: File.write!(file, encode_term(term))
+
+  # The bytes the task itself would publish for this term: an encoding comment
+  # and a single term. What the publication tests compare is bytes, so they need
+  # the encoding rather than the term.
+  defp encode_term(term) do
+    :io_lib.format(~c"%% coding: utf-8~n~tp.~n", [term]) |> IO.iodata_to_binary()
   end
+
+  defp new_relup, do: encode_term({@to_vsn, [{@from_vsn, [], [:restart_emulator]}], []})
+
+  # A write that gets part of the relup out and then fails, which is the failure
+  # the staging file exists for. `IO.binwrite/2` reports a real one exactly this
+  # way, so nothing about the path under test is special-cased for the test.
+  defp half_written(handle, bytes) do
+    :ok = IO.binwrite(handle, binary_part(bytes, 0, div(byte_size(bytes), 2)))
+    {:error, :enospc}
+  end
+
+  defp outdir(ctx), do: Path.dirname(ctx.relup)
 
   defp upgrade(ctx), do: ["--target", rel(ctx.to, @to), "--fromto", rel(ctx.from, @from)]
 
