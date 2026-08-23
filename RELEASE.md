@@ -193,10 +193,19 @@
   requires them to name one version. A re-exec, because by the time the launcher
   sources `env.sh` it has already resolved the version directory, and everything
   it goes on to use - the boot script, `vm.args`, `sys.config`, the `elixir`
-  launcher itself - hangs off that. Both markers are consumed atomically, and
-  before the re-exec, so the second pass finds nothing and the selection is
-  one-shot. With no valid pair the fragment does nothing at all and the stock
-  launcher reads `start_erl.data` exactly as it always did.
+  launcher itself - hangs off that. With no valid pair the fragment does nothing
+  at all and the stock launcher reads `start_erl.data` exactly as it always did.
+
+  What is atomic is the *claim*, and it is worth being exact about because the
+  rest follows from it. The fragment takes Castle's marker by renaming it, which
+  is one operation, so exactly one start can act on the pair however many are
+  racing. OTP's file is then read and removed in further steps, and no POSIX
+  operation moves two files together - so the pair is not consumed as a unit, and
+  the order is what makes that safe: the marker goes first, so a start killed
+  part way through leaves no marker behind, and the next start reads
+  `start_erl.data` and boots the version that was permanent. A provisional
+  selection can therefore be lost by an ill-timed kill. It cannot be applied
+  twice, and it cannot be applied to a version that was never installed.
 - The release now runs OTP's `heart`, deliberately configured to do nothing, on
   the commands that start the system.
 
@@ -218,15 +227,34 @@
   braces: `HEART_NO_KILL` suppresses the kill but *not* the command, so a
   `bin/start` that really started the release could start a second node beside a
   live one. The external supervisor remains the only thing that starts this
-  release. Each variable is left alone if the deployment already set it, and
-  `-heart` is added to `ELIXIR_ERL_OPTIONS` only when it is not already there:
-  two of them make `init:get_argument(heart)` answer `{ok, [[], []]}`, which
-  heart's own startup check has no clause for, and the boot hangs.
+  release. `-heart` is added to `ELIXIR_ERL_OPTIONS` only when it is not already
+  there: two of them make `init:get_argument(heart)` answer `{ok, [[], []]}`,
+  which heart's own startup check has no clause for, and the boot hangs.
+
+  All three variables are **assigned**, and `HEART_COMMAND` is **unset**, rather
+  than defaulted - so a deployment that already has any of them in its
+  environment gets the defanged heart anyway. That is deliberate and it is not
+  negotiable while this hook is in use: the supervisor owning the restart is the
+  contract the rest of this depends on, and an inherited `HEART_COMMAND`, a
+  `HEART_NO_KILL` of anything but `TRUE`, or a shorter `HEART_BEAT_TIMEOUT` each
+  break it - the last one by giving a stalled node a way to be killed that a
+  release without `-heart` has not got.
+  A start that overrides one of them says so on standard error, naming the value
+  it displaced and why, because a setting that silently stops taking effect is
+  worse than one that is refused - and refusing is what it does *not* do: a
+  conflicting variable is a configuration mistake, not a reason to fail a boot. A
+  deployment that sets none of them, which is the ordinary case, says nothing.
 - A test suite. It assembles a real release from a fixture application and, in
   the `:e2e` suite, boots it and upgrades it - once hot, asserting that the
   operating system pid does not change, and once through an emulator restart,
   asserting that it does, that an uncommitted provisional release rolls back when
   it is killed, and that committing makes it the version an ordinary start boots.
+  The restart suite runs the whole transition on a deployment whose environment
+  already carries a `HEART_COMMAND`, a `HEART_NO_KILL` of `FALSE` and an
+  11-second beat timeout, and asks the running node what it was actually started
+  with. The `env.sh` hook is also run directly, over a release-shaped directory,
+  so that what it selects and what environment it leaves behind are asserted by
+  observation rather than by reading the script.
 
 ### Changed
 

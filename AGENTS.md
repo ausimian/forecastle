@@ -210,10 +210,34 @@ around it composes instead:
   what says a reboot happened — and they have to agree on the version. See
   castle#14 for the arming side.
 
-  **The pending marker is claimed by rename**, which is atomic, so whichever
-  start wins it is the only consumer; everything after that is exclusive, which
-  is why OTP's marker is then simply read and removed. Both are gone before the
-  launcher is re-exec'd, which is what stops the second pass recurring.
+  **Agreeing on a version is not enough, and making the pair an install
+  *attempt's* is Castle's end of the protocol rather than this one's.** Castle
+  clears any `new_start_erl.data` an earlier attempt left *before* it arms a
+  marker, publishes the marker exclusively so that two attempts cannot share it,
+  and records the attempt on a second line so that no install removes another's.
+  What that buys this fragment is that OTP's file being there means this
+  attempt's own preparation wrote it. **Only the first line of the marker is read
+  here** — it is the version, and everything after it is Castle's bookkeeping. Do
+  not teach this script to parse the rest.
+
+  **What is atomic is the claim, not the pair.** The `mv` is one operation, so
+  whichever start wins it is the only one that can act on the pair. OTP's marker
+  is then read and removed in separate steps, and no POSIX operation moves two
+  files together — so the two are *not* consumed as a unit, and an earlier
+  version of this note, Castle's `AGENTS.md` and this release's own notes all
+  said they were. What makes it safe
+  is the order: the pending marker goes first, so a start killed anywhere after
+  the rename leaves no marker behind, and the next start reads `start_erl.data`
+  and boots the version that was permanent. The selection is lost, never
+  duplicated, and never applied to a version nothing installed — which is the
+  direction this whole design fails in. `Forecastle.EnvScriptTest` covers that
+  interruption by planting what it leaves behind.
+
+  Both are gone before the launcher is re-exec'd, which is what stops the second
+  pass recurring. The claim is named per process — `castle-restart-consumed.$$` —
+  so two starts racing for the marker cannot read each other's, and one left by a
+  start that died between the rename and the read is replaced rather than
+  trusted.
 
   **It re-execs `$RELEASE_ROOT/bin/<name>` rather than assigning `RELEASE_VSN`.**
   By the time the launcher sources `env.sh` it has already computed
@@ -274,13 +298,52 @@ around it composes instead:
   handshake rather than to watch anything. The maximum timeout is what keeps that
   unreachable.
 
-  `HEART_NO_KILL` and `HEART_BEAT_TIMEOUT` are defaulted rather than assigned, so
-  a deployment that set either keeps its value, and `-heart` is appended to
-  `ELIXIR_ERL_OPTIONS` **only if it is not already there**. That last guard is load bearing, not hygiene: two `-heart` flags make
+  **All three are assigned, and `HEART_COMMAND` is unset — they used to be
+  defaulted, and that was a hole.** `HEART_NO_KILL="${HEART_NO_KILL:-TRUE}"` and
+  friends left a deployment that already had these in its environment with
+  active watchdog behaviour, while this file, the README and the release notes
+  all said it had none: an inherited `HEART_COMMAND` is a second restart
+  authority beside the supervisor, `HEART_NO_KILL=FALSE` restores the kill, and a
+  shorter `HEART_BEAT_TIMEOUT` restores the death-by-time-out that the paragraph
+  above exists to keep unreachable. There is no opting out of this while the hook
+  is in use. heart is here to make `heart:set_cmd/1` return `ok` and for nothing
+  else.
+
+  **It overrides rather than refuses, and says so.** An operator who set one of
+  these has a configuration conflict, not an emergency, and a failed boot is a
+  worse answer than the conflict — but a setting that silently stops taking
+  effect is worse than either, so each value actually being displaced is named on
+  standard error along with what replaced it and why. A deployment that set none
+  of them — every ordinary one — says nothing at all, which is why the checks are
+  on the *value* rather than on the variable being set: `HEART_NO_KILL=TRUE`
+  already agrees, and an empty `HEART_COMMAND` displaces nothing.
+
+  Measured, and worth having written down because it makes the `HEART_COMMAND`
+  case sharper than "an unexpected death would start something": heart runs the
+  command on an **orderly** halt as well. On OTP 28.4 with `HEART_COMMAND` set,
+  a clean `halt()` produced *"Erlang has closed. Executed …  -> 0.
+  Terminating."* So an inherited `HEART_COMMAND` turns every `bin/<name> stop`
+  into a restart. The same measurement is what makes the e2e assertion possible:
+  `heart:get_cmd/0` reports the port program's command, and the port program
+  takes its initial value from the environment, so an inherited command comes
+  back out of `heart:get_cmd/0` and the existing "has no command of its own" test
+  becomes the discriminator once the suite starts with one set.
+
+  `-heart` is appended to `ELIXIR_ERL_OPTIONS` **only if it is not already
+  there**. That guard is load bearing, not hygiene: two `-heart` flags make
   `init:get_argument(heart)` answer `{ok, [[], []]}`, which
   `heart:check_start_heart/0` has no clause for, and the boot hangs with nothing
   printed — measured. The fragment is read twice on a provisional start, so
   without the guard the re-exec would hang every such boot.
+
+  **What holds this to the environment rather than to the text of the script is
+  `Forecastle.EnvScriptTest`**, which sources the fragment in a release-shaped
+  directory and reports what it left behind. It exists because the assembly-level
+  test that used to be the whole of the coverage asserted the `${VAR:-default}`
+  expressions were *present*, and so passed against exactly the defect above. Any
+  future claim about the effective heart configuration belongs there; the
+  assembly suite keeps only the claim that the configuration is in the release's
+  `env.sh` and that it assigns.
 
   Incidental, measured: heart prints `heart_beat_kill_pid = <pid>` on every
   start, and `heart_beat_timeout = <n>` when the variable is set. Two lines of
@@ -555,6 +618,7 @@ directory to start from a clean slate.
 | `test/forecastle_test.exs` | The step functions, against a synthetic `Mix.Release` |
 | `test/forecastle/assembly_test.exs` | The assembled tree, including `bin/<name>` being byte-identical to the launcher plain Mix produces |
 | `test/forecastle/castle_cli_test.exs` | `bin/castle` as a shell script, against a launcher stub that records its arguments |
+| `test/forecastle/env_script_test.exs` | The `env.sh` fragment as a shell script, sourced in a release-shaped directory with a launcher stub: the heart environment it leaves behind, and which provisional version each state of the two markers selects |
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
 | `test/forecastle/relup_test.exs` | `mix forecastle.relup` as a command, against three assembled releases: argument handling, exit status, and all three upgrade strategies |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load, tagged `:e2e` |
@@ -574,6 +638,22 @@ to go, and starts the release again. Waiting on the process rather than on the
 node matters: a node that has stopped answering rpc is not necessarily one that
 has exited, and starting the replacement while the old beam still holds the
 distribution port is a name clash rather than a boot.
+
+**It also runs the whole transition on a hostile environment**, and that is not
+incidental colour: `HEART_COMMAND`, `HEART_NO_KILL=FALSE` and an 11-second
+`HEART_BEAT_TIMEOUT` are in the deployment's environment for the first start, so
+a fragment that only *defaulted* them would have this suite exercising a release
+with a live watchdog beside its supervisor. What is asserted is what the node
+says it was started with — `{nil, "TRUE", "65535"}` — plus the warning naming
+each displaced value, and, on the one start with a clean environment, silence.
+
+`env_script_test.exs` is the other half of that, and the division between the two
+is worth keeping: this suite proves the effective configuration survives a real
+boot and a real reboot, and that one proves each individual override and each
+marker state, cheaply and without a `mix release`. Neither replaces the other,
+and **no claim about the effective heart configuration belongs in
+`assembly_test.exs`** — asserting the text of the fragment is what let the
+defaulted version pass.
 
 Three of its assertions are load bearing in ways the obvious ones are not.
 `RELEASE_VM_ARGS`, which `runtime.exs` reads with `fetch_env!`, is derived by the

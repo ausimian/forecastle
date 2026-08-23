@@ -123,6 +123,15 @@ In the post-assembly step:
     `release_handler` calls `heart:set_cmd/1` while preparing an emulator
     restart, and that raises where no `heart` process exists.
 
+    Those three are **assigned**, and `HEART_COMMAND` is **unset**, rather than
+    defaulted — so a deployment that already has any of them in its environment
+    still gets a heart that does nothing. There is no opting out of that while
+    this hook is in use: your supervisor owning the restart is what the rest of
+    it depends on. A start that displaces one of your settings says so on
+    standard error, naming what it displaced, rather than failing the boot over a
+    configuration conflict or losing the setting silently. A deployment that sets
+    none of them says nothing at all.
+
     And a start that follows such a restart selects the version that was
     installed. See *Upgrades that restart the emulator* below.
 
@@ -188,10 +197,11 @@ it.
 
 **Your supervisor owns the restart.** `release_handler` calls `init:reboot()`,
 the operating system process exits, and nothing inside the release starts it
-again: `bin/start` is inert and `HEART_COMMAND` is unset, on purpose, because two
-things starting one service is worse than the problem being solved. Run the
-release under systemd, a Docker restart policy, Kubernetes or runit. A release
-started by hand from a shell will simply stay down until you start it again.
+again: `bin/start` is inert and `HEART_COMMAND` is unset — unset by the hook on
+every start, even where the environment supplies one — because two things
+starting one service is worse than the problem being solved. Run the release
+under systemd, a Docker restart policy, Kubernetes or runit. A release started by
+hand from a shell will simply stay down until you start it again.
 
 **Until you commit, a restart takes you back.** `release_handler` writes the
 installed version to `releases/new_start_erl.data` and leaves

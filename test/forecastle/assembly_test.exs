@@ -165,22 +165,34 @@ defmodule Forecastle.AssemblyTest do
       assert env_sh =~ ~r/case \$RELEASE_COMMAND in\n\s+start\|start_iex\|daemon\|daemon_iex\)/
     end
 
-    test "runs heart, and gives it nothing to do", %{env_sh: env_sh} do
+    test "runs heart, and assigns the whole of its configuration", %{env_sh: env_sh} do
       # heart exists only so that heart:set_cmd/1 returns ok instead of raising
       # badarg while release_handler prepares a reboot. Everything else about it
       # is switched off: no HEART_COMMAND, no kill, and a beat timeout at the
       # documented maximum, because HEART_NO_KILL does not make a time-out
       # harmless - the port program exits after running its command, heart is a
       # kernel process, and init halts the node when one of those dies.
+      #
+      # **What the fragment does to the environment is asserted in
+      # `Forecastle.EnvScriptTest`, by running it.** This test used to be the
+      # whole of the coverage and it asserted that the `${VAR:-default}`
+      # expressions were *present* - which is exactly how a deployment with
+      # HEART_COMMAND in its environment kept an active watchdog while this
+      # passed. What is left here is the assembly-level claim: the heart
+      # configuration is in the release's own env.sh, and it assigns.
       assert env_sh =~ ~s(ELIXIR_ERL_OPTIONS:+$ELIXIR_ERL_OPTIONS }-heart)
-      assert env_sh =~ ~s(HEART_NO_KILL="${HEART_NO_KILL:-TRUE}")
-      assert env_sh =~ ~s(HEART_BEAT_TIMEOUT="${HEART_BEAT_TIMEOUT:-65535}")
+      assert env_sh =~ "unset HEART_COMMAND"
+      assert env_sh =~ "HEART_NO_KILL=TRUE"
+      assert env_sh =~ "HEART_BEAT_TIMEOUT=65535"
 
-      # Refuted as an assignment rather than as a word, because the comment above
-      # it explains why the variable is left alone - and Mix ships this idiom
-      # commented out in its own generated env.sh, setting HEART_COMMAND to the
-      # launcher, which is the thing that must not appear here.
-      refute env_sh =~ "HEART_COMMAND="
+      # And the defect refuted by shape: a default is a value a deployment may
+      # override, and there is nothing here it may override. Mix ships the
+      # HEART_COMMAND assignment commented out in its own generated env.sh,
+      # pointing at the launcher, which is the one thing that must never be
+      # assigned here.
+      refute env_sh =~ ~s(HEART_NO_KILL="${HEART_NO_KILL:-)
+      refute env_sh =~ ~s(HEART_BEAT_TIMEOUT="${HEART_BEAT_TIMEOUT:-)
+      refute env_sh =~ ~s(HEART_COMMAND="$)
       refute env_sh =~ "export HEART_COMMAND"
     end
 
@@ -199,11 +211,21 @@ defmodule Forecastle.AssemblyTest do
       # new_start_erl.data is written before the reboot and never removed, so on
       # its own it is not evidence that a reboot was asked for. Castle's marker is
       # the other half, and the two have to name one version.
+      #
+      # Which selection each state produces is asserted in
+      # `Forecastle.EnvScriptTest`, by running the fragment over a release-shaped
+      # directory; what is here is that the two names are the ones Castle and
+      # release_handler write, and that the marker is claimed by rename.
       assert env_sh =~ "releases/castle-restart-pending"
       assert env_sh =~ "releases/new_start_erl.data"
       assert env_sh =~ ~s(mv "$castle_pending" "$castle_claim")
       assert env_sh =~ ~s([ "$castle_usable" = "$castle_target" ])
       assert env_sh =~ ~s(rm -f "$castle_provisional")
+
+      # The claim is per process, so two starts racing for the marker cannot read
+      # each other's - only one of them wins the rename, and the loser must not
+      # find a file the winner is still working through.
+      assert env_sh =~ ~s(castle-restart-consumed.$$)
     end
 
     test "refuses a version that could name something other than a release",

@@ -62,6 +62,38 @@ defmodule Forecastle.RestartUpgradeTest do
   # sitting for the five-minute default.
   @restart_env [{"CASTLE_INSTALL_TIMEOUT", "120"}, {"SAMPLE_GREETING", @restart_greeting}]
 
+  # The first start is made hostile on purpose. These three are what a deployment
+  # can already have in its environment - a systemd unit that once ran a release
+  # with heart as a watchdog, an image that sets them for something else - and
+  # every one of them contradicts what this release says it does: a command to
+  # restart with, heart's killing turned back on, and a timeout short enough to
+  # bite. The whole restart transition then runs under them, so a fragment that
+  # only *defaulted* these would have this suite exercising a release with a live
+  # watchdog beside its supervisor.
+  #
+  # Measured, and worth knowing before reading the assertions: an inherited
+  # HEART_COMMAND is not merely a restart authority for an unexpected death.
+  # heart runs it on an *orderly* halt too - "Erlang has closed. Executed ... ->
+  # 0. Terminating." - so with one in the environment every `bin/<name> stop`
+  # would start the release again.
+  @hostile_heart [
+    {"HEART_COMMAND", "/usr/local/bin/restart-me"},
+    {"HEART_NO_KILL", "FALSE"},
+    {"HEART_BEAT_TIMEOUT", "11"}
+  ]
+
+  # What the running node says about the environment it was started with, and
+  # about the command heart is actually holding. The environment is what heart's
+  # port program reads, so it is the effective configuration rather than a
+  # description of one.
+  @heart_report """
+  IO.puts(inspect({
+    System.get_env("HEART_COMMAND"),
+    System.get_env("HEART_NO_KILL"),
+    System.get_env("HEART_BEAT_TIMEOUT")
+  }))
+  """
+
   setup_all do
     workspace = Fixture.workspace()
     relup = Path.join(workspace, "relup")
@@ -87,12 +119,17 @@ defmodule Forecastle.RestartUpgradeTest do
       File.rm(relup)
     end)
 
-    start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
+    # Captured rather than discarded: the fragment warns when it overrides an
+    # inherited heart setting, and that warning is part of what this suite
+    # asserts.
+    hostile_start = start!(deploy, [{"SAMPLE_GREETING", @first_greeting} | @hostile_heart])
 
     booted = %{
       os_pid: os_pid(deploy),
       heart: rpc!(deploy, "IO.puts(inspect(:erlang.whereis(:heart)))"),
       heart_cmd: rpc!(deploy, "IO.puts(inspect(:heart.get_cmd()))"),
+      heart_env: rpc!(deploy, @heart_report),
+      start_output: hostile_start,
       counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
       releases: castle!(deploy, ["releases"]),
       start_erl: File.read!(Path.join(deploy, "releases/start_erl.data"))
@@ -118,7 +155,7 @@ defmodule Forecastle.RestartUpgradeTest do
       start_erl: File.read!(Path.join(deploy, "releases/start_erl.data")),
       pending?: File.exists?(Path.join(deploy, "releases/castle-restart-pending")),
       marker?: File.exists?(Path.join(deploy, "releases/new_start_erl.data")),
-      claimed: Path.wildcard(Path.join(deploy, "releases/castle-restart-consumed*"))
+      castle_names: Path.wildcard(Path.join(deploy, "releases/castle-*"))
     }
 
     # A crash, not a stop: `bin/sample stop` would be an orderly shutdown, and
@@ -152,9 +189,15 @@ defmodule Forecastle.RestartUpgradeTest do
     committed_pid = os_pid(deploy)
     launcher!(deploy, ["stop"])
     await_exit!(committed_pid)
-    start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
+
+    # The one start in this suite with nothing hostile in its environment, and
+    # nothing for the fragment to select either, so it is what says the heart
+    # warnings above are about the environment rather than about every start.
+    quiet_start = start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
 
     restarted = %{
+      start_output: quiet_start,
+      heart_env: rpc!(deploy, @heart_report),
       counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
       releases: castle!(deploy, ["releases"])
     }
@@ -183,11 +226,50 @@ defmodule Forecastle.RestartUpgradeTest do
       # nothing at all. release_handler installs a temporary command of its own
       # while preparing a reboot, and that one is inert - see below.
       #
-      # Matched either way an empty command can be printed: heart hands back
-      # whatever the port program has, and an empty Erlang string inspects as []
-      # or as "" depending on what it was built from. What is being asserted is
-      # that there is nothing in it.
+      # **This is the effective command, and it is asserted against a deployment
+      # that supplied one.** heart:get_cmd/0 reports whatever the port program
+      # holds, and the port program takes its initial command from HEART_COMMAND
+      # in the environment - measured: with the variable set, get_cmd/0 answers
+      # {ok, "/usr/bin/true"}. So the fragment failing to unset it would show up
+      # right here, as the deployment's own command coming back out of heart.
+      #
+      # Matched either way an empty command can be printed: an empty Erlang
+      # string inspects as [] or as "" depending on what it was built from. What
+      # is being asserted is that there is nothing in it.
       assert booted.heart_cmd =~ ~r/^\{:ok, (\[\]|"")\}$/
+    end
+
+    test "is defanged in the environment it was actually started with",
+         %{booted: booted} do
+      # The whole suite runs on a deployment that had HEART_COMMAND, a
+      # HEART_NO_KILL of FALSE and an 11-second beat timeout in its environment,
+      # and this is what the node was started with instead. Asserted on the
+      # effective environment rather than on the text of the fragment: heart's
+      # port program reads these variables, so what they are in the running VM is
+      # the configuration - and a fragment that merely defaulted them would leave
+      # a release under an external supervisor with a live watchdog and a way to
+      # be killed for a missed heartbeat, which is what every document about this
+      # release says it has not got.
+      assert booted.heart_env == ~s({nil, "TRUE", "65535"})
+    end
+
+    test "says which inherited settings it overrode", %{booted: booted} do
+      # Overriding rather than refusing to start: an operator who set these has a
+      # configuration conflict, not an emergency. But the setting has stopped
+      # taking effect, so it is named, along with what replaced it.
+      assert booted.start_output =~ "unsetting HEART_COMMAND=[/usr/local/bin/restart-me]"
+      assert booted.start_output =~ "overriding HEART_NO_KILL=[FALSE] with TRUE"
+      assert booted.start_output =~ "overriding HEART_BEAT_TIMEOUT=[11] with 65535"
+    end
+
+    test "says nothing on a start that inherited none of them", %{restarted: restarted} do
+      # The ordinary deployment, which is every one that does not set these. A
+      # warning on every start is a warning nobody reads, and the heart
+      # configuration is still exactly the same.
+      refute restarted.start_output =~ "HEART_COMMAND"
+      refute restarted.start_output =~ "HEART_NO_KILL"
+      refute restarted.start_output =~ "HEART_BEAT_TIMEOUT"
+      assert restarted.heart_env == ~s({nil, "TRUE", "65535"})
     end
 
     test "is handed an inert bin/start", %{deploy: deploy} do
@@ -294,7 +376,14 @@ defmodule Forecastle.RestartUpgradeTest do
       # possible at all.
       refute provisional.pending?, "Castle's restart marker survived the boot that used it"
       refute provisional.marker?, "releases/new_start_erl.data survived the boot that used it"
-      assert provisional.claimed == [], "a claim file was left in releases/"
+    end
+
+    test "leaves nothing of the protocol behind", %{provisional: provisional} do
+      # Every name either side of this puts in the releases directory begins
+      # `castle-`: the marker, the claim the hook renames it to, and the working
+      # directory Castle stages the marker in before linking it into place. An
+      # install and a provisional boot have to leave none of them.
+      assert provisional.castle_names == []
     end
   end
 

@@ -53,10 +53,18 @@ defmodule Forecastle.Deployment do
     relup
   end
 
-  @doc "Starts an assembled release as a daemon and waits for it to answer."
+  @doc """
+  Starts an assembled release as a daemon and waits for it to answer.
+
+  Returns what the launcher printed, which is how a suite gets at what `env.sh`
+  said on the way past - the two streams merged, the way `Forecastle.Fixture`
+  merges them. `launcher!/3` raises if the start itself failed, so a caller that
+  ignores the return value still gets that.
+  """
   def start!(deploy, env \\ []) do
-    launcher!(deploy, ["daemon"], env)
+    output = launcher!(deploy, ["daemon"], env)
     await_boot!(deploy)
+    output
   end
 
   @doc """
