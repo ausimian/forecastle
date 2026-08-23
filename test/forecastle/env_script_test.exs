@@ -45,6 +45,12 @@ defmodule Forecastle.EnvScriptTest do
   `legacy_erl/1` replaces it with one that strips `-emu_args_exit`, which is the
   only way to exercise what the fragment does when an emulator does not know the
   flag it relies on.
+
+  The stub `bin/sample` sources the fragment again, as the real launcher sources
+  `env.sh` again after the re-exec, so a provisional start is observed as two
+  passes rather than as the fact of one. That matters more than it sounds: the
+  version is settled before anything else is decided, so on such a start every
+  decision the fragment makes belongs to the second pass.
   """
 
   use ExUnit.Case, async: true
@@ -97,9 +103,21 @@ defmodule Forecastle.EnvScriptTest do
     File.write!(Path.join(root, "releases/RELEASES"), "[].\n")
     File.write!(Path.join(root, "releases/start_erl.data"), "16.0 #{@vsn}\n")
 
+    # The launcher, as much of it as the fragment's re-exec depends on. It says
+    # which version it was handed - the discriminator for a provisional start -
+    # and then does what `bin/<name>` does with it: resolves REL_VSN_DIR from the
+    # RELEASE_VSN the previous pass exported, and sources the fragment again.
+    #
+    # **Sourcing it is the whole point.** Without that, a provisional start is
+    # observable only by what the exec printed, and every decision the second pass
+    # makes - which is now all of them, since the version is settled before
+    # anything else - would be invisible. The pass that boots is the pass under
+    # test; this is what lets a test see it.
     File.write!(Path.join(root, "bin/sample"), """
     #!/bin/sh
     echo "#{@exec}$RELEASE_VSN"
+    REL_VSN_DIR="$RELEASE_ROOT/releases/$RELEASE_VSN"
+    . "$RELEASE_ROOT/run.sh"
     """)
 
     File.chmod!(Path.join(root, "bin/sample"), 0o755)
@@ -708,6 +726,78 @@ defmodule Forecastle.EnvScriptTest do
     end
   end
 
+  # **Everything the fragment configures, it configures for the version that is
+  # going to boot.** The selection re-execs, so the fragment is read twice on a
+  # provisional start - and the boot is the second pass's. Anything decided before
+  # the re-exec is decided about the version the launcher was *invoked* as, which
+  # on this start is the one that is being replaced.
+  #
+  # That is not a tidiness argument. It shipped the other way round, with the heart
+  # block ahead of the selection, and what that costs is below. The suite had no
+  # case where the two versions differed, which is why it shipped.
+  describe "a provisional start decides for the version it boots" do
+    test "counts the target's -heart rather than inheriting one for it",
+         %{root: root} do
+      # **The bug, and the case the suite was missing.** With the heart block
+      # ahead of the selection: pass 1 probed the *permanent* version's vm.args,
+      # found no -heart, and exported ELIXIR_ERL_OPTIONS=-heart; pass 2 then probed
+      # the target's, saw its own flag beside the inherited one, measured two and
+      # so declined to append a third - but nothing removes what pass 1 exported.
+      # The target booted with two, which is init:get_argument(heart) ==
+      # {ok, [[], []]} and a hang with nothing printed.
+      #
+      # So the target carries a -heart and the permanent version does not, which is
+      # the shape that separates the two orders. There is nothing for the fragment
+      # to do here: one flag is already coming, and it must add none.
+      vm_args(root, "-heart\n", @next)
+      arm(root, @next)
+
+      run = start(root)
+
+      assert run.stdout =~ "#{@exec}#{@next}"
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
+      assert run.stderr == ""
+
+      # Asked once, and asked about the target. Two probes is the other face of
+      # the same defect: the first of them was a question about a version that is
+      # not going to boot, and its answer is what got exported.
+      assert [probe] = probes(root)
+      assert probe =~ "-args_file #{Path.join([root, "releases", @next, "vm.args"])}"
+    end
+
+    test "adds one for a target that has none, whatever the permanent version had",
+         %{root: root} do
+      # The other direction, and the one that says the permanent version's args are
+      # not consulted at all rather than merely consulted early. Its vm.args has a
+      # -heart, the target's does not, and the target needs one added.
+      vm_args(root, "-heart\n")
+      arm(root, @next)
+
+      run = start(root)
+
+      assert run.stdout =~ "#{@exec}#{@next}"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert [_probe] = probes(root)
+    end
+
+    test "reports an overridden heart setting once", %{root: root} do
+      # The warnings belong to the boot, and there is one boot. This used to hold
+      # for a different reason - pass 1 warned and exported the corrected values,
+      # so pass 2 found nothing left to override - and it has to keep holding now
+      # that the block runs only on the pass that boots. Either way an operator
+      # sees each conflict named once.
+      arm(root, @next)
+
+      run = start(root, [{"HEART_COMMAND", "/usr/local/bin/restart-me"}])
+
+      assert run.stdout =~ "#{@exec}#{@next}"
+      assert run.env["HEART_COMMAND"] == "<unset>"
+      assert [_before, _after] = String.split(run.stderr, "unsetting HEART_COMMAND")
+    end
+  end
+
   ## The sandbox
 
   # Sources the fragment with `$RELEASE_COMMAND` set to one that starts the
@@ -890,10 +980,12 @@ defmodule Forecastle.EnvScriptTest do
     File.write!(provisional(root), "16.0 #{vsn}\n")
   end
 
-  # Replaces the inert vm.args the setup wrote for the version the launcher is
-  # about to boot, which is the file it will pass as -args_file.
-  defp vm_args(root, contents) do
-    File.write!(Path.join([root, "releases", @vsn, "vm.args"]), contents)
+  # Replaces the inert vm.args the setup wrote for a version, which is the file
+  # the launcher will pass as -args_file when it boots that one. The default is
+  # the version start_erl.data names, because that is the one an ordinary start
+  # boots; a provisional start's target is named explicitly.
+  defp vm_args(root, contents, vsn \\ @vsn) do
+    File.write!(Path.join([root, "releases", vsn, "vm.args"]), contents)
   end
 
   # The release's own emulator, at the path Mix's generated `elixir` resolves

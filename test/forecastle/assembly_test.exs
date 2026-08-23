@@ -208,9 +208,12 @@ defmodule Forecastle.AssemblyTest do
     test "adds -heart only once", %{env_sh: env_sh} do
       # Load bearing rather than hygiene: two -heart flags make
       # init:get_argument(heart) answer {ok, [[], []]}, which heart's own startup
-      # check has no clause for, and the boot hangs with nothing printed. The
-      # fragment is read twice on a provisional start, because it re-execs the
-      # launcher, so without this guard every such boot would hang.
+      # check has no clause for, and the boot hangs with nothing printed. What the
+      # guard is for is a deployment supplying its own flag - in its vm.args, or in
+      # one of the variables erlexec reads. The fragment's *own* flag used to be a
+      # second source of one, because the heart block ran ahead of the provisional
+      # selection and so on both passes of a re-exec; the order that stops that is
+      # asserted below.
       #
       # The assembly-level claim is that the guard in the shipped env.sh *asks the
       # emulator* rather than reading the environment and deciding for itself, and
@@ -352,6 +355,34 @@ defmodule Forecastle.AssemblyTest do
       reexec = :binary.match(env_sh, ~s(exec "$RELEASE_ROOT/bin/sample")) |> elem(0)
 
       assert claim < reexec
+    end
+
+    test "settles the version before it configures the boot", %{env_sh: env_sh} do
+      # The re-exec means the fragment is read again, so anything it decides ahead
+      # of the selection it decides about the version being *replaced*. heart is
+      # the decision that made that fatal: the earlier order probed the permanent
+      # version's args, found no flag and exported ELIXIR_ERL_OPTIONS=-heart, and
+      # the second pass then counted that beside the target's own. Two flags is
+      # init:get_argument(heart) == {ok, [[], []]}, which heart's startup check has
+      # no clause for, and a boot that hangs having printed nothing.
+      #
+      # The same order is what makes "which emulator should the probe ask" a
+      # question with one answer, since the release it belongs to is then the
+      # selected one.
+      #
+      # Which flag count each order produces is `Forecastle.EnvScriptTest`'s, over
+      # a release-shaped directory whose two versions carry different vm.args - the
+      # case that suite did not have, which is why this shipped. What is asserted
+      # here is the order itself, in the file that ships, and against the code
+      # rather than the prose either side of it.
+      reexec = :binary.match(env_sh, ~s(exec "$RELEASE_ROOT/bin/sample" "$@")) |> elem(0)
+      probe = :binary.match(env_sh, "castle_argv=$(ERL_CRASH_DUMP_SECONDS=0") |> elem(0)
+
+      heart =
+        :binary.match(env_sh, ~s(ELIXIR_ERL_OPTIONS:+$ELIXIR_ERL_OPTIONS }-heart)) |> elem(0)
+
+      assert reexec < probe
+      assert reexec < heart
     end
 
     test "warns rather than refuses when it cannot create the file", %{env_sh: env_sh} do

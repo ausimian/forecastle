@@ -258,6 +258,26 @@ around it composes instead:
   pair that does not settle warns and boots the permanent version; no pair at all
   says nothing and does nothing.
 
+  **This block comes first in the fragment, ahead of everything else it does, and
+  that ordering is load bearing. Do not move it.** The re-exec means the fragment
+  is read twice, so anything decided before the selection is decided about the
+  version being *replaced* — and exported to the pass that boots. It shipped the
+  other way round, with `heart` ahead of the selection, and that is exactly what
+  went wrong: pass 1 probed the permanent version's `vm.args`, found no `-heart`
+  and exported `ELIXIR_ERL_OPTIONS=-heart`; pass 2 probed the target's, measured
+  the inherited flag beside the target's own, and so declined to append a third —
+  but nothing removes what pass 1 exported, so a target carrying its own `-heart`
+  booted with two and hung. Measuring on both passes and appending on neither is
+  not a fix for that; there being only one pass that decides anything is.
+  The same ordering is what makes "which emulator should the probe ask" a question
+  with one answer, since the release it belongs to is then the selected one.
+
+  A consequence worth stating: a target release whose `env.sh` is not Forecastle's
+  gets no `heart` configuration at all, because the pass that would have set it
+  execs away first. That is right — such a release has no Castle upgrade path into
+  it in the first place — but it is a behaviour change from the order this had, and
+  it is the reason not to "helpfully" export anything else across the re-exec.
+
   `bin/<name> version` still reports the version in `start_erl.data`, so during a
   provisional boot it names the *previous* one while the node runs the installed
   one. That is right rather than a defect: it prints "the version to be booted",
@@ -354,9 +374,12 @@ around it composes instead:
   to be given one anyway**. That guard is load bearing, not hygiene: two `-heart`
   flags make `init:get_argument(heart)` answer `{ok, [[], []]}`, which
   `heart:check_start_heart/0` has no clause for — a `case_clause` at
-  `heart.erl:348` — and the boot hangs with nothing printed; measured. The
-  fragment is read twice on a provisional start, so without the guard the re-exec
-  would hang every such boot.
+  `heart.erl:348` — and the boot hangs with nothing printed; measured. What the
+  guard is for is a deployment supplying its own flag — in its `vm.args` or in one
+  of the variables `erlexec` reads. It used to have to cover the fragment's own
+  flag as well, because this block ran ahead of the provisional selection and so on
+  both passes of a re-exec, and it could not: see that block for what that cost.
+  This block now runs once per boot, on the pass that boots.
 
   **The guard asks `erlexec` what the argument vector came out as. It does not
   read the environment and decide, and three versions of it that did were each

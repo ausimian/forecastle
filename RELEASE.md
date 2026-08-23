@@ -196,6 +196,14 @@
   launcher itself - hangs off that. With no valid pair the fragment does nothing
   at all and the stock launcher reads `start_erl.data` exactly as it always did.
 
+  The selection comes before anything else the hook configures, and that is
+  load-bearing rather than tidy. Re-exec'ing means the hook is read again, so
+  anything decided beforehand is decided about the version being *replaced* - and
+  exported to the pass that boots. `heart` is the case that shows it: the two
+  versions can carry different `vm.args`, so whether the emulator is already
+  getting a `-heart` has to be asked about the one that will actually start.
+  Everything after the selection is therefore settled once, by that pass.
+
   What is atomic is the *claim*, and it is worth being exact about because the
   rest follows from it. The fragment takes Castle's marker by renaming it, which
   is one operation, so exactly one start can act on the pair however many are
