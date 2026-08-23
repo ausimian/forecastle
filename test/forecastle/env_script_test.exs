@@ -137,6 +137,71 @@ defmodule Forecastle.EnvScriptTest do
     end
   end
 
+  # ELIXIR_ERL_OPTIONS is the variable Mix's generated `elixir` expands, and it is
+  # not the only way a flag reaches the emulator: erlexec prepends ERL_AFLAGS and
+  # appends ERL_FLAGS and then ERL_ZFLAGS to the command line it builds, and each
+  # of the three puts -heart into init:get_argument(heart) on its own - measured,
+  # answering {ok, [[]]}. With one of them set *and* the fragment appending its
+  # own, the answer is {ok, [[], []]}, heart:check_start_heart/0 raises a
+  # case_clause at heart.erl:348, and the boot never finishes and prints nothing.
+  #
+  # The guard looked at ELIXIR_ERL_OPTIONS alone, so a deployment carrying -heart
+  # in any of the other three got the flag it already had plus the appended one.
+  # Every test in this file passed against that, because every one of them set the
+  # only variable the guard was reading.
+  describe "heart, with a -heart inherited from erl's own flag variables" do
+    for source <- ~w(ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS) do
+      test "is not added a second time for a #{source} that already has one",
+           %{root: root} do
+        source = unquote(source)
+        run = start(root, [{source, "-heart"}])
+
+        # One flag reaching the emulator, from the variable that already had it,
+        # and nothing appended to ELIXIR_ERL_OPTIONS - which the fragment must
+        # leave alone rather than assign, since assigning it is what makes two.
+        assert run.env["CASTLE_HEART_FLAGS"] == "1"
+        assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
+        assert run.env[source] == "-heart"
+      end
+
+      test "is found in a #{source} whose fields are not space separated",
+           %{root: root} do
+        # The same field-splitting question as ELIXIR_ERL_OPTIONS', asked of each
+        # source: a tab or a newline separates arguments as surely as a space
+        # does, so a guard that looked for text between two spaces would miss
+        # these and append a second flag.
+        source = unquote(source)
+
+        assert start(root, [{source, "-heart\t-noshell"}]).env["CASTLE_HEART_FLAGS"] == "1"
+        assert start(root, [{source, "-noshell\n-heart"}]).env["CASTLE_HEART_FLAGS"] == "1"
+        assert start(root, [{source, "  -heart \t -noshell  "}]).env["CASTLE_HEART_FLAGS"] == "1"
+      end
+
+      test "is still added when #{source} carries other flags but no -heart",
+           %{root: root} do
+        # The other direction, and what stops the fix from being "never add one".
+        # A deployment with unrelated flags in these variables still needs the
+        # heart the restart transition depends on.
+        source = unquote(source)
+        run = start(root, [{source, "-noshell -sname other"}])
+
+        assert run.env["CASTLE_HEART_FLAGS"] == "1"
+        assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      end
+    end
+
+    test "counts one across two sources that each carry a -heart", %{root: root} do
+      # A deployment that had already broken its own boot, in which case the
+      # fragment's job is only not to make it worse: it adds nothing, and
+      # ELIXIR_ERL_OPTIONS is left exactly as it arrived. The two flags are the
+      # deployment's, and no shell test here can un-break that.
+      run = start(root, [{"ELIXIR_ERL_OPTIONS", "-heart"}, {"ERL_AFLAGS", "-heart"}])
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "2"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+    end
+  end
+
   describe "heart, with a deployment's own settings inherited" do
     # The environment that made the defaulted version wrong: a HEART_COMMAND to
     # restart with, heart's killing turned back on, and a timeout short enough
@@ -399,6 +464,11 @@ defmodule Forecastle.EnvScriptTest do
   # Everything the launcher exports before it sources env.sh that the fragment
   # reads, and nothing else: an inherited variable has to arrive through `env`
   # rather than out of the test runner's own environment.
+  #
+  # The three ERL_*FLAGS are cleared for the same reason ELIXIR_ERL_OPTIONS is.
+  # They matter more, not less: they are read by erlexec rather than by anything
+  # Mix generates, so a developer or a CI image with one of them set would leak a
+  # -heart into every case here and make the fragment's own additions invisible.
   defp environment(root, command, env) do
     [
       {"RELEASE_COMMAND", command},
@@ -406,6 +476,9 @@ defmodule Forecastle.EnvScriptTest do
       {"REL_VSN_DIR", Path.join([root, "releases", @vsn])},
       {"RELEASE_VSN", @vsn},
       {"ELIXIR_ERL_OPTIONS", nil},
+      {"ERL_AFLAGS", nil},
+      {"ERL_FLAGS", nil},
+      {"ERL_ZFLAGS", nil},
       {"HEART_COMMAND", nil},
       {"HEART_NO_KILL", nil},
       {"HEART_BEAT_TIMEOUT", nil}
@@ -427,24 +500,38 @@ defmodule Forecastle.EnvScriptTest do
   # CASTLE_HEART_FLAGS is not one of the variables: it is how many -heart flags
   # the emulator would be given, which is the property the fragment's check
   # exists for and the only one that survives a value with a tab or a newline in
-  # it, since those cannot be reported a line at a time. Counted by iterating
-  # over the unquoted expansion, which is what Mix's `elixir` does with this
-  # variable on the way to `erl` - so this measures the argument list rather than
-  # re-asking the fragment's own question. Two of them is
+  # it, since those cannot be reported a line at a time. Two of them is
   # init:get_argument(heart) == {ok, [[], []]}, which hangs the boot.
+  #
+  # **It counts all four sources, because all four reach the emulator.** Mix's
+  # generated `elixir` expands ELIXIR_ERL_OPTIONS on the way to `erl`, and erlexec
+  # prepends ERL_AFLAGS and appends ERL_FLAGS and ERL_ZFLAGS to the command line
+  # it builds - so the argument list is the union, and a count over
+  # ELIXIR_ERL_OPTIONS alone is not the property. That is the defect: the guard
+  # looked at one variable, this counter looked at the same one, and every test
+  # agreed with the bug.
+  #
+  # Counted the way the fragment splits - the outer expansions quoted so the four
+  # values stay apart, the inner one unquoted so each contributes its fields -
+  # which measures the argument list rather than re-asking the fragment's own
+  # question.
   defp reporting do
     """
 
-    for castle_var in ELIXIR_ERL_OPTIONS HEART_COMMAND HEART_NO_KILL HEART_BEAT_TIMEOUT; do
+    for castle_var in ELIXIR_ERL_OPTIONS ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS \\
+                      HEART_COMMAND HEART_NO_KILL HEART_BEAT_TIMEOUT; do
       eval "castle_val=\\${$castle_var-<unset>}"
       echo "env $castle_var=$castle_val"
     done
 
     castle_flags=0
-    for castle_word in ${ELIXIR_ERL_OPTIONS:-}; do
-      if [ "$castle_word" = "-heart" ]; then
-        castle_flags=$((castle_flags + 1))
-      fi
+    for castle_words in "${ELIXIR_ERL_OPTIONS:-}" "${ERL_AFLAGS:-}" \\
+                        "${ERL_FLAGS:-}" "${ERL_ZFLAGS:-}"; do
+      for castle_word in $castle_words; do
+        if [ "$castle_word" = "-heart" ]; then
+          castle_flags=$((castle_flags + 1))
+        fi
+      done
     done
     echo "env CASTLE_HEART_FLAGS=$castle_flags"
     """

@@ -227,13 +227,25 @@
   braces: `HEART_NO_KILL` suppresses the kill but *not* the command, so a
   `bin/start` that really started the release could start a second node beside a
   live one. The external supervisor remains the only thing that starts this
-  release. `-heart` is added to `ELIXIR_ERL_OPTIONS` only when it is not already
-  there: two of them make `init:get_argument(heart)` answer `{ok, [[], []]}`,
-  which heart's own startup check has no clause for, and the boot hangs. An
-  inherited flag is recognised however it is spaced. The launcher expands that
-  variable unquoted, so its fields - separated by spaces, tabs or newlines
-  alike - are what reach the emulator, and the hook splits it the same way rather
-  than looking for text between two spaces.
+  release. `-heart` is added to `ELIXIR_ERL_OPTIONS` only when the emulator is not
+  going to get one anyway: two of them make `init:get_argument(heart)` answer
+  `{ok, [[], []]}`, which heart's own startup check has no clause for, and the
+  boot hangs having printed nothing.
+
+  **Four variables can carry it, and all four are checked.**
+  `ELIXIR_ERL_OPTIONS` is the one Mix's generated `elixir` expands; `erl` itself
+  prepends `ERL_AFLAGS` and appends `ERL_FLAGS` and then `ERL_ZFLAGS` to its
+  effective command line, and a `-heart` in any of those reaches
+  `init:get_argument/1` exactly as one on the command line does. A deployment that
+  set one of the three used to receive the flag it already had plus the appended
+  one, which is the boot hang above. `ERL_OTP<major>_FLAGS` is deliberately not
+  checked: `erl`'s own source calls it undocumented and for OTP internal use, and
+  its name carries a version the hook would have to start a VM to learn.
+
+  An inherited flag is recognised however it is spaced. These variables are
+  expanded unquoted, so their fields - separated by spaces, tabs or newlines
+  alike - are what reach the emulator, and the hook splits them the same way
+  rather than looking for text between two spaces.
 
   All three variables are **assigned**, and `HEART_COMMAND` is **unset**, rather
   than defaulted - so a deployment that already has any of them in its
@@ -260,8 +272,10 @@
   it is killed, and that committing makes it the version an ordinary start boots.
   The restart suite runs the whole transition on a deployment whose environment
   already carries a `HEART_COMMAND`, a `HEART_NO_KILL` of `FALSE`, an 11-second
-  beat timeout and an `ELIXIR_ERL_OPTIONS` whose `-heart` is separated by a tab,
-  and asks the running node what it was actually started with. The `env.sh` hook is also run directly, over a release-shaped directory,
+  beat timeout and an `ERL_AFLAGS` whose `-heart` is separated by tabs, and asks
+  the running node what it was actually started with. That start is given a
+  deadline, because a boot handed two `-heart` flags hangs rather than fails and
+  would otherwise stop the suite for as long as whatever ran it would wait. The `env.sh` hook is also run directly, over a release-shaped directory,
   so that what it selects and what environment it leaves behind are asserted by
   observation rather than by reading the script.
 

@@ -21,8 +21,16 @@ defmodule Forecastle.Fixture do
   # Mix variables that would otherwise leak from the parent test run into the
   # fixture build and silently redirect its output, and release variables that
   # would leak into a launcher the tests invoke.
+  #
+  # `ERL_AFLAGS`, `ERL_FLAGS` and `ERL_ZFLAGS` are here alongside
+  # `ELIXIR_ERL_OPTIONS` because all four carry flags to the emulator - erlexec
+  # prepends the first and appends the other two to the command line it builds -
+  # so any of them set in a developer's shell or a CI image would put a `-heart`
+  # into every start these suites make. A suite that wants one there sets it
+  # itself, which is what `Forecastle.RestartUpgradeTest` does.
   @scrubbed ~w(MIX_BUILD_PATH MIX_BUILD_ROOT MIX_DEPS_PATH MIX_TARGET MIX_QUIET
-               MIX_DEBUG ERL_LIBS ELIXIR_ERL_OPTIONS RELEASE_ROOT RELEASE_NAME
+               MIX_DEBUG ERL_LIBS ELIXIR_ERL_OPTIONS ERL_AFLAGS ERL_FLAGS
+               ERL_ZFLAGS RELEASE_ROOT RELEASE_NAME
                RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP)
 
   def start_link(_opts \\ []) do

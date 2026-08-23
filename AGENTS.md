@@ -176,10 +176,13 @@ around it composes instead:
   prevent. An answer is only good for the call that acts on it, which is why the
   check is `Castle.Commands.ensure_upgradable/2` and belongs to the operations.
   Do not reintroduce one here, in any shape, and do not add one to make a refusal
-  arrive sooner: `Castle.install/1` materialises the target's configuration
-  before it refuses, so a refused install starts a peer first. That is harmless —
-  the peer writes only into the target's version directory, never to the running
-  system or to any release record, and it is idempotent.
+  arrive sooner. There is nothing left for it to buy: `Castle.install/1` used to
+  materialise the target's configuration ahead of the operation, so a refused
+  install started a peer first, and that composition has since been folded into
+  `Castle.Commands.install/5` — behind the record check and behind the
+  pending-marker refusal — precisely because materialising ends in a rename onto
+  the target's `sys.config` and so is not the harmless idempotent work it was
+  described as here. A refused install now configures nothing.
 
   `bin/castle upgradable` asks the question on its own, for an operator who wants
   to know where a system stands without staging anything. It is a plain command
@@ -347,37 +350,82 @@ around it composes instead:
   back out of `heart:get_cmd/0` and the existing "has no command of its own" test
   becomes the discriminator once the suite starts with one set.
 
-  `-heart` is appended to `ELIXIR_ERL_OPTIONS` **only if it is not already
-  there**. That guard is load bearing, not hygiene: two `-heart` flags make
-  `init:get_argument(heart)` answer `{ok, [[], []]}`, which
-  `heart:check_start_heart/0` has no clause for, and the boot hangs with nothing
-  printed — measured. The fragment is read twice on a provisional start, so
-  without the guard the re-exec would hang every such boot.
+  `-heart` is appended to `ELIXIR_ERL_OPTIONS` **only if the emulator is not going
+  to be given one anyway**. That guard is load bearing, not hygiene: two `-heart`
+  flags make `init:get_argument(heart)` answer `{ok, [[], []]}`, which
+  `heart:check_start_heart/0` has no clause for — a `case_clause` at
+  `heart.erl:348` — and the boot hangs with nothing printed; measured. The
+  fragment is read twice on a provisional start, so without the guard the re-exec
+  would hang every such boot.
 
-  **The guard tests the variable's fields, not its text, and a
-  `case " $VAR " in *" -heart "*` is not that.** Mix's generated `elixir` expands
-  `$ELIXIR_ERL_OPTIONS` **unquoted** — `set -- … $ELIXIR_ERL_OPTIONS $ERL "$@"` —
-  so what reaches the emulator is that variable's fields under `$IFS`: space,
-  tab and newline, all three of them. A match bounded by literal spaces does not
-  see the flag in `-heart<TAB>-noshell`, appends a second one, and produces
-  exactly the hang above; measured against the assembled script. So the fragment
-  iterates over the unquoted expansion — `for opt in ${ELIXIR_ERL_OPTIONS:-}` —
-  which is the launcher's own splitting rather than an approximation of it, and
-  compares each field. Do not put a string match back: it reads as the simpler
-  thing and it is wrong on two of the three separators.
+  **Four variables can carry the flag here, and the guard read one of them.**
+  `ELIXIR_ERL_OPTIONS` is the variable Mix's generated `elixir` expands, and it is
+  not the only path into the emulator's argument list: `erlexec` prepends
+  `ERL_AFLAGS` and appends `ERL_FLAGS` and then `ERL_ZFLAGS` to the command line
+  it builds. Each of the three puts `-heart` into `init:get_argument(heart)` on its
+  own — measured, one at a time, each answering `{ok, [[]]}` — and with one of them
+  set while the fragment appended its own, `{ok, [[], []]}` and the hang. So a
+  deployment carrying `-heart` in any of the three received a second one, and
+  **every test on either side of this passed against that**, because every one of
+  them set the single variable the guard was reading.
+
+  There is a fifth, `ERL_OTP<major>_FLAGS`, and it is deliberately **not** checked:
+  `erlexec.c` calls it "intentionally undocumented and intended for OTP internal
+  use only", and its name carries the OTP major version, which the fragment does
+  not know and cannot ask for without starting the VM whose boot is the thing at
+  risk. Write that down rather than discovering it again.
+
+  **The guard tests fields, not text, and a `case " $VAR " in *" -heart "*` is not
+  that.** Mix's generated `elixir` expands `$ELIXIR_ERL_OPTIONS` **unquoted** —
+  `set -- … $ELIXIR_ERL_OPTIONS $ERL "$@"` — so what reaches the emulator is that
+  variable's fields under `$IFS`: space, tab and newline, all three of them. A
+  match bounded by literal spaces does not see the flag in `-heart<TAB>-noshell`,
+  appends a second one, and produces exactly the hang above; measured against the
+  assembled script.
+
+  So the fragment uses **two** loops. The outer one iterates the four variables
+  with each expansion *quoted*, which is what keeps their values from running into
+  one another; the inner one iterates `$castle_opts` *unquoted*, which is the
+  launcher's own splitting rather than an approximation of it, and compares each
+  field. `break 2` leaves both on the first match. Do not put a string match back,
+  and do not collapse the outer loop's quoting: unquoted, four values become one
+  field list and a `-heart` at the end of one variable and a flag at the start of
+  the next would still be told apart, but nothing would report which variable
+  anything came from and the shape would stop saying what it means. `erlexec`
+  splits the three `ERL_*FLAGS` on whitespace rather than under `$IFS` and does no
+  pathname expansion, so the inner loop is a slightly *wider* net for those —
+  which is the safe direction for a presence test, and cannot matter for `-heart`
+  itself, which carries no pattern character.
 
   This is also why the coverage is a flag *count* and a real boot, rather than an
-  assertion that the variable equals `-heart`. That assertion is what let the
-  defect through — it was true of the one value it named and said nothing about
-  any other — so `Forecastle.EnvScriptTest` counts how many `-heart` fields the
-  emulator would be given (a value with a newline in it cannot be reported a line
-  at a time anyway), and `Forecastle.RestartUpgradeTest`'s first start inherits a
-  tab-separated one, since the hostile e2e environment never set the variable at
-  all and so had the fragment assigning it rather than finding one. That start
-  also carries `-env CASTLE_TAB_PROBE tabbed` behind the tab, so the node
-  answering with the value is what says the tabs really were separators — without
-  it a boot proves only that the fragment did no harm to something that was never
-  a flag.
+  assertion that the variable equals `-heart`. That assertion is what let the first
+  defect through — it was true of the one value it named and said nothing about any
+  other. So `Forecastle.EnvScriptTest` counts how many `-heart` fields the emulator
+  would be given **across all four sources** (a value with a newline in it cannot
+  be reported a line at a time anyway), and has a case per source, per separator,
+  and one for a source carrying other flags but no `-heart` — which is what stops
+  the fix being "never add one".
+
+  A counter that reads only `ELIXIR_ERL_OPTIONS` is how the second defect stayed
+  invisible: the guard looked at one variable and the counter agreed with it. If a
+  sixth source is ever added, the counter is the other place to change.
+
+  `Forecastle.RestartUpgradeTest`'s first start inherits a tab-separated `-heart`
+  in **`ERL_AFLAGS`**, not `ELIXIR_ERL_OPTIONS`, and that is the point of it: the
+  e2e suite used to set the one variable the guard read, so it too passed against
+  the blindness. That start also carries `-env CASTLE_TAB_PROBE tabbed` behind the
+  tabs — `erlexec` splits that variable on tabs as readily as on spaces, measured —
+  so the node answering with the value is what says the tabs really were
+  separators; without it a boot proves only that the fragment did no harm to
+  something that was never a flag. The suite additionally asserts that
+  `ELIXIR_ERL_OPTIONS` is **unset** in the running node, which is what says the
+  guard read a variable it used not to rather than merely got lucky.
+
+  `Forecastle.Fixture` scrubs all four variables, and the three `ERL_*FLAGS`
+  matter more than `ELIXIR_ERL_OPTIONS` does: they are read by `erlexec` rather
+  than by anything Mix generates, so one set in a developer's shell or a CI image
+  would put a `-heart` into every start every suite makes and hide the fragment's
+  own additions. A suite that wants one sets it itself.
 
   **What holds this to the environment rather than to the text of the script is
   `Forecastle.EnvScriptTest`**, which sources the fragment in a release-shaped
