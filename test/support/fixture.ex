@@ -28,9 +28,17 @@ defmodule Forecastle.Fixture do
   # so any of them set in a developer's shell or a CI image would put a `-heart`
   # into every start these suites make. A suite that wants one there sets it
   # itself, which is what `Forecastle.RestartUpgradeTest` does.
+  #
+  # `RELEASE_VM_ARGS` and `RELEASE_REMOTE_VM_ARGS` name the args file, which
+  # carries the same flags, and they belong here for a sharper reason than the
+  # others: they do not merely *add* a flag, they redirect the launcher to a
+  # different args file entirely. One set in the environment would have every
+  # release these suites assemble boot on some other project's vm.args, which would
+  # present as an assembly bug rather than as a leaked variable.
   @scrubbed ~w(MIX_BUILD_PATH MIX_BUILD_ROOT MIX_DEPS_PATH MIX_TARGET MIX_QUIET
                MIX_DEBUG ERL_LIBS ELIXIR_ERL_OPTIONS ERL_AFLAGS ERL_FLAGS
-               ERL_ZFLAGS RELEASE_ROOT RELEASE_NAME
+               ERL_ZFLAGS RELEASE_VM_ARGS RELEASE_REMOTE_VM_ARGS
+               RELEASE_ROOT RELEASE_NAME
                RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP)
 
   def start_link(_opts \\ []) do

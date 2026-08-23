@@ -123,6 +123,18 @@ In the post-assembly step:
     `release_handler` calls `heart:set_cmd/1` while preparing an emulator
     restart, and that raises where no `heart` process exists.
 
+    If your deployment already asks for `-heart` — in `rel/vm.args.eex`, in
+    `ELIXIR_ERL_OPTIONS`, or in one of `ERL_AFLAGS`, `ERL_FLAGS` and
+    `ERL_ZFLAGS` — that is fine, and nothing is added beside it: two of the flag
+    make `init:get_argument(heart)` answer `{ok, [[], []]}`, which heart's own
+    startup check has no clause for, so the boot would hang having printed
+    nothing. The hook settles it by asking `erl` what argument list it would
+    build, so quoting and escaping in those values are read the way `erl` reads
+    them. `ERL_OTP<major>_FLAGS` — undocumented, and reserved for OTP's own
+    use — is the exception: it is seen when the hook has some other reason to
+    ask, and not when it is the only place you set the flag, so do not put
+    `-heart` there.
+
     Those three are **assigned**, and `HEART_COMMAND` is **unset**, rather than
     defaulted — so a deployment that already has any of them in its environment
     still gets a heart that does nothing. There is no opting out of that while

@@ -17,10 +17,10 @@ defmodule Forecastle.RestartUpgradeTest do
       before anything rebooted. The `env.sh` fragment runs the real heart,
       defanged: `HEART_NO_KILL`, no `HEART_COMMAND`, and an inert
       `$ROOT/bin/start` to neutralise the temporary command `release_handler`
-      installs. The first start also inherits a tab-separated `-heart` in
-      `ERL_AFLAGS`, because *two* of them hang the boot, and because that is one
-      of the three variables erlexec reads which the guard used not to look at -
-      it read `ELIXIR_ERL_OPTIONS` alone, and so did every test of it.
+      installs. The fixture supplies its own `-heart` through `rel/vm.args.eex`,
+      which the launcher passes as `-args_file`, and spells it `-he\art` -
+      because *two* of them hang the boot, and because the only way to see that
+      one is to ask erlexec what it made of the file rather than to read the file.
     * `release_handler` writes the target to `releases/new_start_erl.data` and
       leaves `releases/start_erl.data` naming the version that is still
       permanent, so the reboot would come back on the old version. The `env.sh`
@@ -85,34 +85,40 @@ defmodule Forecastle.RestartUpgradeTest do
     {"HEART_BEAT_TIMEOUT", "11"}
   ]
 
-  # And a -heart the deployment already had, tab-separated, which the fragment
-  # must recognise rather than add a second one beside. Two of them make
-  # init:get_argument(heart) answer {ok, [[], []]}, which heart's own
-  # check_start_heart/0 has no clause for: the boot hangs with nothing printed, so
-  # this start would time out in await_boot!/2 and take the suite with it.
+  # The -heart this deployment already has arrives from the fixture's own
+  # `rel/vm.args.eex`, which the launcher passes to the emulator as `-args_file`,
+  # and it is asked for at *assembly* time so that only the releases this suite
+  # builds carry it: -heart makes heart print `heart_beat_kill_pid = <pid>` on
+  # every VM started with that file, `eval` included, and
+  # `Forecastle.ConfigurationTest` asserts on the exact output of an `eval`.
   #
-  # **It arrives in ERL_AFLAGS rather than ELIXIR_ERL_OPTIONS, and that is the
-  # point of it.** The guard read ELIXIR_ERL_OPTIONS alone, and that is not the
-  # only variable that carries a flag to the emulator: erlexec prepends ERL_AFLAGS
-  # and appends ERL_FLAGS and then ERL_ZFLAGS to the command line it builds, and
-  # each of the three puts -heart into init:get_argument(heart) on its own -
-  # measured. So a deployment with one in any of them got the flag it already had
-  # plus the appended one, which is the acknowledged boot hang, and *every* test
-  # on either side of this passed against that: the unit tests all set the one
-  # variable the guard was reading, and this suite set it too.
+  # **It is spelled `-he\art`, because that is the case no reading of the
+  # environment can answer.** erlexec removes the backslash and hands the emulator
+  # `-heart`; a fragment that matched text, split fields or scanned the file
+  # appends a second one, `init:get_argument(heart)` answers `{ok, [[], []]}`,
+  # `heart:check_start_heart/0` raises a case_clause at heart.erl:348 and the boot
+  # hangs having printed nothing. Three versions of that guard shipped, each with a
+  # unit test that shared its model; the fragment now asks `erl -emu_args_exit`
+  # what the argument vector came out as. The rest of the note lives in that file,
+  # which is where a reader looking for it will go.
   #
-  # It has to be exercised on a real boot rather than only in the shell, for the
-  # reason the previous version of this note gives: what a unit test can assert
-  # about the fragment is what the fragment says, and what hangs is the emulator.
-  # Which sources the guard recognises, one at a time, is
-  # `Forecastle.EnvScriptTest`'s.
-  #
-  # `-env` is what makes the tab itself observable. erlexec splits this variable
-  # into arguments on tabs as readily as on spaces - measured - so the flag reaches
-  # the emulator as three arguments, and a node that answers with the value is a
-  # node whose argument list was really split on them. That is the half of the
-  # defect a boot alone would not distinguish.
-  @tabbed_heart [{"ERL_AFLAGS", "-heart\t-env\tCASTLE_TAB_PROBE\ttabbed"}]
+  # It has to be exercised on a real boot rather than only in the shell: what a
+  # unit test can assert about the fragment is what the fragment says, what
+  # `-emu_args_exit` reports is what erlexec assembled, and what hangs is the
+  # emulator. A fragment that misses this flag makes the suite time out inside
+  # `start!/2` rather than fail an assertion, which is exactly why that call
+  # carries a deadline. Which values the guard recognises, one at a time and
+  # against a real erlexec, is `Forecastle.EnvScriptTest`'s.
+  @heart_in_vm_args [{"SAMPLE_HEART", "-he\\art"}]
+
+  # ERL_AFLAGS carries the tab probe and *only* the tab probe: a -heart in both it
+  # and vm.args would itself be the two-flag hang. `-env` is what makes the tab
+  # observable - erlexec splits that variable into arguments on tabs as readily as
+  # on spaces, measured - so a node answering with the value is a node whose
+  # argument list was really split on them. It is also what says the probe's gate
+  # does not trip on an ordinary flag variable: this value carries no quote, no
+  # backslash and no mention of heart, so the emulator is asked nothing about it.
+  @tabbed_heart [{"ERL_AFLAGS", "-env\tCASTLE_TAB_PROBE\ttabbed"}]
 
   @probe_report ~s|IO.puts(inspect(System.get_env("CASTLE_TAB_PROBE")))|
 
@@ -132,8 +138,8 @@ defmodule Forecastle.RestartUpgradeTest do
     workspace = Fixture.workspace()
     relup = Path.join(workspace, "relup")
 
-    deploy = assemble!(into: "restart-deploy", vsn: @from)
-    next = assemble!(into: "restart-next", vsn: @to)
+    deploy = assemble!(into: "restart-deploy", vsn: @from, env: @heart_in_vm_args)
+    next = assemble!(into: "restart-next", vsn: @to, env: @heart_in_vm_args)
 
     # `--restart`, explicitly, for the reason the hot suite asks for `--hot`: the
     # transition is the subject, so the task rather than an assertion further down
@@ -141,7 +147,7 @@ defmodule Forecastle.RestartUpgradeTest do
     # hot - the dependency's appup covers its move - so it is not the strategy
     # that produces the relup this suite needs.
     make_relup!({deploy, @from}, {next, @to}, ["--restart"])
-    ^next = assemble!(into: "restart-next", vsn: @to)
+    ^next = assemble!(into: "restart-next", vsn: @to, env: @heart_in_vm_args)
 
     File.cp!(
       Path.join(next, "sample-#{@to}.tar.gz"),
@@ -315,27 +321,30 @@ defmodule Forecastle.RestartUpgradeTest do
       assert restarted.heart_env == ~s({nil, "TRUE", "65535"})
     end
 
-    test "was given exactly one -heart, having inherited a tab-separated ERL_AFLAGS one",
+    test "was given exactly one -heart, having inherited an escaped one from vm.args",
          %{booted: booted} do
       # The boot happening at all is most of this: two -heart flags leave
       # heart:check_start_heart/0 with no clause for {ok, [[], []]} and the node
       # never finishes starting, so the suite's own start! would have timed out
       # before any assertion ran. What is left to assert is the argument the
-      # emulator actually got, which is the thing that clause matches on.
+      # emulator actually got, which is the thing that clause matches on - and it
+      # is `[[]]` rather than nothing, which says erlexec unescaped the `-he\art`
+      # in the fixture's vm.args into a live flag.
       assert booted.heart_args == "{:ok, [[]]}"
 
-      # And that the tabs really were separators rather than characters in a
-      # word - otherwise the flag the fragment had to recognise was never a flag,
-      # and this would pass against a fragment that recognised nothing.
-      assert booted.tab_probe == ~s("tabbed")
-
-      # The flag came from ERL_AFLAGS and the fragment therefore assigned nothing:
-      # erlexec prepends that variable to erl's command line, so a fragment that
-      # appended its own to ELIXIR_ERL_OPTIONS as well would have produced the two
-      # that hang the boot. An empty ELIXIR_ERL_OPTIONS in the running node is
-      # what says the guard read a variable it used not to.
-      assert booted.erl_aflags == ~s("-heart\\t-env\\tCASTLE_TAB_PROBE\\ttabbed")
+      # The flag came from the fixture's vm.args, which the launcher passes as
+      # -args_file, and the fragment therefore assigned nothing. An unset
+      # ELIXIR_ERL_OPTIONS in the running node is the whole of the evidence that
+      # the guard measured rather than modelled: no reading of that file finds a
+      # flag spelled `-he\art`, so a fragment that read it would have appended its
+      # own here, and the two together are the hang.
       assert booted.elixir_erl_options == "nil"
+
+      # And the tabs really were separators rather than characters in a word -
+      # otherwise the field splitting the guard has to do was never exercised, and
+      # the tab half of this would pass against a fragment that split nothing.
+      assert booted.tab_probe == ~s("tabbed")
+      assert booted.erl_aflags == ~s("-env\\tCASTLE_TAB_PROBE\\ttabbed")
     end
 
     test "is handed an inert bin/start", %{deploy: deploy} do

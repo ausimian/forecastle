@@ -27,6 +27,22 @@ defmodule Forecastle.EnvScriptTest do
   The fragment is rendered from `priv/env.sh.eex` rather than read out of an
   assembled release, so these tests need no `mix release` and stay async;
   `Forecastle.AssemblyTest` is what pins that this template is what ships.
+
+  Two things about the sandbox exist for the heart guard in particular, and both
+  are answers to the same three-times-repeated defect - a guard that modelled what
+  `erlexec` would make of the environment, and a test that mirrored the model.
+
+  The flag count is obtained by asking a real emulator with `erl -emu_args_exit`,
+  which prints the argument vector `erlexec` assembled and exits without starting
+  a VM. Nothing here parses a variable or an args file. See `reporting/0`.
+
+  And the sandbox holds a release's own `erts-16.2/bin/erl` - a script that records
+  every invocation and then hands over to the real emulator. That is the binary the
+  fragment resolves its probe through, so `probes/1` is how a test sees *whether*
+  the fragment asked, which nothing about the resulting environment says; and
+  `legacy_erl/1` replaces it with one that strips `-emu_args_exit`, which is the
+  only way to exercise what the fragment does when an emulator does not know the
+  flag it relies on.
   """
 
   use ExUnit.Case, async: true
@@ -41,6 +57,11 @@ defmodule Forecastle.EnvScriptTest do
   # between a start that selected a provisional version and one that did not.
   @exec "exec:"
 
+  # The emulator of the VM these tests run in, by the path `code:root_dir()`
+  # names rather than by a PATH lookup, so that both the fragment's probe and this
+  # suite's own reporting ask exactly one binary.
+  @erl Path.join([to_string(:code.root_dir()), "bin", "erl"])
+
   setup %{tmp_dir: root} do
     File.mkdir_p!(Path.join(root, "bin"))
 
@@ -53,7 +74,22 @@ defmodule Forecastle.EnvScriptTest do
       File.mkdir_p!(dir)
       File.write!(Path.join(dir, "env.sh"), "# nothing\n")
       File.write!(Path.join(dir, "start.boot"), "")
+
+      # The launcher passes this file to the emulator as -args_file, so it is a
+      # source of -heart exactly as the flag variables are. This one is inert *and
+      # unremarkable* - no quote, no backslash, no mention of heart or of another
+      # args file - which is what makes it the ordinary deployment the fragment's
+      # gate must not probe for. The cases that are about it write over this.
+      File.write!(Path.join(dir, "vm.args"), "## nothing\n-start_epmd false\n")
     end
+
+    # The release's own emulator, as a release that brought its ERTS has it, and
+    # the only way to see whether the fragment probed at all: it records the
+    # invocation and then hands over to the real thing, so a probe is measured
+    # rather than reconstructed. The fragment resolves it by the same glob Mix's
+    # `elixir` resolves ERTS_BIN with, and this suite's own reporting deliberately
+    # does *not* go through it - otherwise every run would look like a probe.
+    probing_erl(root)
 
     # Present so that the RELEASES bootstrap - the fragment's third part, which
     # starts a VM - is skipped. It is not what any of this is about.
@@ -90,103 +126,114 @@ defmodule Forecastle.EnvScriptTest do
       assert start(root).stderr == ""
     end
 
-    test "adds -heart once", %{root: root} do
-      # Load bearing rather than hygiene: two -heart flags make
-      # init:get_argument(heart) answer {ok, [[], []]}, which heart's own startup
-      # check has no clause for, and the boot hangs with nothing printed. The
-      # fragment is read twice on a provisional start, because it execs the
-      # launcher, so a deployment that already has the flag is the ordinary case
-      # rather than an odd one.
-      run = start(root, [{"ELIXIR_ERL_OPTIONS", "-heart"}])
-
-      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
-      assert run.env["CASTLE_HEART_FLAGS"] == "1"
-    end
-
-    test "finds a -heart that is separated by a tab", %{root: root} do
-      # The variable is expanded *unquoted* by the launcher, so what reaches the
-      # emulator is its fields under $IFS - and a tab is one of the three
-      # separators, not a character inside a word. A match bounded by literal
-      # spaces, which is what this was, sees "-heart<TAB>-noshell" as a single
-      # word that is not -heart, appends another one, and hangs the boot.
-      inherited = "-heart\t-noshell"
-      run = start(root, [{"ELIXIR_ERL_OPTIONS", inherited}])
-
-      assert run.env["ELIXIR_ERL_OPTIONS"] == inherited
-      assert run.env["CASTLE_HEART_FLAGS"] == "1"
-    end
-
-    test "finds a -heart that is separated by a newline", %{root: root} do
-      # The third separator, and the one an inherited value acquires from a
-      # systemd unit or a Dockerfile that spread its options over lines. Only the
-      # flag count is asserted, because a value with a newline in it cannot be
-      # reported a line at a time - and the count is the property anyway: it is
-      # what init:get_argument(heart) will be built from.
-      run = start(root, [{"ELIXIR_ERL_OPTIONS", "-noshell\n-heart\n"}])
-
-      assert run.env["CASTLE_HEART_FLAGS"] == "1"
-    end
-
-    test "finds a -heart among runs of whitespace", %{root: root} do
-      # Empty fields are not fields: the launcher's expansion collapses them, so
-      # a value that is spaced out or padded still carries exactly one -heart and
-      # this must not add a second.
-      run = start(root, [{"ELIXIR_ERL_OPTIONS", " \t -heart \n  -noshell  "}])
-
-      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+    test "asks the emulator nothing at all", %{root: root} do
+      # The cost of the fix on an ordinary start, and it is stated as a property
+      # rather than left implied: with no flag variable set and a vm.args of plain
+      # flags and comments, there is nothing that could carry a -heart, so no
+      # emulator is asked. Recorded by the release's own erl, which is the binary
+      # the fragment resolves and the only place a probe could come from.
+      assert start(root).env["CASTLE_HEART_FLAGS"] == "1"
+      assert probes(root) == []
     end
   end
 
-  # ELIXIR_ERL_OPTIONS is the variable Mix's generated `elixir` expands, and it is
-  # not the only way a flag reaches the emulator: erlexec prepends ERL_AFLAGS and
-  # appends ERL_FLAGS and then ERL_ZFLAGS to the command line it builds, and each
-  # of the three puts -heart into init:get_argument(heart) on its own - measured,
-  # answering {ok, [[]]}. With one of them set *and* the fragment appending its
-  # own, the answer is {ok, [[], []]}, heart:check_start_heart/0 raises a
-  # case_clause at heart.erl:348, and the boot never finishes and prints nothing.
+  # **The fragment does not read these variables to decide anything; it asks
+  # erlexec what the argument vector came out as.** That is the fix, and the
+  # matrix below is why it had to be: erlexec applies shell-style quoting and
+  # backslash escaping to each of the flag variables it reads, so `'-heart'`,
+  # `"-heart"` and `-he\art` all arrive at the emulator as -heart while carrying no
+  # `-heart` substring for anything to match on. Three successive versions of this
+  # guard modelled the parsing - a match between literal spaces, then a split into
+  # fields, then a literal scan of the args file - and each shipped with a test in
+  # this file that mirrored the same model and agreed with it.
   #
-  # The guard looked at ELIXIR_ERL_OPTIONS alone, so a deployment carrying -heart
-  # in any of the other three got the flag it already had plus the appended one.
-  # Every test in this file passed against that, because every one of them set the
-  # only variable the guard was reading.
-  describe "heart, with a -heart inherited from erl's own flag variables" do
-    for source <- ~w(ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS) do
-      test "is not added a second time for a #{source} that already has one",
-           %{root: root} do
+  # ELIXIR_ERL_OPTIONS is deliberately in the same table and behaves *differently*,
+  # which is the sharpest thing here. It is expanded by Mix's generated `elixir`,
+  # so the shell splits it into fields and the quotes survive into the token:
+  # erlexec unquotes what it reads out of the environment and does not touch the
+  # command line, so ELIXIR_ERL_OPTIONS="'-heart'" leaves the emulator with no
+  # heart at all and the fragment has to add one. No model of "the four flag
+  # variables" gets that right, because they are not four of a kind.
+  describe "heart, inherited through a variable erlexec reads" do
+    for source <- ~w(ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS),
+        {shape, value} <- [
+          {"plain", "-heart"},
+          {"single quoted", "'-heart'"},
+          {"double quoted", ~s("-heart")},
+          {"backslash escaped", "-he\\art"},
+          {"tab separated", "-heart\t-noshell"},
+          {"newline separated", "-noshell\n-heart"},
+          {"padded with whitespace", "  -heart \t -noshell  "}
+        ] do
+      test "is not added a second time for a #{shape} #{source}", %{root: root} do
         source = unquote(source)
-        run = start(root, [{source, "-heart"}])
+        run = start(root, [{source, unquote(value)}])
 
         # One flag reaching the emulator, from the variable that already had it,
         # and nothing appended to ELIXIR_ERL_OPTIONS - which the fragment must
         # leave alone rather than assign, since assigning it is what makes two.
-        assert run.env["CASTLE_HEART_FLAGS"] == "1"
+        # The inherited value is not asserted on: one of these carries a newline,
+        # and a value with a newline in it cannot be reported a line at a time.
+        assert run.env["CASTLE_HEART_FLAGS"] == "1", "#{source} = #{inspect(unquote(value))}"
         assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
-        assert run.env[source] == "-heart"
       end
+    end
 
-      test "is found in a #{source} whose fields are not space separated",
-           %{root: root} do
-        # The same field-splitting question as ELIXIR_ERL_OPTIONS', asked of each
-        # source: a tab or a newline separates arguments as surely as a space
-        # does, so a guard that looked for text between two spaces would miss
-        # these and append a second flag.
-        source = unquote(source)
-
-        assert start(root, [{source, "-heart\t-noshell"}]).env["CASTLE_HEART_FLAGS"] == "1"
-        assert start(root, [{source, "-noshell\n-heart"}]).env["CASTLE_HEART_FLAGS"] == "1"
-        assert start(root, [{source, "  -heart \t -noshell  "}]).env["CASTLE_HEART_FLAGS"] == "1"
-      end
-
+    for source <- ~w(ELIXIR_ERL_OPTIONS ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS) do
       test "is still added when #{source} carries other flags but no -heart",
            %{root: root} do
         # The other direction, and what stops the fix from being "never add one".
         # A deployment with unrelated flags in these variables still needs the
-        # heart the restart transition depends on.
+        # heart the restart transition depends on - and, because the value carries
+        # no quote, no backslash and no mention of heart or of an args file, it
+        # cannot become one, so the gate does not pay for an emulator to say so.
         source = unquote(source)
-        run = start(root, [{source, "-noshell -sname other"}])
+        run = start(root, [{source, "-kernel shell_history enabled"}])
 
         assert run.env["CASTLE_HEART_FLAGS"] == "1"
-        assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+        assert run.env["ELIXIR_ERL_OPTIONS"] =~ "-heart"
+        assert probes(root) == []
+      end
+    end
+
+    for {shape, value} <- [
+          {"plain", "-heart"},
+          {"tab separated", "-heart\t-noshell"},
+          {"newline separated", "-noshell\n-heart\n"},
+          {"padded with whitespace", " \t -heart \n  -noshell  "}
+        ] do
+      test "is not added a second time for a #{shape} ELIXIR_ERL_OPTIONS",
+           %{root: root} do
+        # The variable Mix's `elixir` expands, unquoted, so what reaches the
+        # emulator is its fields under $IFS - space, tab and newline, all three.
+        # Only the flag count is asserted for the values carrying a newline,
+        # because a value with one in it cannot be reported a line at a time - and
+        # the count is the property anyway: it is what init:get_argument(heart)
+        # gets built from.
+        run = start(root, [{"ELIXIR_ERL_OPTIONS", unquote(value)}])
+
+        assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      end
+    end
+
+    for {shape, value} <- [
+          {"single quoted", "'-heart'"},
+          {"double quoted", ~s("-heart")},
+          {"backslash escaped", "-he\\art"}
+        ] do
+      test "is added beside a #{shape} ELIXIR_ERL_OPTIONS, which is not one",
+           %{root: root} do
+        # And the case that says this is a measurement rather than a rule about
+        # four look-alike variables. The shell removes nothing when it expands a
+        # variable's value, and erlexec unquotes only what it reads out of the
+        # environment itself - so this token reaches the emulator with its quotes
+        # or its backslash intact and is not the heart flag. A guard that treated
+        # these variables alike would leave the release with no heart and a
+        # restart install failing at heart:set_cmd/1.
+        run = start(root, [{"ELIXIR_ERL_OPTIONS", unquote(value)}])
+
+        assert run.env["CASTLE_HEART_FLAGS"] == "1"
+        assert run.env["ELIXIR_ERL_OPTIONS"] == unquote(value) <> " -heart"
       end
     end
 
@@ -194,11 +241,190 @@ defmodule Forecastle.EnvScriptTest do
       # A deployment that had already broken its own boot, in which case the
       # fragment's job is only not to make it worse: it adds nothing, and
       # ELIXIR_ERL_OPTIONS is left exactly as it arrived. The two flags are the
-      # deployment's, and no shell test here can un-break that.
+      # deployment's, and nothing here can un-break that - but the probe is not
+      # troubled by it either, which is what makes a timeout unnecessary: it prints
+      # two lines and exits, where a boot would hang.
       run = start(root, [{"ELIXIR_ERL_OPTIONS", "-heart"}, {"ERL_AFLAGS", "-heart"}])
 
       assert run.env["CASTLE_HEART_FLAGS"] == "2"
       assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+    end
+  end
+
+  # The source that is not an environment variable at all: the launcher passes
+  # --vm-args to Mix's `elixir`, which becomes erl's -args_file, and a project may
+  # legitimately put -heart in its own rel/vm.args.eex. erlexec reads that file
+  # with the same quoting it applies to the variables, plus # comments, and follows
+  # a nested -args_file out of it - so a literal scan of the file is wrong in three
+  # separate directions, and the probe is right in all of them by not being a scan.
+  describe "heart, inherited through vm.args" do
+    for {shape, contents} <- [
+          {"plain", "-heart\n-noshell\n"},
+          {"single quoted", "'-heart'\n"},
+          {"double quoted", ~s("-heart"\n)},
+          {"backslash escaped", "-he\\art\n"},
+          {"quoted-hash-preceded", ~s(-setcookie "a#b" -heart\n)}
+        ] do
+      test "is not added a second time when vm.args carries a #{shape} -heart",
+           %{root: root} do
+        # The quoted-hash case is the one that refutes comment stripping: erlexec
+        # does not treat that # as starting a comment - measured, the cookie
+        # arrives as "a#b" - so the -heart after it is live, and a scan that
+        # stripped from the first hash would drop it and hang the boot.
+        vm_args(root, unquote(contents))
+
+        run = start(root)
+
+        assert run.env["CASTLE_HEART_FLAGS"] == "1"
+        assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
+        assert run.stderr == ""
+      end
+    end
+
+    test "is not added a second time for one a nested args file supplies",
+         %{root: root} do
+      # erlexec follows a nested -args_file, so the flag is live and there is no
+      # second one to add. The fragment does not follow it and does not have to:
+      # what it asks is what the vector came out as, and erlexec built the vector.
+      # This case used to produce a warning and no heart, because the fragment
+      # could see the nesting and not through it.
+      nested = Path.join(root, "nested.vm.args")
+      File.write!(nested, "-heart\n")
+      vm_args(root, "-args_file #{nested}\n")
+
+      run = start(root)
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
+      assert run.stderr == ""
+    end
+
+    test "is added when a nested args file supplies no heart", %{root: root} do
+      # The other side of following it, and the reason "assume a nested file has
+      # one" was not good enough either: it silently took heart away from every
+      # deployment whose vm.args happened to include another file.
+      nested = Path.join(root, "nested.vm.args")
+      File.write!(nested, "-start_epmd false\n")
+      vm_args(root, "-args_file #{nested}\n")
+
+      run = start(root)
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.stderr == ""
+    end
+
+    test "is added when the only -heart is inside a comment", %{root: root} do
+      # erlexec treats # as starting a comment in an args file, so the emulator
+      # really gets no -heart here and one has to be added. The previous fragment
+      # counted this as present on purpose, because it could not tell a commented
+      # flag from a live one without a comment-stripping rule that would have been
+      # wrong about the quoted hash above. Asking erlexec needs no such trade: it
+      # is the thing that decides what a comment is.
+      vm_args(root, "## an example: -heart\n-noshell\n")
+
+      run = start(root)
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.stderr == ""
+    end
+
+    test "is still added when vm.args carries other flags but no -heart",
+         %{root: root} do
+      # The ordinary deployment, whose vm.args is full of distribution settings and
+      # says nothing about heart. Nothing in it can become a -heart, so this pays
+      # for no emulator either.
+      vm_args(root, "-start_epmd false\n-erl_epmd_port 24601\n")
+
+      run = start(root)
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.stderr == ""
+      assert probes(root) == []
+    end
+
+    test "is read from the file RELEASE_VM_ARGS names, not from the default",
+         %{root: root} do
+      # RELEASE_VM_ARGS is documented as settable before the release is invoked or
+      # inside env.sh, and the launcher only defaults it *after* it has sourced
+      # this fragment - so when it is set here, it is set by the deployment and the
+      # default would be the wrong file. The default is left inert, so a fragment
+      # asking about it instead would append a second flag.
+      elsewhere = Path.join(root, "custom.vm.args")
+      File.write!(elsewhere, "-heart\n")
+
+      run = start(root, [{"RELEASE_VM_ARGS", elsewhere}])
+
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
+
+      # And the probe was told which file, rather than being left to default it
+      # the way the launcher will after this returns.
+      assert [probe] = probes(root)
+      assert probe =~ "-args_file #{elsewhere}"
+    end
+
+    test "adds one when the vm.args path does not exist at all", %{root: root} do
+      # Absent is not opaque: a path that is not there cannot carry a flag, so
+      # there is nothing to ask about and no probe. The start is going to fail on
+      # its own account when erlexec meets the same missing file - which is why
+      # the reported count is `?` rather than a number, since the emulator cannot
+      # be asked either.
+      run = start(root, [{"RELEASE_VM_ARGS", Path.join(root, "nope.vm.args")}])
+
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.env["CASTLE_HEART_FLAGS"] == "?"
+      assert run.stderr == ""
+      assert probes(root) == []
+    end
+  end
+
+  # The two ways the measurement can fail, and they take the same branch: add
+  # nothing and say so. Appending a flag that turns out to be a second one hangs
+  # the boot with nothing printed, while adding none leaves heart:set_cmd/1 raising
+  # badarg during a restart install - which fails loudly with the system still
+  # running. The two are not symmetric, so the unmeasurable case takes the one an
+  # operator can see.
+  describe "heart, when the emulator cannot be asked" do
+    test "adds nothing, and says why, when the args file cannot be read",
+         %{root: root} do
+      # A directory at the path, rather than a mode, because root and some
+      # filesystems ignore modes and this has to be the state it says it is.
+      # erlexec refuses to read it, exits non-zero and prints no argument vector.
+      path = Path.join(root, "opaque.vm.args")
+      File.mkdir!(path)
+
+      run = start(root, [{"RELEASE_VM_ARGS", path}])
+
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
+      assert run.stderr =~ "not adding -heart"
+      assert run.stderr =~ "could not be measured"
+      assert run.stderr =~ "would hang having printed nothing"
+      assert [_probe] = probes(root)
+    end
+
+    test "adds nothing when -emu_args_exit is not recognised", %{root: root} do
+      # The flag is undocumented, and this is the reason relying on it is
+      # acceptable: an emulator that no longer knows it degrades to *this*, not to
+      # a wrong answer. The probe carries a -boot naming a file that cannot exist,
+      # so such an emulator exits at once instead of starting a node, and the -root
+      # test refuses to read an answer out of output that is not an argument
+      # vector. Arranged by an erl that strips the flag before handing over.
+      legacy_erl(root)
+      vm_args(root, "-heart\n")
+
+      run = start(root)
+
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
+      assert run.stderr =~ "could not be measured"
+      assert [_probe] = probes(root)
+
+      # Nothing was booted and nothing was left behind by the attempt: a crash
+      # dump in the directory an operator started the release from would be a
+      # regression of its own.
+      assert Path.wildcard(Path.join(root, "**/erl_crash.dump")) == []
     end
   end
 
@@ -299,6 +525,12 @@ defmodule Forecastle.EnvScriptTest do
       refute run.stdout =~ @exec
       assert armed?(root)
       assert provisional?(root)
+
+      # And no emulator was asked anything, which is the sharper half now that the
+      # heart guard can start one: `bin/castle` reaches every command through
+      # `rpc`, so a fragment that probed for those would put a fork of erl in front
+      # of every release-management call.
+      assert probes(root) == []
     end
   end
 
@@ -431,7 +663,14 @@ defmodule Forecastle.EnvScriptTest do
     out = Path.join(root, "stdout")
     err = Path.join(root, "stderr")
 
-    File.write!(script, fragment() <> reporting())
+    # `set -e`, because the launcher has it: `bin/<name>` is `#!/bin/sh` followed
+    # by `set -e`, and it *sources* this fragment, so every command in here runs
+    # under it. Without it the sandbox is more forgiving than the boot path - a
+    # top-level non-zero exit would take a real launcher down and pass here - and
+    # the fragment has several commands whose failure is ordinary: a `grep -q` that
+    # finds nothing, a command substitution around an emulator that refused an args
+    # file. Each of those has to be written so that it cannot end the start.
+    File.write!(script, "set -e\n" <> fragment() <> reporting())
 
     {empty, set} = Enum.split_with(environment(root, command, env), &(elem(&1, 1) == ""))
 
@@ -448,8 +687,14 @@ defmodule Forecastle.EnvScriptTest do
     # and are exported to it by the rules for one.
     assignments = Enum.map_join(empty, "", fn {name, _} -> "#{name}= " end)
 
+    # `cd: root` so that anything an emulator drops in its working directory - a
+    # crash dump, most of all - lands inside the sandbox where a test can look for
+    # it, rather than in whatever directory the suite was started from.
     {_, status} =
-      System.cmd("sh", ["-c", ~s(#{assignments}sh "#{script}" > "#{out}" 2> "#{err}")], env: set)
+      System.cmd("sh", ["-c", ~s(#{assignments}sh "#{script}" > "#{out}" 2> "#{err}")],
+        env: set,
+        cd: root
+      )
 
     stdout = File.read!(out)
 
@@ -479,6 +724,7 @@ defmodule Forecastle.EnvScriptTest do
       {"ERL_AFLAGS", nil},
       {"ERL_FLAGS", nil},
       {"ERL_ZFLAGS", nil},
+      {"RELEASE_VM_ARGS", nil},
       {"HEART_COMMAND", nil},
       {"HEART_NO_KILL", nil},
       {"HEART_BEAT_TIMEOUT", nil}
@@ -503,37 +749,59 @@ defmodule Forecastle.EnvScriptTest do
   # it, since those cannot be reported a line at a time. Two of them is
   # init:get_argument(heart) == {ok, [[], []]}, which hangs the boot.
   #
-  # **It counts all four sources, because all four reach the emulator.** Mix's
-  # generated `elixir` expands ELIXIR_ERL_OPTIONS on the way to `erl`, and erlexec
-  # prepends ERL_AFLAGS and appends ERL_FLAGS and ERL_ZFLAGS to the command line
-  # it builds - so the argument list is the union, and a count over
-  # ELIXIR_ERL_OPTIONS alone is not the property. That is the defect: the guard
-  # looked at one variable, this counter looked at the same one, and every test
-  # agreed with the bug.
+  # **It is counted by asking an emulator, and it used to be counted by a shell
+  # loop.** That loop is how three successive defects survived: the guard modelled
+  # what erlexec would make of the environment, this counter modelled the same
+  # thing the same way, and so they agreed with each other and with the bug. It
+  # matched between spaces while the guard did; it split into fields while the
+  # guard did; it read vm.args literally while the guard did. Every version of it
+  # was refuted by the same counterexample that refuted the guard, one round late.
   #
-  # Counted the way the fragment splits - the outer expansions quoted so the four
-  # values stay apart, the inner one unquoted so each contributes its fields -
-  # which measures the argument list rather than re-asking the fragment's own
-  # question.
+  # So there is no parsing here at all. `erl -emu_args_exit` prints the argument
+  # vector erlexec assembled - out of the command line, ERL_OTP<major>_FLAGS,
+  # ERL_AFLAGS, ERL_FLAGS, ERL_ZFLAGS and every -args_file it followed, with all of
+  # erlexec's quoting, escaping and comment handling applied - one argument per
+  # line, and exits without starting a VM. A line that is exactly `-heart` is a
+  # -heart the emulator would get. **Do not replace this with a shell counter
+  # again**, whatever shape it takes: what it would be counting is somebody's model
+  # of erlexec, which is the thing under test.
+  #
+  # ELIXIR_ERL_OPTIONS is expanded unquoted and placed before -args_file because
+  # that is where Mix's generated `elixir` puts them, so this is the vector the
+  # start would really have produced rather than a rearrangement of it.
+  #
+  # The emulator is asked by its absolute path, deliberately *not* through the
+  # release's own erts-*/bin/erl - that one records the fact of being called, so
+  # that a test can tell whether the fragment probed, and this reporting must not
+  # look like a probe.
+  #
+  # `?` rather than a number when the answer is not an argument vector, which
+  # happens when erlexec refuses the args file. A count of nothing must not be
+  # reportable as a count of zero.
   defp reporting do
     """
 
     for castle_var in ELIXIR_ERL_OPTIONS ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS \\
                       HEART_COMMAND HEART_NO_KILL HEART_BEAT_TIMEOUT; do
       eval "castle_val=\\${$castle_var-<unset>}"
-      echo "env $castle_var=$castle_val"
+      printf 'env %s=%s\\n' "$castle_var" "$castle_val"
     done
 
-    castle_flags=0
-    for castle_words in "${ELIXIR_ERL_OPTIONS:-}" "${ERL_AFLAGS:-}" \\
-                        "${ERL_FLAGS:-}" "${ERL_ZFLAGS:-}"; do
-      for castle_word in $castle_words; do
-        if [ "$castle_word" = "-heart" ]; then
-          castle_flags=$((castle_flags + 1))
-        fi
-      done
-    done
-    echo "env CASTLE_HEART_FLAGS=$castle_flags"
+    castle_report_argv=$(ERL_CRASH_DUMP_SECONDS=0 "#{@erl}" \\
+                           -emu_args_exit -noinput \\
+                           -boot /nonexistent/castle-heart-report \\
+                           ${ELIXIR_ERL_OPTIONS-} \\
+                           -args_file "${RELEASE_VM_ARGS:-$REL_VSN_DIR/vm.args}" \\
+                           2>/dev/null </dev/null) || castle_report_argv=""
+
+    if printf '%s\\n' "$castle_report_argv" | grep -q '^-root$'; then
+      castle_flags=$(printf '%s\\n' "$castle_report_argv" | grep -c '^-heart$') ||
+        castle_flags=0
+    else
+      castle_flags="?"
+    fi
+
+    printf 'env CASTLE_HEART_FLAGS=%s\\n' "$castle_flags"
     """
   end
 
@@ -550,6 +818,68 @@ defmodule Forecastle.EnvScriptTest do
   defp arm(root, vsn) do
     File.write!(pending(root), "#{vsn}\n1234-5678-1\n")
     File.write!(provisional(root), "16.0 #{vsn}\n")
+  end
+
+  # Replaces the inert vm.args the setup wrote for the version the launcher is
+  # about to boot, which is the file it will pass as -args_file.
+  defp vm_args(root, contents) do
+    File.write!(Path.join([root, "releases", @vsn, "vm.args"]), contents)
+  end
+
+  # The release's own emulator, at the path Mix's generated `elixir` resolves
+  # ERTS_BIN to and the fragment resolves its probe through. It records that it was
+  # called, with its arguments, and then hands over to the real one - so whether
+  # the fragment probed, how often, and what it asked are observable, which nothing
+  # about the resulting environment says.
+  #
+  # A recording wrapper rather than a stub answer, because a stub would make every
+  # case about the wrapper's idea of erlexec instead of about erlexec.
+  defp probing_erl(root) do
+    install_erl(root, ~s|exec "#{@erl}" "$@"\n|)
+  end
+
+  # The same, for an emulator that does not know -emu_args_exit: it strips the flag
+  # and hands the rest over, which is what a future OTP that dropped it would
+  # effectively do - erlexec would pass the unknown flag through and try to boot.
+  # That is the case the fragment has to degrade safely on rather than answer
+  # wrongly, and there is no other way to arrange it.
+  defp legacy_erl(root) do
+    install_erl(root, """
+    castle_n=$#
+    castle_i=0
+    while [ $castle_i -lt $castle_n ]; do
+      case $1 in
+        -emu_args_exit) ;;
+        *) set -- "$@" "$1" ;;
+      esac
+      shift
+      castle_i=$((castle_i + 1))
+    done
+    exec "#{@erl}" "$@"
+    """)
+  end
+
+  defp install_erl(root, body) do
+    path = Path.join([root, "erts-16.2", "bin", "erl"])
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(path, """
+    #!/bin/sh
+    echo "probe: $*" >> "#{Path.join(root, "probes")}"
+    #{body}
+    """)
+
+    File.chmod!(path, 0o755)
+  end
+
+  # One entry per invocation of the release's own erl, each the arguments it was
+  # given. Split on the marker rather than on newlines, because an argument may
+  # carry one.
+  defp probes(root) do
+    case File.read(Path.join(root, "probes")) do
+      {:ok, log} -> String.split(log, "probe: ", trim: true)
+      {:error, :enoent} -> []
+    end
   end
 
   defp pending(root), do: Path.join(root, "releases/castle-restart-pending")

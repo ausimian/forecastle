@@ -212,36 +212,85 @@ defmodule Forecastle.AssemblyTest do
       # fragment is read twice on a provisional start, because it re-execs the
       # launcher, so without this guard every such boot would hang.
       #
-      # The assembly-level claim is that the guard is in the shipped env.sh, that
-      # it looks at *fields* rather than at text, and that it looks at every
-      # variable that carries a flag to the emulator. Which values it recognises
-      # is `Forecastle.EnvScriptTest`'s, by running it, and whether a real boot
-      # survives an inherited one is `Forecastle.RestartUpgradeTest`'s.
-      assert env_sh =~ ~s(for castle_opt in $castle_opts; do)
-      assert env_sh =~ ~s|[ "$castle_opt" = "-heart" ]|
+      # The assembly-level claim is that the guard in the shipped env.sh *asks the
+      # emulator* rather than reading the environment and deciding for itself, and
+      # that it asks with everything the start will be given. Which values it
+      # recognises is `Forecastle.EnvScriptTest`'s, by running it against a real
+      # erlexec, and whether a real boot survives an inherited flag is
+      # `Forecastle.RestartUpgradeTest`'s.
+      #
+      # `erl -emu_args_exit` prints the argument vector erlexec assembled and exits
+      # without starting a VM, so it covers all six sources at once - the command
+      # line, ERL_OTP<major>_FLAGS, ERL_AFLAGS, ERL_FLAGS, ERL_ZFLAGS and every
+      # -args_file followed out of vm.args - with erlexec's own quoting, escaping
+      # and comment handling.
+      assert env_sh =~ "-emu_args_exit"
+      assert env_sh =~ ~s(grep -q '^-heart$')
 
-      # All four sources. ELIXIR_ERL_OPTIONS is the one Mix's `elixir` expands;
-      # erlexec prepends ERL_AFLAGS and appends ERL_FLAGS and then ERL_ZFLAGS to
-      # the command line it builds, and each of those reaches
-      # init:get_argument(heart) on its own. The guard read the first alone, so a
-      # deployment with -heart in any of the others got a second flag appended and
-      # hung its boot.
-      for source <- ~w(ELIXIR_ERL_OPTIONS ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS) do
-        assert env_sh =~ ~s("${#{source}:-}"), "the -heart guard does not read #{source}"
-      end
+      # Asked of the emulator the launcher will run: the release's own, resolved by
+      # the same glob Mix's `elixir` rewrites ERTS_BIN with, falling back to PATH
+      # for a release that brought no ERTS. ERL_OTP<major>_FLAGS is named for that
+      # binary's OTP version, so asking a different one would be asking about a
+      # different deployment.
+      assert env_sh =~ ~s|"$RELEASE_ROOT"/erts-*/bin/erl|
 
-      # And the defect refuted by shape. The launcher expands these variables
-      # unquoted, so tabs and newlines separate fields as surely as spaces do,
-      # and a pattern bounded by literal spaces misses a -heart on either side of
-      # one - appends a second, and hangs the boot.
+      # And asked with what the start will be given. ELIXIR_ERL_OPTIONS is expanded
+      # *unquoted* and before -args_file, because that is what Mix's `elixir` does
+      # with it, so an -extra in that variable swallows the args file here exactly
+      # as it would on the boot.
+      assert env_sh =~ "${ELIXIR_ERL_OPTIONS-} \\\n"
+      refute env_sh =~ ~s("${ELIXIR_ERL_OPTIONS-}" \\\n)
+      assert env_sh =~ ~s(-args_file "$castle_vm_args")
+
+      # The args file is the effective one, and the default is spelled with
+      # REL_VSN_DIR because the launcher does not set RELEASE_VM_ARGS until *after*
+      # it has sourced this file.
+      assert env_sh =~ ~s(${RELEASE_VM_ARGS:-$REL_VSN_DIR/vm.args})
+
+      # The probe must never boot anything, and the -boot it carries is what makes
+      # that true even if -emu_args_exit - which is undocumented - ever stops being
+      # recognised: erlexec would pass it through, and the emulator would then fail
+      # on a boot file that cannot exist instead of starting a node. The -root test
+      # is the other half, refusing to read an answer out of output that is not an
+      # argument vector.
+      assert env_sh =~ "-boot /nonexistent/castle-heart-probe"
+      assert env_sh =~ ~s(grep -q '^-root$')
+      assert env_sh =~ "ERL_CRASH_DUMP_SECONDS=0"
+
+      # The gate, which is what keeps an ordinary start from paying for any of
+      # this: a value carrying none of `heart`, `args_file`, a quote, a backslash
+      # or a glob character cannot become the token -heart. Read with the `read`
+      # builtin rather than with grep or cat, because on the common path the gate
+      # must not fork either.
+      assert env_sh =~ ~S(*heart* | *args_file* | *\'* | *\"* | *\\*)
+      assert env_sh =~ ~s(while IFS= read -r castle_line)
+
+      # No timeout, no polling, no killing: the probe cannot hang, because it
+      # starts no emulator. A deployment that already carries two -heart flags -
+      # which is the boot this whole block exists to prevent - makes it print two
+      # lines and exit 0.
+      refute env_sh =~ "sleep"
+
+      # And the three shapes this has been wrong in, refuted rather than merely
+      # superseded, because each of them reads as the obvious spelling and each
+      # shipped with a test in this repository that agreed with it.
+      #
+      # A match bounded by literal spaces: the launcher expands these variables
+      # unquoted, so tabs and newlines separate fields as surely as spaces do.
       refute env_sh =~ ~s(case " ${ELIXIR_ERL_OPTIONS:-} " in)
       refute env_sh =~ ~s(*" -heart "*)
 
-      # The other shape that was wrong: one variable, expanded unquoted straight
-      # into the loop. It is refuted rather than merely superseded because it is
-      # what the fix has to not revert to, and because it reads as the obvious
-      # spelling.
+      # A split into fields, compared against the literal flag: erlexec unquotes
+      # what it reads out of the environment, so `'-heart'`, `"-heart"` and
+      # `-he\art` are all -heart to the emulator and none of them to that.
+      refute env_sh =~ ~s|[ "$castle_opt" = "-heart" ]|
       refute env_sh =~ ~s(for castle_opt in ${ELIXIR_ERL_OPTIONS:-}; do)
+
+      # And a literal scan of the args file, which misses the same escapes, misses
+      # a nested -args_file, and cannot tell a commented flag from a live one
+      # without a comment rule erlexec does not share.
+      refute env_sh =~ ~s|for castle_opt in $(cat "$castle_vm_args")|
+      refute env_sh =~ "sed 's/#"
     end
 
     test "selects a provisional version from two markers, and consumes them",

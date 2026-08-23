@@ -1,3 +1,40 @@
 ## Distribution without epmd, so that the test suite needs no epmd daemon.
 -start_epmd false
 -erl_epmd_port <%= System.get_env("SAMPLE_EPMD_PORT", "24601") %>
+
+## And, for the suites that ask for it at assembly time, a -heart. It is the e2e
+## half of a guard test rather than something this fixture needs.
+##
+## The launcher passes this file to the emulator as -args_file, so this is a real
+## source of -heart alongside ELIXIR_ERL_OPTIONS and the flag variables erlexec
+## reads. A fragment that misses it appends a second flag,
+## init:get_argument(heart) answers {ok, [[], []]}, heart's own
+## check_start_heart/0 has no clause for that, and the boot hangs having printed
+## nothing - so every e2e start of such a release would time out rather than fail.
+##
+## **`Forecastle.RestartUpgradeTest` asks for it spelled `-he\art`, and that is
+## the point of it.** erlexec's args-file parser removes the backslash and hands
+## the emulator -heart; measured, and `init:get_argument(heart)` on the booted node
+## is `{ok, [[]]}`, which that suite asserts. So the only way for the env.sh
+## fragment to see this flag is to ask erlexec what the argument vector came out
+## as. Every reading of the environment that castle#14/forecastle#10 tried before
+## that - a match between spaces, a split into fields, a literal scan of this
+## file - passes straight over it, appends a second, and hangs the boot.
+##
+## **It is opt-in rather than always here because -heart is not quiet.** heart
+## prints `heart_beat_kill_pid = <pid>` on every VM started with this args file and
+## a pair of lines on the way out, and `eval` uses this file too - so a -heart here
+## by default lands in the middle of the output `Forecastle.ConfigurationTest`
+## asserts on exactly. A suite that wants one passes it to `assemble!/1`.
+##
+## One consequence worth stating rather than leaving to be rediscovered: these
+## comments say "heart", so the fragment's gate cannot rule this file out, and
+## every start of every release assembled from this fixture asks the emulator once
+## whether or not SAMPLE_HEART was set. That is a fork of erlexec, which exits
+## without starting a VM, and it is the direction the gate is deliberately wrong
+## in - a false positive costs a probe, a false negative would cost the boot.
+##
+## Which means: do not "tidy" the spelling into a plain -heart, and do not add
+## -heart to ELIXIR_ERL_OPTIONS or one of the ERL_*FLAGS in a suite that boots a
+## release assembled with this, because two of them is the hang.
+<%= System.get_env("SAMPLE_HEART", "") %>

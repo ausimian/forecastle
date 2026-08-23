@@ -232,20 +232,37 @@
   `{ok, [[], []]}`, which heart's own startup check has no clause for, and the
   boot hangs having printed nothing.
 
-  **Four variables can carry it, and all four are checked.**
-  `ELIXIR_ERL_OPTIONS` is the one Mix's generated `elixir` expands; `erl` itself
-  prepends `ERL_AFLAGS` and appends `ERL_FLAGS` and then `ERL_ZFLAGS` to its
-  effective command line, and a `-heart` in any of those reaches
-  `init:get_argument/1` exactly as one on the command line does. A deployment that
-  set one of the three used to receive the flag it already had plus the appended
-  one, which is the boot hang above. `ERL_OTP<major>_FLAGS` is deliberately not
-  checked: `erl`'s own source calls it undocumented and for OTP internal use, and
-  its name carries a version the hook would have to start a VM to learn.
+  **Whether the emulator is already going to get one is measured rather than
+  guessed at, and there is more than one way for it to arrive.**
+  `ELIXIR_ERL_OPTIONS` is the variable Mix's generated `elixir` expands; `erl`
+  itself prepends `ERL_AFLAGS` and appends `ERL_FLAGS` and then `ERL_ZFLAGS` to
+  its effective command line; and the launcher passes `vm.args` as `-args_file`,
+  so a project's own `rel/vm.args.eex` carries flags too - and `erl` follows a
+  nested `-args_file` out of it. A flag arriving by any of those routes reaches
+  `init:get_argument/1` exactly as one on the command line does, and a deployment
+  that had one used to receive it plus the appended one, which is the boot hang
+  above.
 
-  An inherited flag is recognised however it is spaced. These variables are
-  expanded unquoted, so their fields - separated by spaces, tabs or newlines
-  alike - are what reach the emulator, and the hook splits them the same way
-  rather than looking for text between two spaces.
+  It is recognised however it is written, which is why the hook does not read
+  these itself: `erl` applies shell-style quoting and backslash escaping to
+  everything it takes from the environment and from an args file, so `'-heart'`,
+  `"-heart"` and `-he\art` all arrive as `-heart` without containing the word.
+  The hook therefore asks `erl` - with the start's own environment and args file,
+  and without starting a VM - what argument list it would build, and adds a flag
+  only if that list has none. A start whose flag variables are unset or
+  unremarkable, and whose `vm.args` is ordinary, asks nothing and costs nothing.
+
+  Where the question cannot be answered - an args file `erl` refuses to read, for
+  instance - the hook adds nothing and says so on standard error. That direction
+  is deliberate: adding a flag that turns out to be a second one hangs the boot
+  in silence, while adding none makes an upgrade that restarts the emulator fail
+  loudly with the system still running.
+
+  `ERL_OTP<major>_FLAGS` is covered whenever the question is asked, but a
+  deployment that sets *only* that variable - undocumented, and described by
+  OTP's own source as for internal use - is not detected and will hang, because a
+  POSIX shell cannot look for a variable whose name it does not know without
+  making every ordinary start pay for the search.
 
   All three variables are **assigned**, and `HEART_COMMAND` is **unset**, rather
   than defaulted - so a deployment that already has any of them in its
@@ -271,11 +288,12 @@
   asserting that it does, that an uncommitted provisional release rolls back when
   it is killed, and that committing makes it the version an ordinary start boots.
   The restart suite runs the whole transition on a deployment whose environment
-  already carries a `HEART_COMMAND`, a `HEART_NO_KILL` of `FALSE`, an 11-second
-  beat timeout and an `ERL_AFLAGS` whose `-heart` is separated by tabs, and asks
-  the running node what it was actually started with. That start is given a
-  deadline, because a boot handed two `-heart` flags hangs rather than fails and
-  would otherwise stop the suite for as long as whatever ran it would wait. The `env.sh` hook is also run directly, over a release-shaped directory,
+  already carries a `HEART_COMMAND`, a `HEART_NO_KILL` of `FALSE` and an
+  11-second beat timeout, and whose `vm.args` supplies a `-heart` spelled
+  `-he\art`, and asks the running node what it was actually started with. That
+  start is given a deadline, because a boot handed two `-heart` flags hangs rather
+  than fails and would otherwise stop the suite for as long as whatever ran it
+  would wait. The `env.sh` hook is also run directly, over a release-shaped directory,
   so that what it selects and what environment it leaves behind are asserted by
   observation rather than by reading the script.
 
