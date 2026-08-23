@@ -12,9 +12,9 @@ build-time dependency — Forecastle is not intended to be taken directly.
 
 - **`pre_assemble/1`** — checks and stages any `relup`, and adds a `:preboot`
   boot script that starts `:sasl`, `:compiler`, `:elixir` and `:castle`.
-- **`post_assemble/1`** — writes `bin/castle`, appends the Castle hook to the
-  generated `env.sh`, and copies the `.rel` file and any staged `relup` into the
-  release.
+- **`post_assemble/1`** — writes `bin/castle` and `bin/start`, appends the Castle
+  hook to the generated `env.sh`, and copies the `.rel` file and any staged
+  `relup` into the release.
 
 **Nothing here touches configuration, and nothing new may.** Forecastle used to
 intercept all of it: `:runtime_config_path` set to `false`, a substitute
@@ -185,14 +185,116 @@ around it composes instead:
   to know where a system stands without staging anything. It is a plain command
   like `releases`, gates nothing, and says nothing when the answer is yes.
 - The `env.sh` fragment expands no configuration and applies none of the
-  launcher's defaults; on every start after the first it does nothing at all. It
-  is appended, so a project's own `rel/env.sh.eex` survives and runs first, and
-  it is where [#10](https://github.com/ausimian/forecastle/issues/10) will
-  consume the provisional restart marker.
-- Version selection needs no code at all *after commit*: `release_handler` writes
-  the committed version to `releases/start_erl.data`, which is where the standard
-  launcher already reads `RELEASE_VSN` from. It does not hold for a transition
-  that restarts the emulator, which is #10.
+  launcher's defaults. It is appended, so a project's own `rel/env.sh.eex`
+  survives and runs first, and everything in it is gated on
+  `$RELEASE_COMMAND` naming a command that starts the system — so an `eval`, an
+  `rpc` or a `remote` reaches none of it. That gate is not tidiness: `bin/castle`
+  drives every command through `rpc`, so a fragment that ran for those would
+  consume the provisional marker while an install was still waiting for the
+  reboot. Three things are in it: the `RELEASES` bootstrap above, and the two
+  [#10](https://github.com/ausimian/forecastle/issues/10) added, below.
+- **The provisional version, after a transition that restarted the emulator.**
+  `release_handler` writes the installed version to
+  `releases/new_start_erl.data` and deliberately leaves
+  `releases/start_erl.data` — where the stock launcher reads `RELEASE_VSN` from —
+  naming the version that is still permanent. That is the rollback property, and
+  only `make_permanent/1` ever writes that file. So version selection needs no
+  code at all *after commit*, and needs this before it.
+
+  **Two markers are required, and both are consumed.** OTP's is written *before*
+  the reboot and nothing removes it, so on its own it is not evidence that a
+  reboot was asked for: a preparation that failed after writing it leaves a file
+  naming a version that was never installed. Castle arms
+  `releases/castle-restart-pending` with the same version immediately before
+  asking for such an install and clears it if the install failed, so the pair is
+  what says a reboot happened — and they have to agree on the version. See
+  castle#14 for the arming side.
+
+  **The pending marker is claimed by rename**, which is atomic, so whichever
+  start wins it is the only consumer; everything after that is exclusive, which
+  is why OTP's marker is then simply read and removed. Both are gone before the
+  launcher is re-exec'd, which is what stops the second pass recurring.
+
+  **It re-execs `$RELEASE_ROOT/bin/<name>` rather than assigning `RELEASE_VSN`.**
+  By the time the launcher sources `env.sh` it has already computed
+  `REL_VSN_DIR`, and everything after that hangs off it — `RELEASE_VM_ARGS`,
+  `RELEASE_REMOTE_VM_ARGS`, `RELEASE_SYS_CONFIG`, the boot script, the `elixir`
+  launcher itself. Assigning the version in place boots the old version's
+  everything under the new version's name. A sourced file still sees the
+  caller's positional parameters, so `exec … "$@"` loses nothing about how the
+  launcher was invoked, and the launcher path is interpolated at assembly time
+  the way `bin/castle` interpolates it rather than taken from `$0`.
+
+  The version is validated before any of that: non-empty, no path separator, and
+  a version directory that has an `env.sh` and a `start.boot` in it — the first
+  because the next pass sources it and the second because it is what boots. A
+  pair that does not settle warns and boots the permanent version; no pair at all
+  says nothing and does nothing.
+
+  `bin/<name> version` still reports the version in `start_erl.data`, so during a
+  provisional boot it names the *previous* one while the node runs the installed
+  one. That is right rather than a defect: it prints "the version to be booted",
+  which for an uncommitted release is the rollback target. Ask the node if you
+  want to know what is running.
+- **`heart`, run deliberately defanged.** `release_handler` calls
+  `heart:set_cmd/1` while preparing *any* transition that restarts the emulator —
+  `prepare_restart_new_emulator/7`, which both restart instructions go through —
+  and with no `heart` process that raises `badarg`, so the install failed before
+  `init:reboot()` on exactly the externally supervised release this library is
+  for. Running the real heart satisfies the handshake through documented
+  interfaces only. The alternative, a Castle process registered as `heart`
+  answering the internal `{Caller, set_cmd, Cmd}` protocol, was refused:
+  `heart:wait/0` is a `receive` with no `after`, so a shim that took the message
+  and died would wedge `release_handler`'s gen_server for the life of the node.
+
+  heart must then do nothing, because the supervisor is the only thing that
+  starts this release and two authorities starting one service is worse than the
+  problem being solved. `HEART_COMMAND` is not set. `HEART_NO_KILL=TRUE`.
+  `HEART_BEAT_TIMEOUT` is raised to heart's documented maximum, 65535. And
+  `$ROOT/bin/start` — the next entry — does nothing.
+
+  **`HEART_NO_KILL` and the inert `bin/start` are a mandatory pair.** Measured on
+  OTP 28.3, with the beam `SIGSTOP`ed so heartbeats stop while the process stays
+  alive: heart declines to kill it and **runs the command anyway**. So a
+  `bin/start` that really started the release would start it beside a live node,
+  precisely because heart was told not to kill that node. The documentation says
+  as much once read carefully — *"useful if the command executed by heart takes
+  care of this"*.
+
+  **`HEART_BEAT_TIMEOUT` is not decoration either, and it is the one place
+  castle#14's agreed design was incomplete.** `HEART_NO_KILL` does not make a
+  heart-beat time-out harmless. The port program terminates once it has run the command; the Erlang
+  `heart` process then exits `{port_terminated, …}`; heart is a *kernel* process,
+  linked to `init` by `new_kernelpid/3`; and `init:terminate/3` halts the node
+  when a kernel pid dies. Measured, again on OTP 28.3: the node survived while
+  suspended and died the moment it resumed, with
+  `Kernel pid terminated (heart) ({port_terminated, …})` and a crash dump. So
+  `-heart` at the 60s default introduces a way for a stalled node to be killed
+  that a deployment without it did not have, and heart is here to satisfy a
+  handshake rather than to watch anything. The maximum timeout is what keeps that
+  unreachable.
+
+  `HEART_NO_KILL` and `HEART_BEAT_TIMEOUT` are defaulted rather than assigned, so
+  a deployment that set either keeps its value, and `-heart` is appended to
+  `ELIXIR_ERL_OPTIONS` **only if it is not already there**. That last guard is load bearing, not hygiene: two `-heart` flags make
+  `init:get_argument(heart)` answer `{ok, [[], []]}`, which
+  `heart:check_start_heart/0` has no clause for, and the boot hangs with nothing
+  printed — measured. The fragment is read twice on a provisional start, so
+  without the guard the re-exec would hang every such boot.
+
+  Incidental, measured: heart prints `heart_beat_kill_pid = <pid>` on every
+  start, and `heart_beat_timeout = <n>` when the variable is set. Two lines of
+  noise on the release's own output, not a fault.
+- **`$ROOT/bin/start`, inert.** `install_start_program/1` writes it, and
+  `priv/start.sh.eex` is the whole of it: a comment and `exit 0`. It is at the
+  *default* `start_prg` path deliberately — `init/1` yields
+  `{no_check, filename:join([Root, "bin", "start"])}` when `{sasl, start_prg}` is
+  unset, and `check_start_prg/2` returns that unexamined, so it needs no
+  configuration; naming a path of our own means `{do_check, _}` and injecting
+  `:sasl` configuration into the release, which is the interception #6 removed.
+  Measured, since it was previously only inferred: heart *does* run this command
+  on `init:reboot()` with `HEART_COMMAND` unset, receiving the data file as `$1`.
+  So it has to exist and exit 0; it is load bearing rather than decorative.
 
 ## Relup generation and upgrade strategy
 
@@ -243,8 +345,8 @@ chosen it. That is the gap `auto` exists to close, and it closes it twice:
   `restart_new_emulator` itself, and then `auto` refuses the relup rather than
   writing it, because the two-stage transition is not supported at all.
   `restart_emulator` from an appup is the same transition `auto` would have
-  chosen for itself, so it is settled the same way `auto`'s own choice is (see
-  the temporary refusal below). `--hot` refuses both.
+  chosen for itself, so it is settled the same way `auto`'s own choice is — named
+  in the one announcement below. `--hot` refuses both.
 
 **A restart relup is written directly, never through `:systools`.** That is the
 only way to be certain which instruction lands: `make_relup/4`'s own
@@ -314,112 +416,81 @@ compare.** Verified against OTP 28.3, `sasl-4.3`:
   tests"), so **call it**; do not reimplement the matching, and do not compare
   strings, or `auto` and the `:systools` run a moment later will disagree.
 
-**`auto` refuses a restart edge unconditionally, and that is temporary.** Castle
-cannot *complete* a restart transition yet: `heart:set_cmd/1` raises `badarg`
-with no `heart` process, so the install fails before the reboot, and the reboot
-would return on the old permanent version anyway. `auto` is the no-switch
-default, so emitting a restart edge from it means a routine invocation producing
-a relup that cannot be installed — worse than refusing and saying why. `--hot`
-and `--restart` are unaffected: both are explicit requests.
+**`auto` announces a restart edge; it used to refuse one.** The refusal existed
+because Castle could not *complete* such a transition — `heart:set_cmd/1` raised
+`badarg` with no `heart` process — and `auto` is the no-switch default, so
+emitting a restart edge meant a routine invocation producing a relup that could
+not be installed. [castle#14](https://github.com/ausimian/castle/issues/14) and
+[#10](https://github.com/ausimian/forecastle/issues/10) closed that, and
+`settle_restarts!/2` is now the whole of the verdict: `([], [])` is the all-hot
+line and everything else is one `Mix.shell().info/1` naming both kinds.
 
-**There is no flag, predicate or environment variable that turns the refusal into
-an announcement, and adding one would be wrong.** An earlier revision of this
-branch had one — `restart_transitions_installable?/0`, a private function
-returning a literal `false`, consulted by `refuse_chosen_restarts!/1` and
-`settle_restarts!/2` — and it is gone. Elixir 1.20's type inference proves the
-`true` branch of both call sites dead and `mix compile --warnings-as-errors`
-fails on them, which is what took CI red on all six 1.20 cells. Every way of
-hiding that from inference is worse than deleting the branches: reading
-application env or a switch makes the gate user-flippable, and a user who flips
-it gets precisely the uninstallable relup the gate exists to prevent; a module
-attribute folds to the same literal; there is no suppression pragma. The
-warnings were also correct — nothing reached those branches, and nothing tested
-them. Do not reintroduce a gate.
+**A history worth keeping, because it constrains how the announcement is
+written.** An earlier revision of this work had a gate —
+`restart_transitions_installable?/0`, a private function returning a literal
+`false`, consulted from two call sites. Elixir 1.20's type inference proved the
+`true` branch of both dead and `mix compile --warnings-as-errors` failed on them,
+which took CI red on all six 1.20 cells. That is why the refusal was deleted
+rather than made conditional, and why nothing here may grow a predicate the
+compiler can fold: reading application env or a switch makes it user-flippable, a
+module attribute folds to the same literal, and there is no suppression pragma.
+The lesson generalises past this feature — a feature gate whose branches nothing
+reaches is a compile error waiting for the next Elixir.
 
-**What [castle#14](https://github.com/ausimian/castle/issues/14) (with
-[#10](https://github.com/ausimian/forecastle/issues/10)) has to add.** Not a
-flip: the announcement does not exist, and the code that decides *when* to speak
-has to move. In `lib/mix/tasks/forecastle.relup.ex`:
-
-- **`refuse_chosen_restarts!/1` goes away, and with it the pre-generation
-  refusal.** It sits before generation only because, while the outcome is a
-  refusal whatever the hot remainder turns out to be, a `:systools` error from
-  that remainder would otherwise stand in front of the real reason. Once the run
-  can proceed there is nothing to settle early — and settling early is what made
-  a run contradict itself once already (see *One verdict per invocation* below).
-- **`settle_restarts!/2` becomes the only verdict, and its second clause
-  announces instead of refusing.** That clause already receives both lists:
-  `chosen`, the edges classification decided must restart, and `found`, the
-  one-stage restarts `appup_restarts!/1` returned from the generated relup. Both
-  are the same kind of transition, so they are named together, in one
-  `Mix.shell().info/1`, built the way `refuse_restarts!/2` builds its message —
-  `describe_causes/3` with a phrase of its own, over the same
-  `describe_edges/1` and `describe_restarts/1`. `describe_causes/3` takes that
-  phrase as an argument for exactly this reason; it has a single caller today.
-  Say that each restart is one `restart_emulator`, so `install_release/1`
-  replies `{ok, Vsn, Descr}` rather than `{continue_after_restart, Vsn, Descr}`
-  and the emulator then reboots, and name `--hot` and `--restart` as the two
-  ways to choose otherwise.
-- **The `([], [])` clause does not move and does not gain a sibling.** It is the
-  all-hot line, and it is only true after generation.
-- **`refuse_restarts!/2` and `describe_remedies/2` go with the refusal.** Once
-  nothing refuses they have no caller, and keeping them against a hypothetical
-  regression is the same mistake as keeping a gate. What the announcement reuses
-  is `describe_causes/3`, `describe_edges/1` and `describe_restarts/1` — the
-  last of which `--hot`'s `refuse_hot_restarts!/1` and `appup_restarts!/1` share
-  and which is not going anywhere.
-- **`appup_restarts!/1`'s refusal of the two-stage `restart_new_emulator` must
-  not become conditional.** It is gated on nothing today and it stays that way:
-  Castle is built for the one-stage instruction, and that is independent of
-  whether a restart transition can be completed.
-
-The tests that have to change, in `test/forecastle/relup_test.exs`:
-
-- **The mixed-restart assertions invert.** "settles the restart it chose without
-  generating the rest of the relup" and "refuses the restart it chose rather
-  than a systools error from the rest" both pin today's *single*-cause
-  behaviour: a non-zero exit, one cause named, `refute output =~ "an appup asks
-  for the emulator to be restarted"`, and no relup on disk. Once the run
-  proceeds, all of that inverts — zero exit, a relup written, and **both** causes
-  in the one announcement. Their comments say as much.
-- **The all-hot refutation stays exactly as it is.** `refute_all_hot/1` matters
-  *more* afterwards, not less: a *successful* run printing both the all-hot line
-  and a restart is the contradiction that shipped once.
-- **The announcement needs coverage of its own.** Nothing executes it today, so
-  do not assume the wording works: assert it for a classified restart edge, for
-  an appup-supplied one, and for a plan carrying both.
-- **The merge tests keep working unchanged.** What changes is that
-  `plan_transitions!/5` stops being the *only* way to reach the merge, so the
-  task-level cases can assert the merged relup too.
+**`appup_restarts!/1`'s refusal of the two-stage `restart_new_emulator` is gated
+on nothing and stays that way.** It never was about whether a restart could be
+completed. Castle is built for the one-stage instruction, and the two-stage one
+reboots into a temporary hybrid release whose version directory has no `env.sh`,
+no `elixir` and no `vm.args` — so there is nothing for the launcher to boot and
+Castle arms no marker for it.
 
 **One verdict per invocation.** A restart reaches an `auto` run two ways — `auto`
 classified the edge as one, or an appup named `restart_emulator` itself — and only
-the first is knowable before the relup exists.
+the first is knowable before the relup exists. So nothing is settled until after
+generation: the all-hot line and the restart announcement both live in
+`settle_restarts!/2`, which runs there. Announcing from classification alone says
+every transition is hot and then reports a restart; that shipped once, and now
+that such a run *succeeds* it would print both from a successful invocation. Do
+not add a second announcement anywhere else. `relup_test.exs` asserts the
+all-hot line is absent from every `auto` case that ends in a restart —
+`refute_all_hot/1` matters more now, not less.
 
-The all-hot line therefore lives only in `settle_restarts!/2`'s `([], [])` clause,
-which runs after generation. Announcing from classification alone says every
-transition is hot and then reports a restart; that shipped once, and once the
-announcement lands it would be a *successful* run printing both. Do not add a
-second announcement anywhere else. `relup_test.exs` asserts the all-hot line is
-absent from every `auto` case that ends in a restart.
+**Where the earlier plan for this change was wrong, so it is not re-derived.**
+This file used to carry a step-by-step account of what castle#14 had to add here,
+and one item of it did not survive contact. It said the two mixed-restart tests
+both inverted to "zero exit, a relup written, and both causes in the one
+announcement". That is true of the first — now *"names both kinds of restart in
+one announcement"* — and false of the second: that test deliberately removes
+`sample.appup` so the hot half cannot be generated at all, and once the
+pre-generation refusal is gone, generation runs first and the `:systools` error
+*is* the verdict. It is now *"reports a systools error from the hot half rather
+than announcing anything"*, and what it pins is the new ordering rather than the
+old one. There is nothing left to announce about a relup that was not produced.
 
-While restarts are uninstallable, though, a classified restart edge makes the
-outcome a refusal *whatever* generation does — so generating first only lets a
-`:systools` failure on the hot remainder stand in front of the real reason, which
-a user would fix in order to be told about the restart anyway. Hence the
-pre-generation refusal. Its accepted cost: a mixed plan names the classified edge
-and stays silent about an appup-supplied restart in the hot half until the first
-one is gone.
+Everything else in that plan held: `refuse_chosen_restarts!/1`,
+`refuse_restarts!/2` and `describe_remedies/2` are gone with the refusal;
+`describe_causes/3`, `describe_edges/1` and `describe_restarts/1` are what the
+announcement reuses; and `plan_transitions!/5` stays `@doc false`-public even
+though the task reaches the merge now, because what the merge tests assert is a
+term rather than anything the task prints.
 
-Because of that refusal the split-and-merge — the path that puts hand-written
-restart entries and generated hot ones into one relup — is unreachable through
-the task. It is still the defining behaviour of `auto`, so
-`plan_transitions!/5` is `@doc false`-public and `relup_test.exs` drives it
-in process. Keep the settling **outside** that function rather than inside it;
-that is what keeps the merge testable, and it is where the announcement above
-will have to go. What must stay inside is the unconditional refusal of
-`restart_new_emulator` (`appup_restarts!/1`), which is not conditional on
-anything: it returns the one-stage restarts and raises on the two-stage ones.
+The announcement is covered in the three shapes it can take — a restart
+classification chose, one an appup asked for by name, and a plan carrying both —
+and each of those cases now asserts the *relup* as well as the wording, because
+an announcement is a claim about a file and the file is the thing that gets
+installed.
+
+The split-and-merge — the path that puts hand-written restart entries and
+generated hot ones into one relup — is reachable through the task now, and the
+mixed-restart cases in `relup_test.exs` go through it. `plan_transitions!/5`
+stays `@doc false`-public anyway, and `relup_test.exs` still drives it in
+process, because what those tests assert is the *shape* of the merged plan: which
+from-version keeps which script, in which direction. That is a term, and reading
+it back off disk through the task would say less. Keep the settling **outside**
+that function rather than inside it; that is what keeps the merge callable. What
+must stay inside is the unconditional refusal of `restart_new_emulator`
+(`appup_restarts!/1`), which is not conditional on anything: it returns the
+one-stage restarts and raises on the two-stage ones.
 
 **The merge tests have to pin the direction, not just the shape.** Both sections
 of the fixture's mixed relup carry the same from-versions, the same restart
@@ -452,6 +523,7 @@ changing the fixture.
 | `lib/mix/tasks/forecastle.relup.ex` | `mix forecastle.relup` — chooses an upgrade strategy per transition, and writes the relup |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
+| `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it |
 | `test/support` | The workspace the fixture is built in, the case template for tests that build it, and the helpers that drive one once it is built |
@@ -486,10 +558,35 @@ directory to start from a clean slate.
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
 | `test/forecastle/relup_test.exs` | `mix forecastle.relup` as a command, against three assembled releases: argument handling, exit status, and all three upgrade strategies |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load, tagged `:e2e` |
+| `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 
 The `:e2e` suite is excluded by default and included by `mix precommit`. Run it
 on its own with `mix test --include e2e`. It needs no epmd daemon: the fixture
 configures distribution without one.
+
+`restart_upgrade_test.exs` is the hot suite's opposite where it counts —
+`refute provisional.os_pid == booted.os_pid` against the hot suite's
+`assert installed.os_pid == booted.os_pid` — and it has one thing no other suite
+does: **it is the supervisor.** Nothing in the release restarts it after
+`init:reboot()`, deliberately, so `Forecastle.Deployment.install_supervised!/3`
+runs `bin/castle install` in a task, waits for the old *operating system process*
+to go, and starts the release again. Waiting on the process rather than on the
+node matters: a node that has stopped answering rpc is not necessarily one that
+has exited, and starting the replacement while the old beam still holds the
+distribution port is a name clash rather than a boot.
+
+Three of its assertions are load bearing in ways the obvious ones are not.
+`RELEASE_VM_ARGS`, which `runtime.exs` reads with `fetch_env!`, is derived by the
+launcher from `REL_VSN_DIR` *after* `env.sh` is sourced — so the provisional
+node reporting the *new* version's `vm.args` is what says the fragment re-execs
+rather than assigning `RELEASE_VSN` in place. `SAMPLE_GREETING` changes between
+the first boot and the provisional one, so the provisional node answering the
+second value is what says the version's own config providers ran again over the
+`sys.config` Castle materialised — which is also the only coverage of that
+interaction anywhere. And the rollback half comes *before* the commit half,
+because the only way to see a provisional release roll back is to kill one; the
+second install then goes through the same transition again from the release that
+came back.
 
 `configuration_test.exs` is where the two #6 defects are pinned, and it is
 deliberately behavioural: there is nothing left in `lib/` to unit-test, so what
@@ -518,32 +615,38 @@ returns its argument, which is what makes the second observable at all.
   `test/forecastle/upgrade_test.exs` covers that shape with `:sample_dep`, whose
   version changes and whose appup asks for nothing.
 - **Root scripts do not update through a hot upgrade.** `release_handler`
-  extracts with `keep_old_files`, so `bin/<release>` and `bin/castle` are
-  whatever the deployment was first built with. New files do appear, so a
-  migrating deployment gains `bin/castle`, but keeps its old launcher. Mix's own
-  launcher has always behaved this way; do not add a dispatcher to work around
-  it without deciding that question for `bin/<release>` too.
-- **The emulator-restart transitions cannot be performed.** A relup that asks for
-  one can be generated — `mix forecastle.relup --restart` — and `relup_test.exs`
-  covers it being generated, accepted by `verify_relup!/2` and copied into the
-  release. The transition itself fails: `release_handler` calls `heart:set_cmd/1`
-  while preparing the reboot, which raises `badarg` where there is no `heart`
-  process, so the install fails before anything reboots; and the reboot would
-  come back up on whichever version `releases/start_erl.data` names, which only
-  `make_permanent` writes, while `release_handler` leaves the installed version
-  in `releases/new_start_erl.data`. `bin/castle install` handles the reply and
-  each branch of that handling is tested against a launcher stub, but nothing
-  performs the upgrade end to end until
-  [castle#14](https://github.com/ausimian/castle/issues/14) and
-  [#10](https://github.com/ausimian/forecastle/issues/10). The `:e2e` suite
-  covers the hot-upgrade path only, and any test of a restart relup should
-  assert on the relup and the assembled tree rather than on a completed upgrade.
-  This is what `auto`'s temporary refusal above exists for; `--restart` is the
-  explicit way to build one anyway.
+  extracts with `keep_old_files`, so `bin/<release>`, `bin/castle` and
+  `bin/start` are whatever the deployment was first built with. New files do
+  appear, so a migrating deployment gains `bin/castle` and `bin/start`, but keeps
+  its old launcher. Mix's own launcher has always behaved this way; do not add a
+  dispatcher to work around it without deciding that question for
+  `bin/<release>` too.
+
+  What this costs the restart path is worth stating: the heart configuration and
+  the provisional-version selection are in `releases/<vsn>/env.sh`, which a hot
+  upgrade *does* replace, so a deployment can take one hot upgrade to this
+  release and a restart transition after it. It cannot take a restart transition
+  as the *first* upgrade from an older deployment — the running node came up on
+  the old version's `env.sh`, so there is no `heart` process, and the install
+  fails in `heart:set_cmd/1` before anything reboots.
+- **An emulator restart needs something outside the release to start it again.**
+  That is the design rather than a gap: `bin/start` is inert, `HEART_COMMAND` is
+  unset, and the supervisor is the only restart authority. A deployment run by
+  hand from a shell therefore stays down after such an upgrade until somebody
+  starts it — and comes back on the installed version when they do, because the
+  markers are still waiting. Only systemd has been exercised in anger; Docker
+  restart policies and runit are the same shape but unmeasured, and `:e2e` stands
+  in for a supervisor by starting the release itself.
 - **`restart_new_emulator` is not supported and is refused, not generated.**
-  Adding it is its own piece of work: the provisional boot would have to come up
-  and *resume* an upgrade through `new_emulator_upgrade/2`, which is strictly
-  more than coming up on a provisional version.
+  Adding it is its own piece of work, and for two reasons rather than one. The
+  provisional boot would have to come up and *resume* an upgrade through
+  `new_emulator_upgrade/2`, which is strictly more than coming up on a provisional
+  version — and the version `release_handler` writes into `new_start_erl.data` for
+  it is the temporary hybrid release, `__new_emulator__<current>`, whose version
+  directory `new_emulator_make_hybrid_boot/6` gives a `start.boot` and a
+  `sys.config` and none of the launcher's own files. There is no `env.sh` to
+  source, no `elixir` to run and no `vm.args` to read, so the fragment could not
+  select it even if it wanted to; Castle arms no marker for that transition.
 - **An unpacked release holds two `.rel` files, and that is normal.**
   `release_handler:do_unpack_release/4` copies `releases/<name>-<vsn>.rel` into
   `releases/<vsn>/` unconditionally, "for backwards compatibility reasons with

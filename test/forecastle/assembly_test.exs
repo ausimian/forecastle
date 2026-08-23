@@ -67,6 +67,49 @@ defmodule Forecastle.AssemblyTest do
     end
   end
 
+  describe "bin/start" do
+    test "is installed, executable, and does nothing", %{forecastle: forecastle} do
+      # The path release_handler composes into heart's temporary reboot command,
+      # and returns unexamined: init/1 yields {no_check, $ROOT/bin/start} when
+      # {sasl, start_prg} is unset, and check_start_prg/2 does not look at it. So
+      # it has to exist, and it has to do nothing - heart really does run it, both
+      # on init:reboot() and on a heart-beat time-out, where HEART_NO_KILL means
+      # the old VM is still alive.
+      start = Path.join(forecastle, "bin/start")
+
+      assert File.exists?(start)
+      assert Bitwise.band(File.stat!(start).mode, 0o111) != 0
+      assert {"", 0} = System.cmd(start, ["releases/new_start_erl.data"], cd: forecastle)
+    end
+
+    test "starts nothing", %{forecastle: forecastle} do
+      # Asserted on the script rather than on its behaviour, because "it did not
+      # start the release" is not observable from a single run of something that
+      # exits 0. What must never appear here is an invocation of the launcher: a
+      # bin/start that started the release would be a second restart authority
+      # beside the supervisor, and with HEART_NO_KILL it could start one node
+      # beside another that is still alive.
+      start = File.read!(Path.join(forecastle, "bin/start"))
+
+      refute start =~ "bin/sample"
+      refute start =~ "exec"
+      assert start =~ "exit 0"
+    end
+
+    test "is not installed by a plain Mix release", %{mix: mix} do
+      refute File.exists?(Path.join(mix, "bin/start"))
+    end
+
+    test "ships in the release tarball", %{forecastle: forecastle} do
+      # Which is what puts it into a deployment that migrates by hot upgrade:
+      # release_handler extracts with keep_old_files, so a new file appears.
+      tarball = Path.join(forecastle, "sample-#{@vsn}.tar.gz")
+
+      assert {:ok, entries} = :erl_tar.table(to_charlist(tarball), [:compressed])
+      assert ~c"bin/start" in entries
+    end
+  end
+
   describe "env.sh" do
     setup %{forecastle: forecastle} do
       {:ok, env_sh: File.read!(Path.join(forecastle, "releases/#{@vsn}/env.sh"))}
@@ -115,8 +158,79 @@ defmodule Forecastle.AssemblyTest do
 
     test "only runs for the commands that start the system", %{env_sh: env_sh} do
       # Not eval, which the configuration expansion needed and this does not: an
-      # eval VM manages no releases.
+      # eval VM manages no releases - and, since #10, must not consume the
+      # provisional marker or start a heart process either. bin/castle drives
+      # every command through `rpc`, so a fragment that ran for those would
+      # consume the marker while an install was still waiting for the reboot.
       assert env_sh =~ ~r/case \$RELEASE_COMMAND in\n\s+start\|start_iex\|daemon\|daemon_iex\)/
+    end
+
+    test "runs heart, and gives it nothing to do", %{env_sh: env_sh} do
+      # heart exists only so that heart:set_cmd/1 returns ok instead of raising
+      # badarg while release_handler prepares a reboot. Everything else about it
+      # is switched off: no HEART_COMMAND, no kill, and a beat timeout at the
+      # documented maximum, because HEART_NO_KILL does not make a time-out
+      # harmless - the port program exits after running its command, heart is a
+      # kernel process, and init halts the node when one of those dies.
+      assert env_sh =~ ~s(ELIXIR_ERL_OPTIONS:+$ELIXIR_ERL_OPTIONS }-heart)
+      assert env_sh =~ ~s(HEART_NO_KILL="${HEART_NO_KILL:-TRUE}")
+      assert env_sh =~ ~s(HEART_BEAT_TIMEOUT="${HEART_BEAT_TIMEOUT:-65535}")
+
+      # Refuted as an assignment rather than as a word, because the comment above
+      # it explains why the variable is left alone - and Mix ships this idiom
+      # commented out in its own generated env.sh, setting HEART_COMMAND to the
+      # launcher, which is the thing that must not appear here.
+      refute env_sh =~ "HEART_COMMAND="
+      refute env_sh =~ "export HEART_COMMAND"
+    end
+
+    test "adds -heart only once", %{env_sh: env_sh} do
+      # Load bearing rather than hygiene: two -heart flags make
+      # init:get_argument(heart) answer {ok, [[], []]}, which heart's own startup
+      # check has no clause for, and the boot hangs with nothing printed. The
+      # fragment is read twice on a provisional start, because it re-execs the
+      # launcher, so without this guard every such boot would hang.
+      assert env_sh =~ ~s(case " ${ELIXIR_ERL_OPTIONS:-} " in)
+      assert env_sh =~ ~s(*" -heart "*)
+    end
+
+    test "selects a provisional version from two markers, and consumes them",
+         %{env_sh: env_sh} do
+      # new_start_erl.data is written before the reboot and never removed, so on
+      # its own it is not evidence that a reboot was asked for. Castle's marker is
+      # the other half, and the two have to name one version.
+      assert env_sh =~ "releases/castle-restart-pending"
+      assert env_sh =~ "releases/new_start_erl.data"
+      assert env_sh =~ ~s(mv "$castle_pending" "$castle_claim")
+      assert env_sh =~ ~s([ "$castle_usable" = "$castle_target" ])
+      assert env_sh =~ ~s(rm -f "$castle_provisional")
+    end
+
+    test "refuses a version that could name something other than a release",
+         %{env_sh: env_sh} do
+      # The version comes out of a file and is used to build a path and exported
+      # into the VM's environment, so an empty one or one carrying a separator is
+      # refused rather than resolved. Kept apart from the value that was read, so
+      # that the warning can still say what was actually in the file.
+      assert env_sh =~ ~s(case $castle_armed in)
+      assert env_sh =~ ~s("" | */*)
+      assert env_sh =~ ~s([ -f "$RELEASE_ROOT/releases/$castle_usable/env.sh" ])
+      assert env_sh =~ ~s([ -f "$RELEASE_ROOT/releases/$castle_usable/start.boot" ])
+    end
+
+    test "re-execs the launcher rather than assigning the version", %{env_sh: env_sh} do
+      # The launcher has already resolved REL_VSN_DIR by the time it sources this,
+      # and vm.args, sys.config, the boot script and the elixir launcher all hang
+      # off it. Assigning RELEASE_VSN here and returning boots the old version's
+      # everything under the new version's name.
+      assert env_sh =~ ~s(exec "$RELEASE_ROOT/bin/sample" "$@")
+
+      # And the consumption comes first, which is what stops the second pass
+      # recurring.
+      claim = :binary.match(env_sh, ~s(mv "$castle_pending")) |> elem(0)
+      reexec = :binary.match(env_sh, ~s(exec "$RELEASE_ROOT/bin/sample")) |> elem(0)
+
+      assert claim < reexec
     end
 
     test "warns rather than refuses when it cannot create the file", %{env_sh: env_sh} do

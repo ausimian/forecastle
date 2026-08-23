@@ -26,7 +26,12 @@ defmodule Sample.MixProject do
     [
       # TEMPORARY for the 1.0.0 cycle: the fixture needs Castle's in-progress API.
       # Flip back to {:castle, "~> 1.0"} before publishing.
-      {:castle, github: "ausimian/castle", branch: "release/1.0.0"},
+      #
+      # Pinned to Castle's issue branch while castle#14 and #10 are open: the two
+      # halves of an emulator-restart upgrade are useless apart, so the fixture
+      # has to resolve against the Castle side of it. Back to release/1.0.0 once
+      # both have merged.
+      {:castle, github: "ausimian/castle", branch: "issue/14-restart"},
       {:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), override: true},
       # An application the relup never mentions, versioned in step with this
       # one, so that "release_handler knows its version changed" is observable

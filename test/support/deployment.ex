@@ -59,6 +59,61 @@ defmodule Forecastle.Deployment do
     await_boot!(deploy)
   end
 
+  @doc """
+  The operating system pid of the running release, as the release reports it.
+
+  `bin/<name> pid` is an rpc, so this is the beam's own `System.pid/0` rather
+  than anything about the process that asked - which is what makes it usable
+  both for telling one incarnation of the node from another and for waiting on
+  the first to go away.
+  """
+  def os_pid(deploy), do: launcher!(deploy, ["pid"])
+
+  @doc """
+  Waits until the operating system process `pid` is gone, or fails the test.
+
+  Asked of the operating system rather than of the node: a node that has stopped
+  answering rpc is not necessarily a process that has exited, and starting the
+  replacement while the old beam still holds the distribution port is how a
+  supervised restart turns into a name clash instead of a boot.
+  """
+  def await_exit!(pid, attempts \\ 300)
+
+  def await_exit!(pid, 0), do: flunk("process #{pid} was still running at the timeout")
+
+  def await_exit!(pid, attempts) do
+    case System.cmd("ps", ["-o", "pid=", "-p", pid], stderr_to_stdout: true) do
+      {_output, 0} -> Process.sleep(100) && await_exit!(pid, attempts - 1)
+      {_output, _} -> :ok
+    end
+  end
+
+  @doc """
+  Installs `vsn` through `bin/castle` while acting as the release's supervisor.
+
+  A transition that restarts the emulator reboots the node, and nothing inside
+  the release starts it again - that is the whole design: `bin/start` is inert
+  and systemd, Docker or runit owns the restart. So the test has to be the
+  supervisor. `bin/castle install` is run in a task, because it keeps asking the
+  system what it is running until the version it installed answers; this waits
+  for the old process to go, starts the release again, and then collects what the
+  install made of it.
+
+  Returns `{output, status}`, with the two streams merged the way
+  `Forecastle.Fixture.cmd/4` merges them.
+  """
+  def install_supervised!(deploy, vsn, env \\ []) do
+    pid = os_pid(deploy)
+    castle = Path.join(deploy, "bin/castle")
+
+    installing = Task.async(fn -> Fixture.cmd(castle, ["install", vsn], env) end)
+
+    await_exit!(pid)
+    start!(deploy, env)
+
+    Task.await(installing, 300_000)
+  end
+
   @doc "Waits until the release accepts an rpc, or fails the test."
   def await_boot!(deploy, attempts \\ 100)
 

@@ -93,18 +93,17 @@
   that asked for it has gone. `bin/castle releases` is how to find out where
   the system actually got to.
 
-  A relup that restarts the emulator can now be built - see
-  `mix forecastle.relup --restart` below - but the transition it describes
-  **cannot be performed**: the install fails while preparing the reboot, and
-  nothing would bring the reboot back up on the version that was installed
-  anyway. That is
-  [castle#14](https://github.com/ausimian/castle/issues/14) and
-  [#10](https://github.com/ausimian/forecastle/issues/10). What is covered is
-  the hot-upgrade path, by the `:e2e` suite, which now installs *and* confirms;
-  and every branch of the shell logic - inconclusive, confirmed, failed, timed
-  out - against a launcher stub, which remains the only place the restart shape
-  can be simulated. A continuation that fails and rolls back is left to the
-  end-to-end coverage those two bring.
+  That polling is what carries an emulator restart, and it is the reason the
+  reply cannot be trusted: `release_handler` answers `{ok, Vsn, Descr}` for a
+  `restart_emulator` transition exactly as it does for a completed hot upgrade,
+  and then reboots, so the reply may not even survive long enough to arrive.
+  `install` treats a lost connection as settling nothing and keeps asking until
+  the version it installed answers - across the reboot, and across the cold boot
+  after it. Both paths are covered end to end by the `:e2e` suite, and every
+  branch of the shell logic - inconclusive, confirmed, failed, timed out - against
+  a launcher stub as well. A continuation that fails and rolls back on the way up
+  belongs to `restart_new_emulator`, which is not supported; see *Known
+  limitations*.
 - `mix forecastle.relup` now takes an upgrade strategy, because whether a
   transition can be hot is a property of the edge between two releases rather
   than of either release. `--hot` requires a genuine hot upgrade and fails,
@@ -163,38 +162,71 @@
   something other than the upgrade it decided on; ask for the restart with
   `--restart`.
 
-  **While a restart transition cannot be performed, `auto` refuses to write one.**
-  A relup that restarts the emulator can be built and packaged, but the transition
-  it describes fails on install - see the known limitation below - so `auto`
-  exits non-zero rather than produce an upgrade plan that is known not to
-  install. The message names the edge that forced the restart and why, whether
-  that is the ERTS change or the application whose move no appup covers, and
-  points at `--restart` as the deliberate override. The same applies to a
-  `restart_emulator` an appup asked for by name during an `auto` run: how the
-  relup came by the instruction makes no difference to whether it can be
-  installed.
-
   A run says which transitions restart - or that none of them do - exactly once,
-  and the two kinds are settled at the point each becomes knowable. An edge
-  classification found to need a restart is refused before anything is generated,
-  because that already decides the run: nothing the remaining transitions turn out
-  to be can change it, so generating them can only fail in a way that reports
-  something other than the reason the run is failing. An appup that asks for the
-  restart by name is invisible until `systools` has produced a script, so it is
-  settled after generation. A relup with both kinds in it therefore names the
-  classified edge and generates nothing; anything an appup in the rest of it asks
-  for is reported by the run that follows, once that edge is gone.
+  and the announcement names both ways a restart can arrive: the edges `auto`
+  classified, with the reason for each, and any `restart_emulator` an appup asked
+  for by name. It also says what that means for reading the install back, since
+  `install_release/1` replies `{ok, Vsn, Descr}` for such a transition,
+  indistinguishably from a completed hot upgrade, and the emulator then reboots.
+  Both kinds are settled after generation, because only one of them is knowable
+  before it: an appup's own instruction is invisible until `systools` has produced
+  a script. `--hot` and `--restart` remain the ways to insist on something else.
+- The release now selects a provisional version after an upgrade that restarted
+  the emulator, which is what makes such an upgrade work on a deployment
+  supervised by systemd, Docker, Kubernetes or runit.
 
-  This is temporary and will be lifted, at which point `auto` will announce the
-  restart it chose instead of refusing - and then, since the run proceeds, both
-  kinds are named in the one announcement. Lifting it is work still to do rather
-  than a switch to throw: there is no flag, environment variable or build option
-  that turns the refusal off, and no announcement waiting behind one. `--hot`
-  and `--restart` are unaffected in either direction; both are explicit
-  requests, and it is fine for `--restart` to produce a relup that cannot yet be
-  deployed.
+  `release_handler` writes the version it installed to
+  `releases/new_start_erl.data` and deliberately leaves
+  `releases/start_erl.data` - which is where the stock launcher reads
+  `RELEASE_VSN` from - naming the version that is still permanent. That is the
+  rollback property, and it is worth keeping: a provisional release that dies
+  before `bin/castle commit` is followed by an ordinary start of the version that
+  was permanent before, with nobody intervening. What it costs is that something
+  has to select the installed version on the boot after the reboot, and the
+  `env.sh` fragment is now that something.
+
+  It requires *two* markers, not one, and it re-execs the launcher rather than
+  assigning `RELEASE_VSN` in place. Two markers, because `new_start_erl.data` is
+  written before the reboot and never removed, so on its own it is not evidence
+  that a reboot was asked for: Castle arms a marker of its own beside it and
+  clears it if the install failed, and the fragment requires both files and
+  requires them to name one version. A re-exec, because by the time the launcher
+  sources `env.sh` it has already resolved the version directory, and everything
+  it goes on to use - the boot script, `vm.args`, `sys.config`, the `elixir`
+  launcher itself - hangs off that. Both markers are consumed atomically, and
+  before the re-exec, so the second pass finds nothing and the selection is
+  one-shot. With no valid pair the fragment does nothing at all and the stock
+  launcher reads `start_erl.data` exactly as it always did.
+- The release now runs OTP's `heart`, deliberately configured to do nothing, on
+  the commands that start the system.
+
+  This is not a watchdog and is not offered as one. `release_handler` calls
+  `heart:set_cmd/1` while preparing *any* transition that restarts the emulator,
+  and with no `heart` process that raises `badarg` - so the install failed before
+  anything rebooted, on exactly the externally supervised deployment this library
+  is for. The handshake has to be satisfied, and running the real `heart`
+  satisfies it through documented interfaces only.
+
+  `heart` is then kept out of the way. `HEART_COMMAND` is not set, so an
+  unexpected death starts nothing; `HEART_NO_KILL=TRUE`, so a node that misses
+  heartbeats is not killed; `HEART_BEAT_TIMEOUT` is raised to heart's documented
+  maximum, because `HEART_NO_KILL` alone does not make a heart-beat time-out
+  harmless - the port program exits once it has run its command, and `heart` is a
+  kernel process, so `init` halts the node when it goes; and `$ROOT/bin/start`,
+  the path `release_handler` composes into heart's temporary command and does not
+  check, is shipped and does nothing at all. That last one is not belt and
+  braces: `HEART_NO_KILL` suppresses the kill but *not* the command, so a
+  `bin/start` that really started the release could start a second node beside a
+  live one. The external supervisor remains the only thing that starts this
+  release. Each variable is left alone if the deployment already set it, and
+  `-heart` is added to `ELIXIR_ERL_OPTIONS` only when it is not already there:
+  two of them make `init:get_argument(heart)` answer `{ok, [[], []]}`, which
+  heart's own startup check has no clause for, and the boot hangs.
 - A test suite. It assembles a real release from a fixture application and, in
-  the `:e2e` suite, boots it and performs a hot upgrade.
+  the `:e2e` suite, boots it and upgrades it - once hot, asserting that the
+  operating system pid does not change, and once through an emulator restart,
+  asserting that it does, that an uncommitted provisional release rolls back when
+  it is killed, and that committing makes it the version an ordinary start boots.
 
 ### Changed
 
@@ -230,10 +262,10 @@
   configuration half is gone outright. What remains is `releases/RELEASES`, and
   the fragment now creates it only when the release has not got one — the first
   start of a deployment, and no start after it. It is still appended after any
-  `env.sh` the project supplied, and it is still where
-  [#10](https://github.com/ausimian/forecastle/issues/10) will consume the
-  provisional restart marker that a relup restarting the emulator leaves in
-  `releases/new_start_erl.data`.
+  `env.sh` the project supplied. It also configures `heart` and selects a
+  provisional version after an emulator restart — see *Added* — and everything in
+  it is now gated on a command that starts the system, so an `eval`, an `rpc` or
+  a `remote` reaches none of it.
 
   A release therefore starts as quickly as a plain Mix release every time bar
   the first, and a start that used to fail because configuration could not be
@@ -326,15 +358,16 @@
     `systools_relup:check_for_emulator_restart/5` inserts the two-stage
     `restart_new_emulator` on its own whenever the ERTS version differs, warning
     only that it changed - so the relup carried a transition nobody had chosen,
-    which replies `{continue_after_restart, Vsn, Descr}` and which Castle cannot
-    install. `auto` now decides this case for itself, as a one-stage restart
-    transition, which while such a transition cannot be performed means the
-    generation is refused. `--restart` generates it. **Materially changed.**
+    which replies `{continue_after_restart, Vsn, Descr}` and which Castle does
+    not support. `auto` now decides this case for itself, as a one-stage restart
+    transition, and announces it. `--restart` generates the same thing on
+    request. **Materially changed.**
   - **An appup that names an emulator restart itself** was passed straight
-    through, and the relup was written with the restart in it. `auto` now refuses
-    it, `--hot` refuses it, and `--restart` - which reads no appup at all - makes
-    the transition a `restart_emulator` by its own choosing. **Materially
-    changed.**
+    through, and the relup was written with the restart in it without anybody
+    being told. `auto` now announces a one-stage `restart_emulator` and refuses
+    the two-stage `restart_new_emulator`; `--hot` refuses both; and `--restart` -
+    which reads no appup at all - makes the transition a `restart_emulator` by
+    its own choosing. **Materially changed.**
 
   So the two cases that changed are the two that used to write a relup carrying
   an emulator restart; the other two are a hot upgrade that is still a hot
@@ -520,6 +553,16 @@ This applies to `bin/castle` too: once installed, later changes to it will not
 reach an existing deployment through a hot upgrade. That is the same property
 Mix's own `bin/<release>` has always had.
 
+`bin/start` is new, so it does appear, and both the heart configuration and the
+provisional-version selection live in the version directory's `env.sh`, which a
+hot upgrade does replace. So a deployment that takes one hot upgrade to this
+release can take a restart transition after it. What it cannot do is take a
+restart transition *as* the first upgrade from an older deployment: the node is
+running from the old version's `env.sh`, so it has no `heart` process, and
+`release_handler` calls `heart:set_cmd/1` while preparing the reboot - which
+raises, and the install fails before anything reboots. Get to this release with a
+hot upgrade or a redeploy first.
+
 Configuration is decided per version directory, so a deployment part way through
 this migration is coherent rather than confused: the version it is running keeps
 its `build.config`, and a restart back into it is still expanded the old way — by
@@ -530,30 +573,25 @@ the new version reads the old file.
 
 ### Known limitations
 
-- **A transition that restarts the emulator can be generated, but not
-  performed.** `mix forecastle.relup --restart` writes the relup, assembly
-  packages it, and `bin/castle install` handles the reply, each branch of that
-  handling tested against a stub - but the transition itself does not complete.
-  `release_handler` calls `heart:set_cmd/1` while preparing the reboot, which
-  fails where there is no `heart` process, so the install fails before anything
-  reboots; and even past that, the reboot comes back on whichever version
-  `releases/start_erl.data` names, which only `commit` writes, while
-  `release_handler` leaves the installed version in
-  `releases/new_start_erl.data` instead.
-  [castle#14](https://github.com/ausimian/castle/issues/14) and
-  [#10](https://github.com/ausimian/forecastle/issues/10) are what close that.
-  Until they land, treat a restart relup as something to generate and inspect
-  rather than to deploy - which is why `auto` refuses to produce one, and why
-  `--restart`, an explicit request, still will.
+- **An emulator restart needs an external supervisor, and the release will not
+  restart itself.** The reboot is the point at which something outside the
+  release has to start it again: `bin/start` is inert on purpose, `HEART_COMMAND`
+  is unset, and nothing else in the release is watching. A deployment run by hand
+  from a shell, rather than under systemd, Docker, Kubernetes or runit, therefore
+  stays down after such an upgrade until somebody starts it - and the version it
+  comes back on is the one that was installed, because the markers are still
+  there waiting to be consumed.
 - **`restart_new_emulator` is not supported.** The two-stage transition - a
   hybrid temporary release, a reboot into it, and the rest of the relup applied
   on the way up - is refused wherever it turns up rather than generated. An ERTS
   change, which is what `systools` would otherwise insert it for, is taken out of
-  `systools`' hands and treated as a one-stage restart transition, which under
-  `auto` today means the generation is refused and under `--restart` means a
-  `restart_emulator` relup. Supporting the two-stage transition properly is its
-  own piece of work: the provisional boot would have to come up and *resume* an
-  upgrade, which is strictly more than coming up on a provisional version.
+  `systools`' hands and treated as a one-stage restart transition instead.
+  Supporting the two-stage transition properly is its own piece of work, and not
+  only because the provisional boot would have to come up and *resume* an upgrade:
+  the version `release_handler` writes into `new_start_erl.data` for it is the
+  temporary hybrid release, whose version directory holds a boot script and a
+  configuration and none of the launcher's own files, so there is nothing there
+  for a launcher to boot. Castle arms no marker for it for that reason.
 - **A system that cannot write `releases/RELEASES` cannot be upgraded.** The
   release creates it on its first start; where that fails — a read-only release
   root is the usual reason — the start warns, the system runs perfectly well, and

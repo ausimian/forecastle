@@ -102,18 +102,32 @@ In the post-assembly step:
 
   - A `bin/castle` command is added, providing the commands that manage releases.
     The standard `bin/<release>` launcher that Mix generates is left untouched.
-  - The generated `env.sh` is extended with a hook. On the **first** start of a
+  - A `bin/start` is added, and it does nothing at all. `release_handler`
+    composes `$ROOT/bin/start <data file>` and installs it as `heart`'s temporary
+    reboot command while preparing an emulator restart, and `heart` really does
+    run it. A Castle release is restarted by its supervisor rather than by
+    `heart`, so the one correct thing for that script to do is exit 0.
+  - The generated `env.sh` is extended with a hook, and everything in it runs
+    only for the commands that start the system. On the **first** start of a
     deployment it creates `releases/RELEASES`, which is what lets the system
     manage its own releases — a short-lived VM, once, and only while that file
     is absent. The release root has to be writable for it to succeed; if it is
     not, the start still proceeds, with a warning, and `bin/castle unpack` and
     `bin/castle install` will later refuse — each reading the running system's
     own release records as it acts — rather than upgrade a system that cannot
-    record what it is running. Every start after the first does nothing at all.
-    The
-    hook is also where the provisional version marker left by a relup that
-    restarts the emulator will be consumed. Any `env.sh` the project supplies
-    through `rel/env.sh.eex` is preserved, and runs first.
+    record what it is running.
+
+    Every start also runs OTP's `heart`, deliberately configured to do nothing:
+    `HEART_NO_KILL`, no `HEART_COMMAND`, a beat timeout at heart's documented
+    maximum, and the inert `bin/start` above. It is there for one reason —
+    `release_handler` calls `heart:set_cmd/1` while preparing an emulator
+    restart, and that raises where no `heart` process exists.
+
+    And a start that follows such a restart selects the version that was
+    installed. See *Upgrades that restart the emulator* below.
+
+    Any `env.sh` the project supplies through `rel/env.sh.eex` is preserved, and
+    runs first.
   - The generated _name.rel_ is copied into the `releases` folder as _name-vsn.rel_,
     which is where `release_handler` looks for it when unpacking a tarball.
   - Any checked `relup` is written into the version path of the release.
@@ -142,7 +156,8 @@ Moving the running system from one version to the next is done through `bin/cast
 # Unpack myapp-0.1.1.tar.gz, which you have placed in myapp/releases.
 > myapp/bin/castle unpack 0.1.1
 
-# Make 0.1.1 the version that is running now, without restarting the VM.
+# Make 0.1.1 the version that is running now. Whether the VM is restarted is a
+# property of the relup rather than of this command.
 > myapp/bin/castle install 0.1.1
 
 # Make it the version that runs on restart too. With no version given, this
@@ -159,9 +174,37 @@ record OTP made up out of its boot script. Each asks the system itself, as it
 acts, rather than trusting an answer given earlier; the refusal names the remedy,
 which is a restart.
 
-Version selection on restart needs nothing from `Forecastle`: OTP's
-`release_handler` records the committed version in `releases/start_erl.data`,
-which is exactly where the standard launcher reads it from.
+Version selection on restart needs nothing from `Forecastle` once a version has
+been committed: OTP's `release_handler` records the committed version in
+`releases/start_erl.data`, which is exactly where the standard launcher reads it
+from.
+
+### Upgrades that restart the emulator
+
+`bin/castle install` is the same command whichever kind of transition the relup
+describes, and it exits 0 only once the version it installed is the one running —
+across a reboot, if there is one. What differs is what has to be in place around
+it.
+
+**Your supervisor owns the restart.** `release_handler` calls `init:reboot()`,
+the operating system process exits, and nothing inside the release starts it
+again: `bin/start` is inert and `HEART_COMMAND` is unset, on purpose, because two
+things starting one service is worse than the problem being solved. Run the
+release under systemd, a Docker restart policy, Kubernetes or runit. A release
+started by hand from a shell will simply stay down until you start it again.
+
+**Until you commit, a restart takes you back.** `release_handler` writes the
+installed version to `releases/new_start_erl.data` and leaves
+`releases/start_erl.data` naming the version that is still permanent — only
+`bin/castle commit` writes that file. So a provisional release that crashes
+before it is committed is followed by an ordinary start of the version you were
+on, with nobody intervening. `bin/<release> version` reports that version too,
+because what it prints is the version *to be booted*; ask the running system if
+you want to know what is running.
+
+**Only the one-stage `restart_emulator` is supported.** `mix forecastle.relup`
+never generates the two-stage `restart_new_emulator` and refuses it wherever it
+finds one; see below.
 
 ## The Appup Compiler
 
@@ -290,20 +333,13 @@ own is missing. A transition it judged hot and `systools` then could not generat
 is a failure, so that the default never quietly ships something other than the
 upgrade it decided on.
 
-> **`auto` currently refuses a restart transition.** Castle can install a relup
-> that restarts the emulator but cannot yet complete the transition (see below),
-> so rather than write an upgrade plan that is known not to install, `auto` exits
-> non-zero and names the edge that forced the restart and why. It names it before
-> generating anything: an edge classification found to need a restart decides the
-> run on its own, so a `systools` error from the transitions that were still going
-> to be hot cannot be reported in its place. A `restart_emulator` an appup asked
-> for by name is refused just as much - the same transition arrived at another
-> way - but only becomes visible once there is a script to look at, so it is
-> reported after generation. A relup with both kinds in it therefore names the
-> classified edge, and the appup's own restart is reported by the run that follows
-> once that edge is gone. This is temporary; when the refusal is lifted the run
-> proceeds and both kinds are named in one announcement. `--restart` is the
-> deliberate override for anyone who wants the relup anyway.
+The announcement names every edge that will restart and why — both the ones
+classification chose and any `restart_emulator` an appup asked for by name, in one
+message, since they are the same transition arrived at two ways. It also says
+what that means for reading the install back: `install_release/1` replies
+`{ok, Vsn, Descr}` for such a transition, indistinguishably from a completed hot
+upgrade, and the emulator then reboots. `--hot` and `--restart` are the ways to
+insist on something else.
 
 **`--hot`** requires a genuine hot upgrade of every transition, and exits
 non-zero, having written nothing, if one cannot be: a missing appup entry, an
@@ -341,12 +377,9 @@ its own whenever the ERTS version differs between two releases, so a default
 that simply generated a relup would ship the two-stage transition without
 anybody having chosen it.
 
-Note that a restart transition can be *generated* but not yet *performed*.
-`release_handler` calls `heart:set_cmd/1` while preparing the reboot, which fails
-where there is no `heart` process, so the install fails before anything reboots;
-and the reboot would come back up on whichever version
-`releases/start_erl.data` names, which nothing writes until the release is
-committed. Until [castle#14](https://github.com/ausimian/castle/issues/14) and
-[#10](https://github.com/ausimian/forecastle/issues/10) land, treat a restart
-relup as something to generate and inspect rather than to deploy - and that is
-why `auto` refuses to produce one, while `--restart` still will.
+Performing a one-stage restart transition takes two things the release now
+carries: a `heart` process, because `release_handler` calls `heart:set_cmd/1`
+while preparing the reboot, and something to select the installed version on the
+way back up, because the reboot would otherwise come back on whichever version
+`releases/start_erl.data` names. Both are in the `env.sh` hook; see
+*Upgrades that restart the emulator* above for what your supervisor has to do.
