@@ -32,12 +32,11 @@ defmodule Forecastle.UpgradeTest do
     next = assemble!(into: "next", vsn: @to)
 
     # `--hot`, explicitly, because a hot upgrade is the whole subject of this
-    # suite and the default strategy would not produce one here: `:sample_dep`
-    # is a dependency of the fixture whose version moves with it, and
-    # `mix forecastle.relup`'s `auto` makes a transition that moves an
-    # application the project does not own a restart. Asking for the hot upgrade
-    # also means the task, rather than an assertion further down, is what fails
-    # if the transition ever stops being hot.
+    # suite. `auto` would produce one here too - `:sample_dep` is a dependency of
+    # the fixture whose version moves with it, but its appup covers that move, so
+    # `auto` judges the edge hot - and saying so is what makes the task, rather
+    # than an assertion further down, the thing that fails if this transition ever
+    # stops being hot.
     make_relup!({deploy, @from}, {next, @to}, ["--hot"])
     # Reassemble so that post-assembly copies the relup into the release, and
     # the tarball we are about to hand to release_handler contains it.

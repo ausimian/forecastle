@@ -50,20 +50,41 @@ defmodule Mix.Tasks.Forecastle.Relup do
   unless something in that transition cannot be hot-upgraded - and then that
   transition, and only that transition, becomes a restart.
 
-  A transition becomes a restart when the ERTS version changed, or when the
-  version of an application the project does not own changed: a dependency, one
-  of Elixir's own applications, or one of OTP's. Those applications carry no
-  appups written for this project's transitions, and an ERTS change is not a hot
-  upgrade under any policy. Which transitions were chosen, and why, is printed.
+  Two things make a transition a restart. An **ERTS change** always does: it is
+  not a hot upgrade under any policy, and no appup could make it one. A **version
+  change in an application the project does not own** - a dependency, one of
+  Elixir's own applications, one of OTP's - does so only when no appup covers
+  that particular move, which is the question `:systools` would be answering a
+  moment later anyway. The appup consulted is the one beside the *target*
+  release's copy of the application, `lib/<app>-<vsn>/ebin/<app>.appup`, and the
+  from-version is matched the way `systools_relup` matches it - which includes
+  the regexes an appup is allowed to name a from-version with.
+
+  Each *direction* is classified on its own, because an appup carries separate
+  upgrade and downgrade lists and a from-version present in one need not be
+  present in the other. A relup can therefore carry a hot upgrade from a version
+  and a restart back down to it.
 
   Applications *added* or *removed* between the two releases are left to
   `:systools`, whose `add_application` and `remove_application` instructions are
   hot: nothing has to be changed in place, only started or stopped.
 
-  `auto` does not fall back to a restart when an appup is missing. A transition
-  it judged hot and `:systools` then could not generate is a failure, so that
-  `auto` never silently ships something other than the upgrade it decided on;
-  ask for the restart with `--restart`.
+  `auto` does not fall back to a restart when an appup for an application the
+  project *does* own is missing. A transition it judged hot and `:systools` then
+  could not generate is a failure, so that `auto` never silently ships something
+  other than the upgrade it decided on; ask for the restart with `--restart`.
+
+  ### `auto` refuses a restart, for now
+
+  Castle can install a relup that restarts the emulator but cannot yet *complete*
+  the transition, so while that holds `auto` refuses rather than writes a restart
+  transition. It exits non-zero, having written nothing, naming the edge that
+  forced the restart and why. `auto` is what a run with no switches gets, and a
+  default that quietly produces an upgrade plan which cannot be installed is
+  worse than one that stops and says so.
+
+  This is temporary, and `--hot` and `--restart` are unaffected. `--restart` is
+  the deliberate override for anyone who wants the relup anyway.
 
   ### `--hot`
 
@@ -72,9 +93,11 @@ defmodule Mix.Tasks.Forecastle.Relup do
   change, or an appup that asks for the emulator to be restarted. This is the
   switch for a pipeline that requires zero-downtime deployment.
 
-  Note that this is feasibility rather than policy. `--hot` will happily upgrade
-  a dependency whose appup covers the transition, which `auto` would have made a
-  restart.
+  Note that this is feasibility rather than policy, and it is not the same
+  question `auto` asks. `--hot` reads every application's appup, including those
+  of the applications the project owns, and takes whatever the appups yield;
+  `auto` consults the appups only of the applications the project does not own,
+  in order to decide whether an edge can be hot at all.
 
   ### `--restart`
 
@@ -144,11 +167,7 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
   @impl Mix.Task
   def run(command_line_args) do
-    # Elixir prunes unused OTP applications from the build's code path, which
-    # would otherwise leave :systools unavailable in projects that don't
-    # already depend on :sasl.
-    Mix.ensure_application!(:sasl)
-    {:ok, _} = :application.ensure_all_started(:sasl)
+    ensure_systools!()
 
     args = parse!(command_line_args)
 
@@ -166,6 +185,38 @@ defmodule Mix.Tasks.Forecastle.Relup do
     strategy
     |> plan!(target, froms, ups, downs)
     |> write_relup!(outdir)
+  end
+
+  @doc false
+  # The split-and-merge, reachable on its own.
+  #
+  # `auto` is what merges hand-written restart entries into the same relup as the
+  # ones `:systools` generated, and it is where an edge could be dropped, or
+  # attached to the wrong direction, or one strategy applied to the whole relup.
+  # While a restart transition cannot be performed `auto` refuses to emit one at
+  # all (see `restart_transitions_installable?/0`), so the merge is not reachable
+  # through the task - the refusal deliberately sits in front of this rather than
+  # inside it, which is both what keeps this callable and what makes flipping
+  # that predicate back a one-line change.
+  @spec plan_transitions!(binary(), [binary()], [binary()], [binary()], [binary()]) ::
+          {charlist(), list(), list()}
+  def plan_transitions!(target_path, hot_ups, hot_downs, restart_ups, restart_downs) do
+    ensure_systools!()
+
+    target = read_rel!(target_path)
+    froms = read_froms!(hot_ups ++ hot_downs ++ restart_ups ++ restart_downs, target)
+
+    plan_transitions(target, froms, hot_ups, hot_downs, restart_ups, restart_downs)
+  end
+
+  # Elixir prunes unused OTP applications from the build's code path, which would
+  # otherwise leave :systools - and :systools_relup, which answers whether an
+  # appup covers a transition - unavailable in projects that don't already depend
+  # on :sasl.
+  defp ensure_systools! do
+    Mix.ensure_application!(:sasl)
+    {:ok, _started} = :application.ensure_all_started(:sasl)
+    :ok
   end
 
   # `parse/2` discards anything it does not recognise, which for a task whose
@@ -310,7 +361,7 @@ defmodule Mix.Tasks.Forecastle.Relup do
   defp plan!(:restart, target, froms, ups, downs) do
     announce_restart()
 
-    {to_charlist(target.vsn), restart_entries(ups, froms), restart_entries(downs, froms)}
+    plan_transitions(target, froms, [], [], ups, downs)
   end
 
   defp plan!(:hot, target, froms, ups, downs) do
@@ -322,27 +373,61 @@ defmodule Mix.Tasks.Forecastle.Relup do
   end
 
   defp plan!(:auto, target, froms, ups, downs) do
-    reasons = Map.new(froms, fn {path, from} -> {path, restart_reasons(from, target)} end)
-    {restart_ups, hot_ups} = Enum.split_with(ups, &(reasons[&1] != []))
-    {restart_downs, hot_downs} = Enum.split_with(downs, &(reasons[&1] != []))
+    {restart_ups, hot_ups} = split_edges(:up, ups, froms, target)
+    {restart_downs, hot_downs} = split_edges(:down, downs, froms, target)
 
-    announce_auto(Enum.uniq(restart_ups ++ restart_downs), froms, reasons)
+    settle_chosen_restarts!(
+      label_edges("upgrade from", restart_ups, froms) ++
+        label_edges("downgrade to", restart_downs, froms)
+    )
 
-    {vsn, up_entries, down_entries} = auto_hot_plan!(target, hot_ups, hot_downs)
+    plan_transitions(
+      target,
+      froms,
+      edge_paths(hot_ups),
+      edge_paths(hot_downs),
+      edge_paths(restart_ups),
+      edge_paths(restart_downs)
+    )
+  end
+
+  # Each direction on its own. An appup carries separate upgrade and downgrade
+  # lists, and a from-version present in one need not be present in the other, so
+  # the same edge can be hot one way and a restart the other - which is also why
+  # nothing here is shared between the two calls beyond the releases themselves.
+  defp split_edges(direction, paths, froms, target) do
+    paths
+    |> Enum.map(&{&1, restart_reasons(direction, froms[&1], target)})
+    |> Enum.split_with(fn {_path, reasons} -> reasons != [] end)
+  end
+
+  defp edge_paths(edges), do: Enum.map(edges, &elem(&1, 0))
+
+  defp label_edges(label, edges, froms) do
+    for {path, reasons} <- edges, do: {label, froms[path].vsn, reasons}
+  end
+
+  ## Merging the two kinds of transition
+
+  # No `:systools` run at all when every transition in the relup is a restart: an
+  # appup is then neither needed nor read, which is the point of a restart
+  # transition, and is what `--restart` promises.
+  defp plan_transitions(target, froms, [], [], restart_ups, restart_downs) do
+    {to_charlist(target.vsn), restart_entries(restart_ups, froms),
+     restart_entries(restart_downs, froms)}
+  end
+
+  # The generated entries and the hand-written ones go into one relup, per
+  # direction. `release_handler` selects by from-version and checks each script
+  # on its own, so the order of entries for distinct from-versions does not
+  # matter; what matters is that every from-version survives and that each keeps
+  # the script its own direction was classified for.
+  defp plan_transitions(target, froms, hot_ups, hot_downs, restart_ups, restart_downs) do
+    {vsn, up_entries, down_entries} =
+      target |> systools_plan!(hot_ups, hot_downs) |> refuse_new_emulator!()
 
     {vsn, up_entries ++ restart_entries(restart_ups, froms),
      down_entries ++ restart_entries(restart_downs, froms)}
-  end
-
-  # No `:systools` run at all when every transition in the relup is a restart:
-  # an appup is then neither needed nor read, which is the point of a restart
-  # transition.
-  defp auto_hot_plan!(target, [], []), do: {to_charlist(target.vsn), [], []}
-
-  defp auto_hot_plan!(target, ups, downs) do
-    target
-    |> systools_plan!(ups, downs)
-    |> refuse_new_emulator!()
   end
 
   ## Restart transitions
@@ -383,11 +468,13 @@ defmodule Mix.Tasks.Forecastle.Relup do
   end
 
   defp ebin_paths(relpaths) do
-    relpaths
-    |> Enum.map(&Path.join(&1, "../../../lib/*/ebin"))
-    |> Enum.map(&Path.expand/1)
-    |> Enum.map(&to_charlist/1)
+    for relpath <- relpaths, do: to_charlist(Path.join(lib_dir(relpath), "*/ebin"))
   end
+
+  # A `.rel` path is `<release>/releases/<vsn>/<name>`, so the release's library
+  # directory - which holds one `<app>-<vsn>/ebin` per application, appups
+  # included - is three levels up from it.
+  defp lib_dir(relpath), do: Path.expand(Path.join(relpath, "../../../lib"))
 
   # The warnings are the ones `make_relup/4` would have printed itself; `silent`
   # hands them over instead, and an ERTS version change is not something to
@@ -419,13 +506,12 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
   ## Classifying a transition
 
-  # What makes a transition ineligible for a hot upgrade under `auto`. Two
-  # kinds: an ERTS change, which is not a hot upgrade under any policy, and a
-  # version change in an application the project does not own, which is a
-  # policy decision - such an application's appups, if it has any, were not
-  # written for this project's transitions.
-  defp restart_reasons(from, target) do
-    erts_reason(from, target) ++ app_reasons(from, target)
+  # What makes one direction of a transition ineligible for a hot upgrade under
+  # `auto`. Two kinds: an ERTS change, which is not a hot upgrade under any
+  # policy and which no appup could make one, and a version change in an
+  # application the project does not own that no appup covers.
+  defp restart_reasons(direction, from, target) do
+    erts_reason(from, target) ++ app_reasons(direction, from, target)
   end
 
   defp erts_reason(%{erts: erts}, %{erts: erts}), do: []
@@ -434,18 +520,112 @@ defmodule Mix.Tasks.Forecastle.Relup do
     ["ERTS changed from #{from.erts} to #{target.erts}"]
   end
 
-  defp app_reasons(from, target) do
+  defp app_reasons(direction, from, target) do
     owned = project_apps()
 
-    for {app, vsn} <- Enum.sort(from.apps),
-        moved?(target.apps, app, vsn),
-        app not in owned do
-      "#{inspect(app)} is #{describe_app(app, owned)} and changed " <>
-        "from #{vsn} to #{target.apps[app]}"
+    from.apps
+    |> Enum.sort()
+    |> Enum.filter(fn {app, vsn} -> moved?(target.apps, app, vsn) and app not in owned end)
+    |> Enum.flat_map(&app_reason(direction, &1, target, owned))
+  end
+
+  # A moved application the project does not own is a restart only when nothing
+  # covers the move. Its appup, if it has one, was written for somebody else's
+  # transitions - but an entry that matches this from-version *is* an instruction
+  # for this transition, and refusing to use it would make `auto` restart edges
+  # that are demonstrably feasible. Asking here asks the same question
+  # `:systools` would be asked a moment later, so the two cannot disagree.
+  defp app_reason(direction, {app, vsn}, target, owned) do
+    case appup_gap(direction, app, target, vsn) do
+      nil ->
+        []
+
+      gap ->
+        [
+          "#{inspect(app)} is #{describe_app(app, owned)} and changed from #{vsn} to " <>
+            "#{target.apps[app]}, and #{gap}"
+        ]
     end
   end
 
   defp moved?(apps, app, vsn), do: Map.has_key?(apps, app) and apps[app] != vsn
+
+  ## Whether an appup covers a transition
+
+  # Answered the way `systools_relup` answers it, so that `auto`'s judgement and
+  # the relup `:systools` would then generate cannot disagree. What its
+  # `get_script_from_appup/5` does, in OTP 28.3's `sasl-4.3`:
+  #
+  #   - it reads `<app_dir>/<app>.appup`, where `app_dir` holds the *target*
+  #     release's copy of the application. So the appup that decides an edge is
+  #     the new version's, and its entries are keyed by the version being
+  #     upgraded from - see `appup_file/2`.
+  #   - it takes the `up` list for an upgrade and the `dn` list for a downgrade.
+  #     Hence the direction: the two lists are independent, and a from-version in
+  #     one need not be in the other.
+  #   - it selects the entry with `appup_search_for_version/2`, *not* by string
+  #     equality. A from-version given as a charlist matches by term equality;
+  #     one given as a **binary** is a regular expression, run against the
+  #     from-version with `re:run/3` and accepted only when the whole match is
+  #     the from-version itself. That function is exported for reuse ("Used by
+  #     release_handler:find_script/4. Also used by kernel, stdlib and sasl
+  #     tests"), so it is called here rather than reimplemented, and a regex
+  #     from-version resolves exactly as the upgrade will resolve it.
+  #
+  # `nil` means covered. Anything else is the phrase that says what was missing.
+  defp appup_gap(direction, app, target, from_vsn) do
+    file = appup_file(app, target)
+
+    case appup_entries(file, direction) do
+      {:ok, entries} -> entry_gap(entries, from_vsn, direction, file)
+      {:error, gap} -> gap
+    end
+  end
+
+  # `<release>/lib/<app>-<vsn>/ebin/<app>.appup` at the target's version of the
+  # application, which is the directory `:systools` resolves the application to
+  # when it reads the appup for this transition.
+  defp appup_file(app, target) do
+    Path.join([lib_dir(target.path), "#{app}-#{target.apps[app]}", "ebin", "#{app}.appup"])
+  end
+
+  defp appup_entries(file, direction) do
+    case :file.consult(to_charlist(file)) do
+      {:ok, [{_appup_vsn, up, down}]} when is_list(up) and is_list(down) ->
+        {:ok, if(direction == :up, do: up, else: down)}
+
+      {:ok, _terms} ->
+        {:error, "#{shorten(file)} cannot be read as an appup"}
+
+      {:error, :enoent} ->
+        {:error, "there is no appup at #{shorten(file)}"}
+
+      {:error, reason} ->
+        {:error, "#{shorten(file)} could not be read: #{inspect(reason)}"}
+    end
+  end
+
+  defp entry_gap(entries, from_vsn, direction, file) do
+    # Through `apply/3`, as `:systools.make_relup/4` is, and for the same reason:
+    # `:sasl` is not a dependency, so neither module is on the code path this is
+    # compiled against.
+    args = [to_charlist(from_vsn), entries]
+
+    case apply(:systools_relup, :appup_search_for_version, args) do
+      {:ok, _script} -> nil
+      :error -> missing_entry(direction, file, from_vsn)
+    end
+  end
+
+  defp missing_entry(:up, file, vsn) do
+    "#{shorten(file)} has no upgrade instructions from #{vsn}"
+  end
+
+  defp missing_entry(:down, file, vsn) do
+    "#{shorten(file)} has no downgrade instructions to #{vsn}"
+  end
+
+  defp shorten(path), do: Path.relative_to_cwd(path)
 
   # The applications the project is taken to own the appups for: its own, plus
   # every child of an umbrella. Everything else in the release is something
@@ -495,8 +675,8 @@ defmodule Mix.Tasks.Forecastle.Relup do
       "--hot was given, but the transition between #{from.vsn} and #{target.vsn} changes " <>
         "ERTS from #{from.erts} to #{target.erts}. An ERTS change cannot be hot: " <>
         ":systools inserts restart_new_emulator for one, which reboots the emulator " <>
-        "before any of the relup runs. Generate this relup with --restart, or leave the " <>
-        "strategy at auto, which makes such a transition a restart_emulator."
+        "before any of the relup runs. Generate this relup with --restart, which makes " <>
+        "it a single restart_emulator transition instead."
     )
   end
 
@@ -522,15 +702,17 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # shipped: it is the two-stage transition, which boots a hybrid temporary
   # release and replies `{continue_after_restart, ...}`, and Castle is built for
   # the one-stage one. Plain `restart_emulator` from an appup is the transition
-  # `auto` would have generated for itself, so that is allowed - and said out
-  # loud, because the reboot is not what a default strategy implies.
+  # `auto` would have generated for itself, so it is settled the same way
+  # `auto`'s own choice is - announced, or refused while such a transition cannot
+  # be performed. Getting there by way of an appup rather than by classification
+  # makes no difference to whether the relup can be installed.
   defp refuse_new_emulator!(plan) do
     case Enum.split_with(found_restarts(plan), &(elem(&1, 2) == :restart_new_emulator)) do
       {[], []} ->
         plan
 
       {[], one_stage} ->
-        announce_appup_restarts(one_stage)
+        settle_appup_restarts!(one_stage)
         plan
 
       {two_stage, _one_stage} ->
@@ -571,14 +753,10 @@ defmodule Mix.Tasks.Forecastle.Relup do
     )
   end
 
-  defp announce_auto([], _froms, _reasons) do
-    Mix.shell().info("auto: every transition in this relup is a hot upgrade.")
-  end
-
-  defp announce_auto(paths, froms, reasons) do
+  defp announce_chosen_restarts(edges) do
     Mix.shell().info(
       "auto: chose a restart transition for " <>
-        Enum.map_join(paths, "; ", &"#{froms[&1].vsn} (#{Enum.join(reasons[&1], ", ")})") <>
+        describe_edges(edges) <>
         ". Each of those is a single restart_emulator instruction, so install_release/1 " <>
         "replies {ok, Vsn, Descr} rather than {continue_after_restart, Vsn, Descr}, and " <>
         "the emulator then reboots. Pass --hot to refuse a restart instead, or " <>
@@ -591,6 +769,89 @@ defmodule Mix.Tasks.Forecastle.Relup do
       "auto: an appup asks for the emulator to be restarted: " <>
         describe_restarts(found) <>
         ". install_release/1 replies {ok, Vsn, Descr} and the emulator then reboots."
+    )
+  end
+
+  defp describe_edges(edges) do
+    Enum.map_join(edges, "; ", fn {label, vsn, reasons} ->
+      "the #{label} #{vsn} (#{Enum.join(reasons, ", ")})"
+    end)
+  end
+
+  ## While a restart transition cannot be performed
+
+  # The one place that decides whether `auto` may write a restart transition at
+  # all, and deliberately temporary. A single named predicate on purpose: not a
+  # version sniff, not an environment variable, nothing a deployment could set
+  # by accident.
+  #
+  # A restart relup can be generated and packaged, but the transition it
+  # describes cannot yet be completed. `release_handler` calls `heart:set_cmd/1`
+  # while preparing the reboot - from `prepare_restart_new_emulator/7`, which
+  # both restart instructions go through - and that raises `badarg` where there
+  # is no `heart` process, so the install fails before anything reboots. Past
+  # that, the reboot would come back on the old permanent version anyway, because
+  # only `commit` writes `releases/start_erl.data`.
+  # [castle#14](https://github.com/ausimian/castle/issues/14) and
+  # [#10](https://github.com/ausimian/forecastle/issues/10) close those halves.
+  #
+  # `auto` is the strategy a run with no switches gets. Emitting a restart
+  # transition from it would mean a routine invocation producing an upgrade plan
+  # that is known not to install - worse than one that refuses and says why. So
+  # it refuses, naming the edge, the reason, and `--restart` as the override.
+  # `--hot` and `--restart` are unaffected either way: both are explicit
+  # requests, and it is fine for `--restart` to produce a relup that cannot yet
+  # be deployed.
+  #
+  # When those two issues land, make this `true`. `announce_chosen_restarts/1`
+  # and `announce_appup_restarts/1` are what `auto` says instead, and nothing
+  # else has to change.
+  defp restart_transitions_installable?, do: false
+
+  defp settle_chosen_restarts!([]) do
+    Mix.shell().info("auto: every transition in this relup is a hot upgrade.")
+  end
+
+  defp settle_chosen_restarts!(edges) do
+    if restart_transitions_installable?() do
+      announce_chosen_restarts(edges)
+    else
+      refuse_chosen_restarts!(edges)
+    end
+  end
+
+  defp settle_appup_restarts!(found) do
+    if restart_transitions_installable?() do
+      announce_appup_restarts(found)
+    else
+      refuse_appup_restarts!(found)
+    end
+  end
+
+  defp refuse_chosen_restarts!(edges) do
+    Mix.raise(
+      "auto would make a restart transition of " <>
+        describe_edges(edges) <>
+        ", and a restart transition cannot yet be performed. release_handler calls " <>
+        "heart:set_cmd/1 while preparing the reboot, which fails where there is no heart " <>
+        "process, so the install fails before rebooting - and the reboot would come back " <>
+        "on the old permanent version even if it did not. castle#14 and forecastle#10 " <>
+        "close that. Rather than write an upgrade plan that cannot be installed, auto " <>
+        "refuses. Pass --restart to generate it anyway, which is the deliberate override; " <>
+        "pass --hot to fail on the transition itself instead; or take the change that " <>
+        "forced the restart out of this release."
+    )
+  end
+
+  defp refuse_appup_restarts!(found) do
+    Mix.raise(
+      "an appup asks for the emulator to be restarted: " <>
+        describe_restarts(found) <>
+        ". A restart transition cannot yet be performed - the install fails in " <>
+        "heart:set_cmd/1, and the reboot would come back on the old permanent version - " <>
+        "so auto refuses rather than write an upgrade plan that cannot be installed. " <>
+        "castle#14 and forecastle#10 close that. Generate this relup with --restart if " <>
+        "the restart is wanted anyway, or take the instruction out of the appup."
     )
   end
 

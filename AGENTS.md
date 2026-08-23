@@ -237,17 +237,14 @@ would ship the two-stage transition whenever ERTS moved, without anybody having
 chosen it. That is the gap `auto` exists to close, and it closes it twice:
 
 - **An ERTS change never reaches `:systools`.** `auto` classifies each edge from
-  the two `.rel` files first, and an edge whose ERTS version moved becomes a
-  hand-written `restart_emulator` transition. It is not refused — the issue's
-  settled position is that ERTS, Elixir and dependency changes *are* restarts,
-  and refusing would leave no default path for the commonest real upgrade while
-  producing the same relup by hand anyway. It is announced instead, naming the
-  instruction and the reply, because that reply is what automation reads.
+  the two `.rel` files first, and an edge whose ERTS version moved is a restart
+  edge — decided there, not by asking `:systools` and taking what comes.
 - **Whatever `:systools` does produce is inspected.** An appup may still name
   `restart_new_emulator` itself, and then `auto` refuses the relup rather than
-  writing it. Plain `restart_emulator` from an appup is allowed — it is the same
-  transition `auto` would have generated — but announced, because a reboot is
-  not what a default strategy implies. `--hot` refuses both.
+  writing it, because the two-stage transition is not supported at all.
+  `restart_emulator` from an appup is the same transition `auto` would have
+  chosen for itself, so it is settled the same way `auto`'s own choice is (see
+  the temporary refusal below). `--hot` refuses both.
 
 **A restart relup is written directly, never through `:systools`.** That is the
 only way to be certain which instruction lands: `make_relup/4`'s own
@@ -281,25 +278,72 @@ checked byte-identical to `:systools`'s for the fixture's relup. `Forecastle`'s
 **Application classification.** `auto` needs to know which applications the
 project owns the appups for: its own `Mix.Project.config()[:app]` plus
 `Mix.Project.apps_paths()` for an umbrella. Everything else — dependencies,
-Elixir's own applications, OTP's — is not, and a *version change* in one of them
-makes the edge a restart. Applications merely added or removed are left to
-`:systools`, whose `add_application` and `remove_application` are hot. Only the
-ownership test decides anything; `Mix.Project.deps_apps/0` (which is
-`Mix.Dep.cached/0`, and loads the whole dependency tree) and `:code.lib_dir/1`
-are reached only to *label* something already found, so a project whose deps
-have not moved never pays for either. `:code.lib_dir/1` resolves an OTP
-application whether or not it is loaded, but it resolves dependencies and
-Elixir's applications too, so OTP membership is the path being under
-`:code.lib_dir/0` — and Elixir's applications are a hardcoded list, because
-theirs sits under Elixir's lib directory and looks like a dependency's.
+Elixir's own applications, OTP's — is not. Only the ownership test decides
+anything; `Mix.Project.deps_apps/0` (which is `Mix.Dep.cached/0`, and loads the
+whole dependency tree) and `:code.lib_dir/1` are reached only to *label*
+something already found, so a project whose deps have not moved never pays for
+either. `:code.lib_dir/1` resolves an OTP application whether or not it is
+loaded, but it resolves dependencies and Elixir's applications too, so OTP
+membership is the path being under `:code.lib_dir/0` — and Elixir's applications
+are a hardcoded list, because theirs sits under Elixir's lib directory and looks
+like a dependency's.
 
-**This is why the fixture's default transition is now a restart.**
-`:sample_dep` is a dependency whose version moves with the sample's, so `auto`
-makes `0.1.0 -> 0.1.1` a restart, and `upgrade_test.exs` asks for `--hot`
-explicitly — which is the honest thing for a suite whose whole subject is the
-hot upgrade. `SAMPLE_DEP_VSN` exists to pin that dependency so that a
-project-only transition can be assembled at all; `relup_test.exs` builds a third
-release with it to cover the branch of `auto` that does reach `:systools`.
+A *version change* in one of those applications makes the edge a restart **only
+when no appup covers it**. `auto` describing itself as "hot where it can be" is
+otherwise false: it would restart edges `:systools` was about to generate
+perfectly well from an appup entry that names exactly this from-version.
+Applications merely added or removed are left to `:systools`, whose
+`add_application` and `remove_application` are hot.
+
+**Matching an appup from-version is `systools_relup`'s job, not a string
+compare.** Verified against OTP 28.3, `sasl-4.3`:
+
+- `get_script_from_appup/5` reads `<app_dir>/<app>.appup`, where `app_dir` holds
+  the **target** release's copy of the application. The appup that decides an
+  edge is the new version's, keyed by the version being upgraded *from* — for
+  both directions.
+- it takes the `up` list for an upgrade and the `dn` list for a downgrade. The
+  two are independent, so `auto` classifies **each direction separately**: a
+  from-version present in one need not be present in the other.
+- the entry is selected by `appup_search_for_version/2`. A charlist from-version
+  matches by term equality; a **binary** one is a regular expression, run with
+  `re:run(BaseVsn, Vsn, [unicode, {capture, first, list}])` and accepted only on
+  `{match, [BaseVsn]}` — the whole match must be the from-version, so a prefix
+  regex does not match a longer version. That function is exported for reuse
+  ("Used by `release_handler:find_script/4`. Also used by kernel, stdlib and sasl
+  tests"), so **call it**; do not reimplement the matching, and do not compare
+  strings, or `auto` and the `:systools` run a moment later will disagree.
+
+**`auto` currently refuses a restart edge, and that is temporary.**
+`restart_transitions_installable?/0` in `lib/mix/tasks/forecastle.relup.ex` is
+the single named predicate that decides it — not a version sniff, not an
+environment variable. Castle cannot *complete* a restart transition yet:
+`heart:set_cmd/1` raises `badarg` with no `heart` process, so the install fails
+before the reboot, and the reboot would return on the old permanent version
+anyway. `auto` is the no-switch default, so emitting a restart edge from it means
+a routine invocation producing a relup that cannot be installed — worse than
+refusing and saying why. Both `settle_chosen_restarts!/1` and
+`settle_appup_restarts!/1` ask that predicate; flipping it to `true` when
+castle#14 and #10 land restores the announcements, which are still there.
+`--hot` and `--restart` are unaffected: both are explicit requests.
+
+Because of that refusal the split-and-merge — the path that puts hand-written
+restart entries and generated hot ones into one relup — is unreachable through
+the task. It is still the defining behaviour of `auto`, so
+`plan_transitions!/5` is `@doc false`-public and `relup_test.exs` drives it
+in process. Keep the refusal **in front of** that function rather than inside it;
+that is what keeps the merge testable and the flip a one-liner.
+
+**The fixture's default transition is hot.** `:sample_dep` is a dependency whose
+version moves with the sample's, but its appup covers `0.1.0` in both directions,
+so `auto` judges `0.1.0 -> 0.1.1` hot. `upgrade_test.exs` still asks for `--hot`
+explicitly, so that the task rather than an assertion is what fails if that ever
+stops being true. `SAMPLE_DEP_VSN` pins the dependency so that a project-only
+transition can be assembled; `relup_test.exs` builds a third release (`0.1.2`)
+with it, which is the hot edge in the merge test and the target of the tests
+about appup-supplied instructions. The `auto` cases that need a restart edge are
+made by rewriting `sample_dep`'s appup in the assembled target release, not by
+changing the fixture.
 
 ## Layout
 
@@ -381,19 +425,23 @@ returns its argument, which is what makes the second observable at all.
   migrating deployment gains `bin/castle`, but keeps its old launcher. Mix's own
   launcher has always behaved this way; do not add a dispatcher to work around
   it without deciding that question for `bin/<release>` too.
-- **The emulator-restart transitions are unproven.** A relup that asks for one
-  can now be generated — `mix forecastle.relup --restart` — and
-  `relup_test.exs` covers it being generated, accepted by `verify_relup!/2` and
-  copied into the release. What is still missing is the transition itself: the
-  reboot comes back up on whichever version `releases/start_erl.data` names, and
-  only `make_permanent` writes that, while `release_handler` leaves the
-  installed version in `releases/new_start_erl.data`. `bin/castle install`
-  handles the reply and each branch of that handling is tested against a
-  launcher stub, but nothing performs the upgrade end to end until
+- **The emulator-restart transitions cannot be performed.** A relup that asks for
+  one can be generated — `mix forecastle.relup --restart` — and `relup_test.exs`
+  covers it being generated, accepted by `verify_relup!/2` and copied into the
+  release. The transition itself fails: `release_handler` calls `heart:set_cmd/1`
+  while preparing the reboot, which raises `badarg` where there is no `heart`
+  process, so the install fails before anything reboots; and the reboot would
+  come back up on whichever version `releases/start_erl.data` names, which only
+  `make_permanent` writes, while `release_handler` leaves the installed version
+  in `releases/new_start_erl.data`. `bin/castle install` handles the reply and
+  each branch of that handling is tested against a launcher stub, but nothing
+  performs the upgrade end to end until
   [castle#14](https://github.com/ausimian/castle/issues/14) and
   [#10](https://github.com/ausimian/forecastle/issues/10). The `:e2e` suite
   covers the hot-upgrade path only, and any test of a restart relup should
   assert on the relup and the assembled tree rather than on a completed upgrade.
+  This is what `auto`'s temporary refusal above exists for; `--restart` is the
+  explicit way to build one anyway.
 - **`restart_new_emulator` is not supported and is refused, not generated.**
   Adding it is its own piece of work: the provisional boot would have to come up
   and *resume* an upgrade through `new_emulator_upgrade/2`, which is strictly

@@ -9,19 +9,26 @@ defmodule Forecastle.RelupTest do
   status a build pipeline sees, and Mix does not derive that from what a task
   returns.
 
-  The three upgrade strategies are covered here too. Two of them need a release
-  the others do not: `auto` only reaches `:systools` when every application whose
-  version moved is one the project owns, and the fixture's dependency otherwise
-  moves with it, so there is a third assembly with that dependency pinned. What
-  cannot be assembled at all is a second ERTS, so the transitions that turn on
-  an ERTS change are made by rewriting a `.rel` file - which is the only thing
-  the task has to go on for that decision, and, for those transitions, the only
-  thing anything reads.
+  The three upgrade strategies are covered here too. `auto` classifies each edge
+  from the two `.rel` files and from the appups beside the target release, so the
+  cases it has to tell apart are made by rewriting one of those. The fixture's
+  dependency moves with the sample and its appup covers that move in both
+  directions, which is the interesting default; what the tests vary is what that
+  appup says, direction by direction. What cannot be assembled at all is a second
+  ERTS, so the transitions that turn on an ERTS change are made by rewriting a
+  `.rel` file - which is the only thing the task has to go on for that decision,
+  and, for those transitions, the only thing anything reads.
+
+  A third assembly pins that dependency with `SAMPLE_DEP_VSN`, which is how a
+  transition in which *only* project-owned applications moved gets built. It is
+  the target of the tests about appup-supplied instructions, and of the
+  split-and-merge test, where it supplies a hot edge to sit beside a restart one.
   """
 
   use Forecastle.ReleaseCase
 
   alias Forecastle.Fixture
+  alias Mix.Tasks.Forecastle.Relup
 
   @from "0.1.0"
   @to "0.1.1"
@@ -96,8 +103,9 @@ defmodule Forecastle.RelupTest do
     test "exits non-zero, saying what could not be done", ctx do
       # Backwards: 0.1.0's appup says nothing about coming from 0.1.1, which is
       # what a project that has not written the instructions yet looks like.
-      # `--hot`, because `auto` would make this transition a restart - the
-      # fixture's dependency moves with it - and never ask for an appup at all.
+      # `--hot`, because the dependency's appup at 0.1.0 says nothing about it
+      # either, so `auto` would classify this edge a restart and refuse it before
+      # `:systools` was asked for anything.
       {output, status} =
         relup(["--target", rel(ctx.from, @from), "--fromto", rel(ctx.to, @to), "--hot"], @from)
 
@@ -231,39 +239,110 @@ defmodule Forecastle.RelupTest do
   end
 
   describe "the auto strategy" do
-    test "makes a transition that moved an application the project does not own a restart",
+    test "upgrades an application the project does not own when its appup covers the move",
          ctx do
+      # The fixture's dependency moves from 0.1.0 to 0.1.1 and its appup names
+      # 0.1.0 in both lists. That is an instruction for this transition, whoever
+      # wrote it, so the edge is hot: `auto` restarting it would be refusing an
+      # upgrade that is demonstrably feasible, which is what "hot where it can
+      # be" cannot mean.
       output = relup!(upgrade(ctx) ++ ["--outdir", @outdir], @to)
 
-      assert output =~ "auto: chose a restart transition for #{@from}"
-      assert output =~ ":sample_dep is a dependency and changed from #{@from} to #{@to}"
+      assert output =~ "auto: every transition in this relup is a hot upgrade."
 
-      # Which instruction it chose, and what install_release/1 will reply, are
-      # in the output on purpose: the two restart instructions differ in that
-      # reply, and automation reads it.
-      assert output =~ "single restart_emulator instruction"
-      assert output =~ "{ok, Vsn, Descr}"
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], up}], [{@from_vsn, [], down}]}]} =
+               :file.consult(to_charlist(ctx.relup))
 
-      assert {:ok,
-              [
-                {@to_vsn, [{@from_vsn, [], [:restart_emulator]}],
-                 [{@from_vsn, [], [:restart_emulator]}]}
-              ]} = :file.consult(to_charlist(ctx.relup))
+      assert {:load_object_code, {:sample, @to_vsn, [Sample.Counter]}} in up
+
+      for script <- [up, down] do
+        refute :restart_emulator in script
+        refute :restart_new_emulator in script
+      end
     end
 
-    test "makes a transition that changed ERTS a restart, and says which one", ctx do
-      # The decision is taken here rather than left to :systools, which inserts
-      # restart_new_emulator for an ERTS change - the two-stage transition, which
-      # boots a hybrid temporary release and replies {continue_after_restart,
-      # ...}. Nothing about the strategy asked for that.
-      change_erts!(ctx.from, @from, "0.0.0")
+    test "matches an appup from-version the way systools_relup matches it", ctx do
+      # An appup may name a from-version as a *binary*, and then it is a regular
+      # expression: `appup_search_for_version/2` runs it with `re:run/3` and
+      # accepts the entry when the whole match is the from-version. Comparing
+      # strings would miss this one, and `auto` would restart a transition
+      # `:systools` was about to generate perfectly well from the same entry.
+      set_dep_appup!(ctx.to, @to, [{"0\\.1\\..*", []}], [{"0\\.1\\..*", []}])
 
       output = relup!(upgrade(ctx) ++ ["--outdir", @outdir], @to)
 
-      assert output =~ "ERTS changed from 0.0.0 to"
+      assert output =~ "auto: every transition in this relup is a hot upgrade."
 
-      assert {:ok, [{@to_vsn, [{@from_vsn, [], [:restart_emulator]}], _down}]} =
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], _up}], [{@from_vsn, [], _down}]}]} =
                :file.consult(to_charlist(ctx.relup))
+    end
+
+    test "refuses an edge it could only restart, naming the application and the gap", ctx do
+      # The dependency's appup now says nothing about coming from 0.1.0 in either
+      # direction, which is what a dependency that never wrote instructions for
+      # this project's transitions looks like. There is no hot upgrade to be had,
+      # and a restart transition cannot yet be performed, so `auto` refuses
+      # rather than write an upgrade plan that will not install.
+      set_dep_appup!(ctx.to, @to, [], [])
+
+      {output, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir], @to)
+
+      assert status != 0, "a restart transition was written by auto:\n\n#{output}"
+      assert output =~ "auto would make a restart transition of the upgrade from #{@from}"
+      assert output =~ "the downgrade to #{@from}"
+      assert output =~ ":sample_dep is a dependency and changed from #{@from} to #{@to}"
+      assert output =~ "sample_dep.appup has no upgrade instructions from #{@from}"
+      assert output =~ "sample_dep.appup has no downgrade instructions to #{@from}"
+
+      # The override is named, because refusing without saying what to do instead
+      # would leave a pipeline with no way forward.
+      assert output =~ "Pass --restart to generate it anyway"
+      refute File.exists?(ctx.relup), "a refused relup was written anyway"
+    end
+
+    test "says so when the application has no appup at all", ctx do
+      remove_appup!(ctx.to, @to, "sample_dep")
+
+      {output, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir], @to)
+
+      assert status != 0, "a restart transition was written by auto:\n\n#{output}"
+      assert output =~ "there is no appup at "
+      assert output =~ "sample_dep-#{@to}/ebin/sample_dep.appup"
+    end
+
+    test "classifies each direction on its own", ctx do
+      # An appup's up and down lists are independent, and a from-version in one
+      # need not be in the other. Here the dependency can be upgraded from 0.1.0
+      # but not downgraded back to it, so the only correct answer is a hot
+      # upgrade and a restart the other way - and it is the *downgrade*, alone,
+      # that the refusal names. Classifying the edge once and using the answer
+      # for both directions would name both.
+      set_dep_appup!(ctx.to, @to, [{~c"#{@from}", []}], [])
+
+      {output, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir], @to)
+
+      assert status != 0, "a restart transition was written by auto:\n\n#{output}"
+      assert output =~ "auto would make a restart transition of the downgrade to #{@from}"
+      assert output =~ "sample_dep.appup has no downgrade instructions to #{@from}"
+      refute output =~ "upgrade from #{@from}"
+    end
+
+    test "refuses a transition that changed ERTS, whatever the appups say", ctx do
+      # An ERTS change is not a hot upgrade under any policy and no appup could
+      # make it one, so it is not put to the appups at all - the dependency's
+      # appup covers its own move here, and the ERTS change is the whole reason.
+      # The decision is also taken before :systools is asked for anything, which
+      # inserts restart_new_emulator for an ERTS change: the two-stage
+      # transition, which nothing about the strategy asked for.
+      change_erts!(ctx.from, @from, "0.0.0")
+
+      {output, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir], @to)
+
+      assert status != 0, "an ERTS change was written as a restart transition:\n\n#{output}"
+      assert output =~ "auto would make a restart transition of the upgrade from #{@from}"
+      assert output =~ "ERTS changed from 0.0.0 to"
+      refute output =~ ":sample_dep"
+      refute File.exists?(ctx.relup), "a refused relup was written anyway"
     end
 
     test "generates from the appups when only the project's own applications moved", ctx do
@@ -293,6 +372,93 @@ defmodule Forecastle.RelupTest do
       assert output =~ "asks for the two-stage emulator restart"
       assert output =~ "restart_new_emulator on the upgrade from #{@from}"
       refute File.exists?(ctx.relup), "a refused relup was written anyway"
+    end
+
+    test "refuses an appup that asks for the one-stage emulator restart", ctx do
+      # The same refusal by another route. A restart_emulator an appup asked for
+      # by name is the transition `auto` would have chosen for itself, and it is
+      # just as uninstallable, so how the relup came by it makes no difference.
+      add_appup_instruction!(ctx.hot, @hot, :restart_emulator)
+
+      {output, status} = relup(project_only(ctx) ++ ["--outdir", @outdir], @hot)
+
+      assert status != 0, "an appup-supplied restart was accepted by auto:\n\n#{output}"
+      assert output =~ "an appup asks for the emulator to be restarted"
+      assert output =~ "restart_emulator on the upgrade from #{@from}"
+      assert output =~ "--restart"
+      refute File.exists?(ctx.relup), "a refused relup was written anyway"
+    end
+  end
+
+  describe "merging hot and restart transitions into one relup" do
+    # `auto` is the only strategy that splits a relup's edges by class and merges
+    # the two kinds back together, and while a restart transition cannot be
+    # performed it refuses to emit one - so the merge is not reachable through the
+    # task. It is still the defining behaviour, and the one place an edge could be
+    # dropped, or attached to the wrong direction, or one class's script applied
+    # to the whole relup. So it is driven directly, in process, past the refusal
+    # that sits in front of it. This is the test that has to keep working when
+    # that refusal is flipped back to an announcement.
+    #
+    # 0.1.2 is the target: 0.1.0 is a hot edge to it (only :sample moved, since
+    # this assembly pins the dependency) and 0.1.1 is declared a restart edge,
+    # which is what `auto` would classify it as - the dependency moves, and
+    # 0.1.2's copy of it says nothing about coming from 0.1.1.
+    setup ctx do
+      {:ok,
+       plan:
+         Relup.plan_transitions!(
+           rel(ctx.hot, @hot),
+           [rel(ctx.from, @from)],
+           [rel(ctx.from, @from)],
+           [rel(ctx.to, @to)],
+           [rel(ctx.to, @to)]
+         )}
+    end
+
+    test "keeps every from-version, in both directions", %{plan: plan} do
+      assert {@hot_vsn, [{@from_vsn, [], _}, {@to_vsn, [], _}],
+              [{@from_vsn, [], _}, {@to_vsn, [], _}]} = plan
+    end
+
+    test "puts the restart instruction on the restart edge and nowhere else", %{plan: plan} do
+      {@hot_vsn, [{@from_vsn, [], hot_up}, {@to_vsn, [], restart_up}],
+       [{@from_vsn, [], hot_down}, {@to_vsn, [], restart_down}]} = plan
+
+      assert restart_up == [:restart_emulator]
+      assert restart_down == [:restart_emulator]
+
+      for script <- [hot_up, hot_down] do
+        refute :restart_emulator in script
+        refute :restart_new_emulator in script
+      end
+    end
+
+    test "generates the hot edge from the appups, in both directions", %{plan: plan} do
+      {@hot_vsn, [{@from_vsn, [], hot_up}, _restart_up],
+       [{@from_vsn, [], hot_down}, _restart_down]} = plan
+
+      # The instruction :sample's appup asks for, translated. Its version differs
+      # between the two directions - a downgrade loads the code being returned to
+      # - so what is pinned is that each direction got a script of its own that
+      # loads the module the appup names.
+      for script <- [hot_up, hot_down] do
+        assert Enum.any?(script, &match?({:load_object_code, {:sample, _, [Sample.Counter]}}, &1))
+      end
+    end
+
+    test "is accepted by assembly, and lands in the release", %{plan: plan, cwd_relup: relup} do
+      # The other half of what a merged relup has to satisfy: it goes through
+      # Forecastle's own check on the way into a release, which reaches into both
+      # sections, and comes out the other side unchanged.
+      write_term!(relup, plan)
+
+      staged =
+        assemble!(into: "relup-merged", vsn: @hot, env: [{"SAMPLE_DEP_VSN", @from}])
+        |> Path.join("releases/#{@hot}/relup")
+
+      assert File.exists?(staged), "the merged relup was not copied into the release"
+      assert {:ok, [^plan]} = :file.consult(to_charlist(staged))
     end
   end
 
@@ -420,13 +586,28 @@ defmodule Forecastle.RelupTest do
     write_term!(file, {appup_vsn, [{from, up ++ [instruction]}], down})
   end
 
+  # The dependency's appup in the assembled target release, rewritten to say
+  # exactly what a test needs it to say. It is the application `auto` consults -
+  # the one the project does not own whose version moves with the sample's - and
+  # the fixture's own version of it covers 0.1.0 both ways, so what these tests
+  # vary is this file.
+  defp set_dep_appup!(release, vsn, ups, downs) do
+    file = Path.join(release, "lib/sample_dep-#{vsn}/ebin/sample_dep.appup")
+    {:ok, [{appup_vsn, _ups, _downs}]} = consult_and_restore!(file)
+
+    write_term!(file, {appup_vsn, ups, downs})
+  end
+
   defp remove_appups!(release, vsn) do
-    for app <- ~w(sample sample_dep) do
-      file = Path.join(release, "lib/#{app}-#{vsn}/ebin/#{app}.appup")
-      original = File.read!(file)
-      on_exit(fn -> File.write!(file, original) end)
-      File.rm!(file)
-    end
+    for app <- ~w(sample sample_dep), do: remove_appup!(release, vsn, app)
+  end
+
+  defp remove_appup!(release, vsn, app) do
+    file = Path.join(release, "lib/#{app}-#{vsn}/ebin/#{app}.appup")
+    original = File.read!(file)
+    on_exit(fn -> File.write!(file, original) end)
+
+    File.rm!(file)
   end
 
   defp consult_and_restore!(file) do

@@ -245,7 +245,7 @@ Whether a transition can be hot is a property of the edge between two releases,
 not of either release, so it is chosen per relup:
 
 ```shell
-# auto: hot where it can be, restart where it cannot
+# auto: hot where it can be
 > mix forecastle.relup --target ... --fromto ...
 
 # require a hot upgrade, and fail rather than degrade
@@ -259,23 +259,44 @@ not of either release, so it is chosen per relup:
 
 **`auto`**, the default, generates every transition from the applications'
 appups - unless something in that transition cannot be hot-upgraded, and then
-that transition, and only that one, becomes a restart. A transition becomes a
-restart when the ERTS version changed, or when the version of an application the
-project does not own changed: a dependency, one of Elixir's own applications, or
-one of OTP's. None of those carries appups written for your transitions.
-Applications merely added or removed are left alone, since starting or stopping
-one is hot. Which transitions were chosen, and why, is printed.
+that transition, and only that one, becomes a restart. Two things do that:
 
-`auto` does not fall back to a restart when an appup is missing. A transition it
-judged hot and `systools` then could not generate is a failure, so that the
-default never quietly ships something other than the upgrade it decided on.
+- **an ERTS change**, always. It is not a hot upgrade under any policy and no
+  appup could make it one.
+- **a version change in an application you do not own** - a dependency, one of
+  Elixir's own applications, one of OTP's - when no appup covers that particular
+  move. The appup consulted is the one beside the *target* release's copy of the
+  application, `lib/<app>-<vsn>/ebin/<app>.appup`, and the from-version is
+  matched the way `systools_relup` matches it, which includes the regexes an
+  appup may name a from-version with. An entry that matches is an instruction for
+  this transition whoever wrote it, so the edge stays hot; nothing matching means
+  there is no hot upgrade to be had.
+
+Each *direction* is classified on its own, because an appup's upgrade and
+downgrade lists are independent: a relup may carry a hot upgrade from a version
+and a restart back down to it. Applications merely added or removed are left
+alone, since starting or stopping one is hot. Which transitions were chosen, and
+why, is printed.
+
+`auto` does not fall back to a restart when an appup for an application you *do*
+own is missing. A transition it judged hot and `systools` then could not generate
+is a failure, so that the default never quietly ships something other than the
+upgrade it decided on.
+
+> **`auto` currently refuses a restart transition.** Castle can install a relup
+> that restarts the emulator but cannot yet complete the transition (see below),
+> so rather than write an upgrade plan that is known not to install, `auto` exits
+> non-zero and names the edge that forced the restart and why. This is temporary.
+> `--restart` is the deliberate override for anyone who wants the relup anyway.
 
 **`--hot`** requires a genuine hot upgrade of every transition, and exits
 non-zero, having written nothing, if one cannot be: a missing appup entry, an
 ERTS change, or an appup that asks for the emulator to be restarted. This is
-about feasibility rather than policy, so unlike `auto` it will happily upgrade a
-dependency whose appup covers the transition. It is the switch for a pipeline
-that promises zero downtime.
+about feasibility rather than policy, and it is not the same question `auto`
+asks: `--hot` reads every application's appup, including your own, and takes
+whatever they yield, where `auto` reads only those of the applications you do not
+own and reads them to decide whether the edge can be hot at all. It is the switch
+for a pipeline that promises zero downtime.
 
 **`--restart`** makes every transition a single `restart_emulator` instruction.
 No appup is read - not for your own applications either - and `systools` is not
@@ -304,9 +325,12 @@ its own whenever the ERTS version differs between two releases, so a default
 that simply generated a relup would ship the two-stage transition without
 anybody having chosen it.
 
-Note that a restart transition can be *generated* but not yet *performed*: the
-reboot comes back up on whichever version `releases/start_erl.data` names, and
-nothing writes the installed version there until it is committed. Until
-[castle#14](https://github.com/ausimian/castle/issues/14) and
+Note that a restart transition can be *generated* but not yet *performed*.
+`release_handler` calls `heart:set_cmd/1` while preparing the reboot, which fails
+where there is no `heart` process, so the install fails before anything reboots;
+and the reboot would come back up on whichever version
+`releases/start_erl.data` names, which nothing writes until the release is
+committed. Until [castle#14](https://github.com/ausimian/castle/issues/14) and
 [#10](https://github.com/ausimian/forecastle/issues/10) land, treat a restart
-relup as something to generate and inspect rather than to deploy.
+relup as something to generate and inspect rather than to deploy - and that is
+why `auto` refuses to produce one, while `--restart` still will.
