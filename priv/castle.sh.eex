@@ -89,10 +89,11 @@ castle_rpc () {
 }
 
 # There is no check in front of unpack or install here, and nothing may add one.
-# A system that started without a readable releases/RELEASES cannot be upgraded
-# from, and Castle refuses both operations for that from inside the call that
-# acts, raising - so the launcher exits non-zero with the reason, and its remedy,
-# on standard error, and there is nothing for this script to decide.
+# A system using the fallback release record OTP creates when release_handler
+# cannot load releases/RELEASES cannot be upgraded from. Castle refuses both
+# operations from inside the call that acts, raising - so the launcher exits
+# non-zero with the reason, and its remedy, on standard error, and there is
+# nothing for this script to decide.
 #
 # Asking first, from here, was tried and is wrong: two rpcs are two moments and
 # possibly two node instances, so a node can answer on the record it read at
@@ -544,10 +545,11 @@ The known commands are:
                    when there is none.
     remove \"VSN\"   Uninstalls VSN from the system
 
-unpack and install ask that same question themselves, and refuse rather than
-upgrade a system running from the release record OTP made up for it - a system
-that started without a readable releases/RELEASES. The remedy is a restart, and
-the refusal says so.
+unpack and install ask that same question themselves. They refuse while OTP is
+using a fallback release record instead of one loaded from releases/RELEASES.
+They cannot upgrade from that state. If the release root should be writable,
+resolve the RELEASES problem and restart. A read-only deployment can run and
+restart but cannot take an upgrade.
 
 An upgrade is not complete when the system accepts it: one that restarts the
 emulator is still to reboot, and one that replaces the emulator finishes on the

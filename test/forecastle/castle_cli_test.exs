@@ -953,6 +953,8 @@ defmodule Forecastle.CastleCliTest do
     test "documents that commit's version is optional", context do
       assert {output, 0} = castle(context, [])
       assert output =~ ~r/commit \[VSN\]/
+      assert output =~ "With no VSN, commits the release awaiting commit"
+      assert output =~ "when there is none"
     end
 
     test "documents upgradable, and that the operations ask it for themselves", context do
@@ -964,7 +966,17 @@ defmodule Forecastle.CastleCliTest do
       assert output =~ ~r/upgradable\s+Asks whether the system can be upgraded from/
       assert output =~ "saying nothing if it can"
       assert output =~ "ask that same question themselves"
-      assert output =~ "The remedy is a restart"
+      assert output =~ "cannot upgrade from that state"
+      assert output =~ "If the release root should be writable"
+    end
+
+    test "describes OTP's fallback release record accurately", context do
+      assert {output, 0} = castle(context, [])
+
+      assert output =~ ~r/OTP is\s+using a fallback release record/
+      assert output =~ "instead of one loaded from releases/RELEASES"
+      assert output =~ ~r/read-only deployment can run and\s+restart/
+      assert output =~ "cannot take an upgrade"
     end
 
     test "documents the timeout install waits for, and its default", context do

@@ -111,11 +111,10 @@ In the post-assembly step:
     only for the commands that start the system. On the **first** start of a
     deployment it creates `releases/RELEASES`, which is what lets the system
     manage its own releases — a short-lived VM, once, and only while that file
-    is absent. The release root has to be writable for it to succeed; if it is
-    not, the start still proceeds, with a warning, and `bin/castle unpack` and
-    `bin/castle install` will later refuse — each reading the running system's
-    own release records as it acts — rather than upgrade a system that cannot
-    record what it is running.
+    is absent. If the release root is read-only, the start warns and carries on;
+    the system can run and restart but cannot unpack or install upgrades. If the
+    root is intended to be writable, fix the reported error and restart before
+    upgrading.
 
     Every start also runs OTP's `heart`, deliberately configured to do nothing:
     `HEART_NO_KILL`, no `HEART_COMMAND`, a beat timeout at heart's documented
@@ -181,19 +180,19 @@ Moving the running system from one version to the next is done through `bin/cast
 # property of the relup rather than of this command.
 > myapp/bin/castle install 0.1.1
 
-# Make it the version that runs on restart too. With no version given, this
-# commits whichever version is running.
+# Make the provisional release permanent. With no version given, this commits
+# the release awaiting commit and exits non-zero if there is none.
 > myapp/bin/castle commit
 
 # Or, having decided against it, remove it again.
 > myapp/bin/castle remove 0.1.1
 ```
 
-`unpack` and `install` refuse a system that cannot be upgraded from — one that
-started without a readable `releases/RELEASES`, and so is running from a release
-record OTP made up out of its boot script. Each asks the system itself, as it
-acts, rather than trusting an answer given earlier; the refusal names the remedy,
-which is a restart.
+`unpack` and `install` exit non-zero when OTP is using its fallback release
+record instead of one loaded from `releases/RELEASES`. Each asks the system as
+it acts rather than trusting an earlier answer. Resolve the reported `RELEASES`
+problem, then restart; changing the file while the system is running does not
+replace the record already loaded.
 
 Version selection on restart needs nothing from `Forecastle` once a version has
 been committed: OTP's `release_handler` records the committed version in
@@ -357,11 +356,10 @@ upgrade it decided on.
 
 The announcement names every edge that will restart and why — both the ones
 classification chose and any `restart_emulator` an appup asked for by name, in one
-message, since they are the same transition arrived at two ways. It also says
-what that means for reading the install back: `install_release/1` replies
-`{ok, Vsn, Descr}` for such a transition, indistinguishably from a completed hot
-upgrade, and the emulator then reboots. `--hot` and `--restart` are the ways to
-insist on something else.
+message, since they are the same transition arrived at two ways. It says that
+each uses `restart_emulator`, reboots into the installed release, and leaves it
+provisional until committed. `--hot` and `--restart` are the ways to insist on
+something else.
 
 **`--hot`** requires a genuine hot upgrade of every transition, and exits
 non-zero, having written nothing, if one cannot be: a missing appup entry, an
@@ -389,8 +387,8 @@ not two spellings of one. Forecastle generates only the first:
 | Hybrid temporary release | no | yes - new ERTS, kernel, stdlib, sasl over the old applications |
 | `install_release/1` replies | `{ok, Vsn, Descr}` | `{continue_after_restart, Vsn, Descr}` |
 
-The reply differs, and automation reads the reply, which is why the task says
-which strategy it chose for each transition.
+The transitions differ operationally, which is why the task keeps the exact
+strategy name in its output.
 
 `restart_new_emulator` is not a strategy here, and is refused wherever it turns
 up. That is also why `auto` decides the ERTS case for itself rather than asking

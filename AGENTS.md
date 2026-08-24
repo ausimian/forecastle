@@ -223,6 +223,16 @@ around it composes instead:
   here** — it is the version, and everything after it is Castle's bookkeeping. Do
   not teach this script to parse the rest.
 
+  OTP constructs its marker as `EVsn ++ " " ++ Vsn`. The fragment splits at the
+  first literal space and preserves the remainder as the release version; this
+  matters because Mix permits spaces in versions and Castle manages them. POSIX
+  shell parameter expansion makes that split and its validation explicit without
+  forking a parser after Castle's marker has been claimed. A malformed line is
+  renamed to the inert `new_start_erl.data.rejected.<pid>`, warns, and falls back
+  to the permanent version. Its diagnostic uses a fixed malformed-line label
+  rather than echoing the untrusted contents, which may contain terminal control
+  bytes.
+
   **What is atomic is the claim, not the pair.** The `mv` is one operation, so
   whichever start wins it is the only one that can act on the pair. OTP's marker
   is then read and removed in separate steps, and no POSIX operation moves two

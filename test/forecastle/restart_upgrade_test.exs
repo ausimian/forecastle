@@ -309,7 +309,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # Overriding rather than refusing to start: an operator who set these has a
       # configuration conflict, not an emergency. But the setting has stopped
       # taking effect, so it is named, along with what replaced it.
-      assert booted.start_output =~ "unsetting HEART_COMMAND=[/usr/local/bin/restart-me]"
+      assert booted.start_output =~ "ignoring HEART_COMMAND=[/usr/local/bin/restart-me]"
       assert booted.start_output =~ "overriding HEART_NO_KILL=[FALSE] with TRUE"
       assert booted.start_output =~ "overriding HEART_BEAT_TIMEOUT=[11] with 65535"
     end
