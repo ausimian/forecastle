@@ -1011,7 +1011,7 @@ defmodule Forecastle.EnvScriptTest do
         refute run.stdout =~ @exec, shape
 
         assert run.stderr =~
-                 "Castle marker [<non-empty line containing whitespace or control bytes>]",
+                 "Castle marker [<non-empty line containing control bytes>]",
                shape
 
         assert run.stderr =~ "Castle's marker has no usable version", shape
@@ -1021,6 +1021,36 @@ defmodule Forecastle.EnvScriptTest do
         assert claims(root) == [], shape
         assert rejected(root) == [], shape
       end
+    end
+
+    test "still names versions whose only oddity is a space", %{root: root} do
+      # A space is a supported release version byte, not a control byte: OTP
+      # builds its marker as `EVsn ++ " " ++ Vsn` and the fragment keeps the
+      # remainder exactly, because Mix permits spaces and Castle manages them.
+      # So when the pair fails to settle for an unrelated reason - here the two
+      # markers naming different versions - the warning has to say *which*
+      # releases to go and look at. Withholding them behind the control-byte
+      # label removed the whole diagnostic from the case that needs it.
+      #
+      # Both display branches are exercised, because both had the same guard:
+      # the Castle marker's own line, and the version parsed out of OTP's.
+      armed = "#{@next} rc1"
+      target = "#{@vsn} beta"
+
+      File.write!(pending(root), "#{armed}\nsome-attempt\n")
+      File.write!(provisional(root), "16.0 #{target}\n")
+
+      run = start(root)
+
+      assert run.status == 0
+      refute run.stdout =~ @exec
+
+      assert run.stderr =~ "Castle marker [#{armed}]; OTP marker [#{target}]"
+      assert run.stderr =~ "the markers name different versions"
+      refute run.stderr =~ "containing control bytes"
+
+      refute armed?(root)
+      refute provisional?(root)
     end
 
     test "is not selected from a version that could name something else",

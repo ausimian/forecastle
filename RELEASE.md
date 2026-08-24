@@ -194,6 +194,11 @@
   `start_erl.data` exactly as it always did.
   A malformed OTP marker is renamed to `new_start_erl.data.rejected.<pid>` for
   inspection; its contents are not printed or left able to control another start.
+  A version is withheld from the warning for carrying control bytes and for
+  nothing else. An ordinary space is not one of those: OTP builds its marker as
+  `EVsn ++ " " ++ Vsn` and the fragment keeps the remainder exactly, because Mix
+  permits spaces in versions - so a space-bearing release is still named in the
+  warning that tells an operator which releases to inspect.
 
   The selection comes before anything else the hook configures, and that is
   load-bearing rather than tidy. Re-exec'ing means the hook is read again, so
