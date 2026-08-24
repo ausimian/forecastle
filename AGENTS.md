@@ -296,6 +296,22 @@ around it composes instead:
   rather than echoing the untrusted contents, which may contain terminal control
   bytes.
 
+  **A fixed label is for a line that could not be parsed, never for a version
+  that merely looks unusual — and a space is the case that proves it.** This
+  fragment reached the encoder by way of two display guards that matched
+  `[[:space:]]` beside `[[:cntrl:]]`, which reported any version carrying the
+  space the paragraph above says is *preserved* as
+  `<non-empty line containing whitespace or control bytes>`. That is the case
+  where naming the release matters most: the pair can fail to settle for a
+  reason having nothing to do with the version — mismatched markers, a version
+  directory with no `env.sh` — and the label was then the only thing telling the
+  operator which releases to inspect. The encoder answers it structurally, since
+  `0x20` is inside the printable ASCII range it passes through untouched, so
+  there is no guard left to get wrong. What must not come back is a *class* of
+  value being withheld for looking odd: everything unsafe is already
+  percent-encoded byte by byte, and `<unprintable>` is reserved for a
+  representation that could not be produced at all.
+
   **What is atomic is the claim, not the pair.** The `mv` is one operation, so
   whichever start wins it is the only one that can act on the pair. OTP's marker
   is then read and removed in separate steps, and no POSIX operation moves two

@@ -194,6 +194,12 @@
   `start_erl.data` exactly as it always did.
   A malformed OTP marker is renamed to `new_start_erl.data.rejected.<pid>` for
   inspection; its contents are not printed or left able to control another start.
+  Marker values in a warning are percent-encoded rather than replaced by a
+  label, so the release is still named. An ordinary space survives that
+  encoding, which matters because OTP builds its marker as `EVsn ++ " " ++ Vsn`
+  and the fragment keeps the remainder exactly: Mix permits spaces in versions,
+  so a space-bearing release is still named in the warning that tells an
+  operator which releases to inspect.
 
   The selection comes before anything else the hook configures, and that is
   load-bearing rather than tidy. Re-exec'ing means the hook is read again, so

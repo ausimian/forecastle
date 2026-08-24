@@ -1127,6 +1127,38 @@ defmodule Forecastle.EnvScriptTest do
       refute provisional?(root)
     end
 
+    test "still names versions whose only oddity is a space", %{root: root} do
+      # A space is a supported release version byte: OTP builds its marker as
+      # `EVsn ++ " " ++ Vsn` and the split keeps the remainder exactly, because
+      # Mix permits spaces in versions and Castle manages them. So when the pair
+      # fails to settle for an unrelated reason - here the two markers naming
+      # different versions - the warning has to say *which* releases to go and
+      # look at.
+      #
+      # The encoder is what makes that hold now: byte 0x20 is inside the printable
+      # ASCII range it passes through, so a space survives into the diagnostic
+      # while every unsafe byte is still percent-encoded. This came from the
+      # display guard that used to withhold any whitespace-bearing version behind
+      # a fixed label; the mechanism changed, the property has to keep holding.
+      armed = "#{@next} rc1"
+      target = "#{@vsn} beta"
+
+      File.write!(pending(root), "#{armed}\nsome-attempt\n")
+      File.write!(provisional(root), "16.0 #{target}\n")
+
+      run = start(root)
+
+      assert run.status == 0
+      refute run.stdout =~ @exec
+
+      assert run.stderr =~ "Castle marker [#{armed}]; OTP marker [#{target}]"
+      assert run.stderr =~ "the markers name different versions"
+      refute run.stderr =~ "%20"
+
+      refute armed?(root)
+      refute provisional?(root)
+    end
+
     test "is selected from a pair naming a version outside ASCII", %{root: root} do
       # The other direction, and the reason the control class had to go rather
       # than be pinned to a locale: every valid UTF-8 codepoint outside C0, DEL
