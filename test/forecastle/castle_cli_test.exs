@@ -18,6 +18,9 @@ defmodule Forecastle.CastleCliTest do
 
   use Forecastle.ReleaseCase
 
+  @commit_done_signal "__CASTLE_COMMIT_DONE_V2__"
+  @nothing_to_commit_signal "__CASTLE_NOTHING_TO_COMMIT_V2__"
+
   # An upper bound on how long a command driven by the launcher stub may take.
   # Deliberately far above anything a real run needs: it says "this waited when
   # it should have stopped", not "this took exactly so long", and a loaded
@@ -208,46 +211,202 @@ defmodule Forecastle.CastleCliTest do
       # the argumentless form has nothing to commit there and says so rather than
       # committing the release it is already on. The assertion was always about
       # `:current`; only the name was wrong.
+      stub_commit!(context, :done)
       assert ["rpc", expression] = castle!(context, ["commit"])
 
       assert expression =~ ":release_handler.which_releases(:current)"
-      assert expression =~ "Castle.commit(to_string(vsn))"
+      assert expression =~ ":ok = Castle.commit(to_string(vsn))"
+      assert expression =~ @commit_done_signal
+      assert expression =~ @nothing_to_commit_signal
     end
 
-    test "says so when there is nothing to commit", context do
+    test "keeps the human diagnostic out of the remote protocol", context do
+      stub_commit!(context, :done)
       assert ["rpc", expression] = castle!(context, ["commit"])
-      assert expression =~ "No release is awaiting commit"
+
+      refute expression =~ "No release is awaiting commit"
     end
 
     test "exits non-zero when there was nothing to commit", context do
       # Whatever asked for a commit has to be able to tell that none happened.
-      assert {output, status} =
-               castle(context, ["commit"], [
-                 {"CASTLE_STUB_OUTPUT",
-                  "No release is awaiting commit. Pass a version explicitly."}
-               ])
+      stub_commit!(context, :nothing)
+      assert {output, status} = castle(context, ["commit"])
 
       assert status == 1
-      assert output =~ "No release is awaiting commit"
+      assert output == "No release is awaiting commit. Pass a version explicitly.\n"
+      refute output =~ @nothing_to_commit_signal
+    end
+
+    test "preserves output before the exact no-commit record", context do
+      noise = "warning: the node reported ordinary output"
+      stub_commit!(context, :nothing, noise)
+
+      assert {output, 1} = castle(context, ["commit"])
+
+      assert output ==
+               noise <> "\nNo release is awaiting commit. Pass a version explicitly.\n"
     end
 
     test "exits zero, and reports, when a commit happened", context do
-      assert {output, 0} =
-               castle(context, ["commit"], [
-                 {"CASTLE_STUB_OUTPUT",
-                  "Committed 0.1.1. System restarts will now boot into this version."}
-               ])
+      report = "Committed 0.1.1. System restarts will now boot into this version."
+      stub_commit!(context, :done, report)
 
-      assert output =~ "Committed 0.1.1"
+      assert {output, 0} = castle(context, ["commit"])
+
+      assert output == report <> "\n"
+      refute output =~ @commit_done_signal
     end
 
-    test "propagates a failing launcher exit status", context do
-      File.write!(
-        Path.join([context.root, "bin", "sample"]),
-        "#!/bin/sh\necho 'rpc failed' >&2\nexit 3\n"
+    test "preserves launcher output after a successful commit record", context do
+      stub_commit!(context, :done, "commit report", "launcher warning")
+
+      assert {"commit report\nlauncher warning\n", 0} = castle(context, ["commit"])
+    end
+
+    test "preserves launcher output after a no-commit record", context do
+      stub_commit!(context, :nothing, "before", "after")
+
+      assert {output, 1} = castle(context, ["commit"])
+
+      assert output ==
+               "before\nafter\nNo release is awaiting commit. Pass a version explicitly.\n"
+    end
+
+    test "a done record wins over a non-zero launcher status", context do
+      stub_commit_with_status!(
+        context,
+        :done,
+        7,
+        "commit report",
+        "trailing launcher output",
+        "--rpc-eval : RPC failed with reason :noconnection"
       )
 
-      assert {_output, 3} = castle(context, ["commit"])
+      assert {out, err, 0} = castle_streams(context, ["commit"])
+      assert out == "commit report\n"
+
+      assert err ==
+               "--rpc-eval : RPC failed with reason :noconnection\n" <>
+                 "trailing launcher output\n" <>
+                 "WARNING: commit succeeded, but the launcher exited with status 7 after " <>
+                 "reporting the result.\n"
+
+      refute out =~ @commit_done_signal
+      refute err =~ @commit_done_signal
+    end
+
+    test "a no-current record wins over a non-zero launcher status", context do
+      stub_commit_with_status!(context, :nothing, 6, "", "launcher warning", "")
+
+      assert {out, err, 1} = castle_streams(context, ["commit"])
+      assert out == "No release is awaiting commit. Pass a version explicitly.\n"
+
+      assert err ==
+               "launcher warning\n" <>
+                 "WARNING: no release was committed; the launcher exited with status 6 after " <>
+                 "reporting the result.\n"
+
+      refute out =~ @nothing_to_commit_signal
+      refute err =~ @nothing_to_commit_signal
+    end
+
+    test "does not confuse ordinary token text or an earlier exact record with the result",
+         context do
+      ordinary =
+        "Castle printed #{@nothing_to_commit_signal}:not-this-run and #{@commit_done_signal}"
+
+      # The selected record carries the shell invocation's tag. Even an exact
+      # record for a different invocation remains ordinary output.
+      stub_commit!(
+        context,
+        :done,
+        ordinary <> "\n#{@nothing_to_commit_signal}:999999"
+      )
+
+      assert {output, 0} = castle(context, ["commit"])
+
+      assert output == ordinary <> "\n#{@nothing_to_commit_signal}:999999\n"
+    end
+
+    test "the expression's later record wins over an earlier exact record", context do
+      stub_launcher!(context, """
+      done=$(printf '%s\n' "$2" | sed -n 's/.*~s(\\(#{@commit_done_signal}:[0-9][0-9]*\\)).*/\\1/p')
+      nothing=$(printf '%s\n' "$2" | sed -n 's/.*~s(\\(#{@nothing_to_commit_signal}:[0-9][0-9]*\\)).*/\\1/p')
+      printf '%s\nordinary output\n%s\n' "$nothing" "$done"
+      """)
+
+      assert {output, 0} = castle(context, ["commit"])
+      assert [earlier, "ordinary output", ""] = String.split(output, "\n")
+      assert earlier =~ ~r/^#{@nothing_to_commit_signal}:[0-9]+$/
+    end
+
+    test "rejects a successful launcher response without a protocol record", context do
+      assert {out, err, 1} =
+               castle_streams(context, ["commit"], [
+                 {"CASTLE_STUB_OUTPUT", "ordinary output only"}
+               ])
+
+      assert out == ""
+
+      assert err ==
+               "ordinary output only\n" <>
+                 "ERROR: commit returned no recognised result; it may or may not be permanent. " <>
+                 "Run bin/castle releases to inspect release state.\n"
+    end
+
+    test "preserves a successful result when ordinary-output filtering fails", context do
+      stub_commit!(context, :done, "commit report")
+
+      assert {out, err, 0} =
+               castle_streams(context, ["commit"], failing_nth_tool(context, "awk", 2))
+
+      assert out == ""
+      assert err == "WARNING: commit succeeded, but its ordinary output could not be displayed.\n"
+      refute err =~ @commit_done_signal
+      refute err =~ @nothing_to_commit_signal
+    end
+
+    test "preserves an empty result when ordinary-output filtering fails", context do
+      stub_commit!(context, :nothing, "launcher warning")
+
+      assert {out, err, 1} =
+               castle_streams(context, ["commit"], failing_nth_tool(context, "awk", 2))
+
+      assert out == "No release is awaiting commit. Pass a version explicitly.\n"
+
+      assert err ==
+               "WARNING: no release was committed, and ordinary command output could not be displayed.\n"
+
+      refute err =~ @commit_done_signal
+      refute err =~ @nothing_to_commit_signal
+    end
+
+    test "does not replay a record when the protocol parser fails", context do
+      stub_commit_with_status!(context, :done, 5, "commit report", "", "")
+
+      assert {out, err, 5} =
+               castle_streams(context, ["commit"], failing_nth_tool(context, "awk", 1))
+
+      assert out == ""
+
+      assert err ==
+               "ERROR: commit result could not be read safely; it may or may not be permanent. " <>
+                 "Run bin/castle releases to inspect release state.\n"
+
+      refute err =~ @commit_done_signal
+      refute err =~ @nothing_to_commit_signal
+    end
+
+    test "routes a failing launcher's captured output to standard error", context do
+      stub_launcher!(context, """
+      printf '%s\n' 'rpc stdout'
+      printf '%s\n' 'rpc stderr' >&2
+      exit 3
+      """)
+
+      assert {out, err, 3} = castle_streams(context, ["commit"])
+      assert out == ""
+      assert err == "rpc stderr\nrpc stdout\n"
     end
   end
 
@@ -326,6 +485,19 @@ defmodule Forecastle.CastleCliTest do
       assert calls(context) == ["rpc", "Castle.install(~s(noconnection))"]
     end
 
+    test "requires the launcher disconnect diagnostic to occupy the whole line", context do
+      stub_launcher!(context, """
+      if [ -f "#{context.root}/tried" ]; then exit 0; fi
+      : > "#{context.root}/tried"
+      echo '--rpc-eval : RPC failed with reason :noconnection (quoted by an operator message)' >&2
+      exit 3
+      """)
+
+      assert {output, 3} = castle(context, ["install", "0.1.1"])
+      assert output =~ "quoted by an operator message"
+      assert calls(context) == ["rpc", "Castle.install(~s(0.1.1))"]
+    end
+
     test "confirms a version named noconnection like any other", context do
       # The other half of that: the word in the version must not get in the way
       # of the ordinary path either.
@@ -361,6 +533,37 @@ defmodule Forecastle.CastleCliTest do
 
       assert status != 0
       assert output =~ "CASTLE_INSTALL_TIMEOUT must be a whole number of seconds"
+      refute recorded?(context)
+    end
+
+    test "does not echo control bytes from an invalid timeout", context do
+      hostile = "soon\nforged\r\e[31m\a"
+
+      assert {"", err, status} =
+               castle_streams(context, ["install", "0.1.1"], [
+                 {"CASTLE_INSTALL_TIMEOUT", hostile}
+               ])
+
+      assert status != 0
+
+      assert err ==
+               "ERROR: CASTLE_INSTALL_TIMEOUT must be a whole number of seconds, " <>
+                 "got: soon%0Aforged%0D%1B[31m%07\n"
+
+      refute recorded?(context)
+    end
+
+    test "keeps a non-ASCII RELEASE_TMP identifiable when it cannot be created", context do
+      blocker = Path.join(context.root, "blocked")
+      File.write!(blocker, "not a directory")
+      tmp = Path.join(blocker, "café")
+
+      assert {"", err, status} =
+               castle_streams(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
+
+      assert status != 0
+      assert err =~ String.replace(tmp, "é", "%C3%A9")
+      assert err =~ "set RELEASE_TMP somewhere writable"
       refute recorded?(context)
     end
   end
@@ -767,6 +970,29 @@ defmodule Forecastle.CastleCliTest do
       assert occurrences(err, "RPC failed with reason :noconnection") == 0
     end
 
+    test "does not filter prose that quotes the disconnect diagnostic", context do
+      quoted =
+        "--rpc-eval : RPC failed with reason :noconnection (quoted by an operator message)"
+
+      stub_launcher!(context, """
+      n=$(cat "#{context.root}/n" 2>/dev/null || echo 0)
+      n=$((n + 1))
+      echo "$n" > "#{context.root}/n"
+      case $n in
+        1) echo 'Now running 0.1.1 (previously 0.1.0).'; exit 0 ;;
+        2) echo '#{quoted}' >&2; exit 1 ;;
+        *) exit 0 ;;
+      esac
+      """)
+
+      assert {_out, err, 0} =
+               castle_streams(context, ["install", "0.1.1"], [
+                 {"CASTLE_INSTALL_TIMEOUT", "60"}
+               ])
+
+      assert err =~ quoted
+    end
+
     test "does not repeat the expected diagnostic once per attempt", context do
       # Every couple of seconds for the length of the wait, which is what
       # replaying each attempt unconditionally would mean, buries anything that
@@ -907,7 +1133,7 @@ defmodule Forecastle.CastleCliTest do
 
       assert status != 0
       assert out == ""
-      assert err =~ "is not a usable release version"
+      assert err =~ "install cannot use release version [0.1.1%0A--rpc-eval"
       refute recorded?(context)
     end
   end
@@ -989,6 +1215,19 @@ defmodule Forecastle.CastleCliTest do
       assert output =~ "not an individual question"
     end
 
+    test "does not echo control bytes from the timeout in help", context do
+      hostile = "300\nforged\r\e[31m\a"
+
+      assert {out, err, 0} =
+               castle_streams(context, [], [{"CASTLE_INSTALL_TIMEOUT", hostile}])
+
+      assert out == ""
+      assert err =~ "(300%0Aforged%0D%1B[31m%07, at most 86400)"
+      refute err =~ "\r"
+      refute err =~ "\e"
+      refute err =~ "\a"
+    end
+
     for command <- ~w(unpack install remove) do
       test "#{command} without a version is rejected rather than delegated", context do
         assert {output, status} = castle(context, [unquote(command)])
@@ -1032,9 +1271,97 @@ defmodule Forecastle.CastleCliTest do
           assert {output, status} = castle(context, [command, unquote(version)])
 
           assert status != 0, "#{command} accepted #{inspect(unquote(version))}"
-          assert output =~ "is not a usable release version"
+          assert output =~ "ERROR: #{command} cannot use release version ["
           refute recorded?(context), "#{command} delegated #{inspect(unquote(version))}"
         end
+      end
+    end
+
+    test "rejected control bytes are represented without reaching the terminal", context do
+      controls = [
+        {"\n", "%0A"},
+        {"\r", "%0D"},
+        {"\t", "%09"},
+        {"\e", "%1B"},
+        {"\a", "%07"},
+        {<<0xC2, 0x9B>>, "%C2%9B"}
+      ]
+
+      for {control, encoded} <- controls do
+        version = "0.1.1#{control}forged"
+
+        assert {"", err, status} = castle_streams(context, ["install", version])
+
+        assert status != 0
+        assert err == "ERROR: install cannot use release version [0.1.1#{encoded}forged]\n"
+        refute recorded?(context)
+      end
+    end
+
+    test "rejects malformed UTF-8 and renders its bytes safely", context do
+      malformed = [
+        {<<0x7F>>, "%7F"},
+        {<<0x80>>, "%80"},
+        {<<0xC0, 0xAF>>, "%C0%AF"},
+        {<<0xE0, 0x80, 0xAF>>, "%E0%80%AF"},
+        {<<0xED, 0xA0, 0x80>>, "%ED%A0%80"},
+        {<<0xF4, 0x90, 0x80, 0x80>>, "%F4%90%80%80"},
+        {<<0xE2, 0x82>>, "%E2%82"}
+      ]
+
+      for {bytes, encoded} <- malformed do
+        version = "1.2.3-" <> bytes
+
+        assert {output, status} = castle(context, ["remove", version])
+        assert status != 0
+        assert output == "ERROR: remove cannot use release version [1.2.3-#{encoded}]\n"
+        refute recorded?(context)
+      end
+    end
+
+    test "validator-tool failures refuse versions with an actionable diagnostic", context do
+      for tool <- ["od", "awk"] do
+        File.rm(context.record)
+        env = failing_tool(context, tool)
+
+        assert {"", err, status} =
+                 castle_streams(context, ["install", "1.2.3-café"], env)
+
+        assert status != 0
+
+        assert err ==
+                 "ERROR: install cannot validate release version [<unprintable>]; " <>
+                   "release-version validation is unavailable. Check od and awk.\n"
+
+        refute recorded?(context)
+      end
+    end
+
+    test "uses the safe value when display remains available after validation fails", context do
+      env = failing_nth_tool(context, "awk", 1)
+
+      assert {"", err, status} =
+               castle_streams(context, ["remove", "1.2.3-café"], env)
+
+      assert status != 0
+
+      assert err ==
+               "ERROR: remove cannot validate release version [1.2.3-caf%C3%A9]; " <>
+                 "release-version validation is unavailable. Check od and awk.\n"
+
+      refute recorded?(context)
+    end
+
+    test "literal echo escape spellings stay literal in rejected versions", context do
+      for suffix <- [~S(\nforged), ~S(\0033[31mforged), ~S(\cforged)] do
+        version = "0.1.1#{suffix}"
+
+        assert {"", err, status} = castle_streams(context, ["remove", version])
+
+        assert status != 0
+        assert err == "ERROR: remove cannot use release version [#{version}]\n"
+        refute err =~ "\e"
+        refute recorded?(context)
       end
     end
 
@@ -1048,6 +1375,9 @@ defmodule Forecastle.CastleCliTest do
       "0.1.0-alpha_2",
       "20240101.1",
       "1.0~rc1",
+      "1.2.3-café",
+      "1.2.3-雪",
+      "1.2.3-🦀",
       "1.2.3 4",
       ~s(1.2.3'x),
       ~s(1.2.3"x),
@@ -1168,6 +1498,33 @@ defmodule Forecastle.CastleCliTest do
     [{"PATH", shims <> ":" <> System.get_env("PATH")}]
   end
 
+  defp failing_tool(context, tool) do
+    shims = Path.join(context.root, "failing-#{tool}")
+    File.mkdir_p!(shims)
+    File.write!(Path.join(shims, tool), "#!/bin/sh\nexit 1\n")
+    File.chmod!(Path.join(shims, tool), 0o755)
+
+    [{"PATH", shims <> ":" <> System.get_env("PATH")}]
+  end
+
+  defp failing_nth_tool(context, tool, nth) do
+    shims = Path.join(context.root, "failing-#{tool}-#{nth}")
+    count = Path.join(shims, "count")
+    File.mkdir_p!(shims)
+
+    File.write!(Path.join(shims, tool), """
+    #!/bin/sh
+    n=$(sed -n '1p' #{quoted(count)} 2>/dev/null || printf 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > #{quoted(count)}
+    if [ "$n" -eq #{nth} ]; then exit 1; fi
+    exec #{quoted(System.find_executable(tool))} "$@"
+    """)
+
+    File.chmod!(Path.join(shims, tool), 0o755)
+    [{"PATH", shims <> ":" <> System.get_env("PATH")}]
+  end
+
   defp occurrences(text, needle), do: length(String.split(text, needle)) - 1
 
   defp timed(fun) do
@@ -1206,6 +1563,48 @@ defmodule Forecastle.CastleCliTest do
   # particular state. The recording is kept: what was called still matters.
   defp stub_launcher!(context, body) do
     write_stub!(Path.join([context.root, "bin", "sample"]), context.record, body)
+  end
+
+  # The record includes bin/castle's process id, so a protocol-aware launcher
+  # stub extracts the record embedded in the RPC expression instead of guessing
+  # it. This also keeps the tests honest about the per-invocation boundary.
+  defp stub_commit!(context, result, before \\ "", trailing \\ "") do
+    prefix =
+      case result do
+        :done -> @commit_done_signal
+        :nothing -> @nothing_to_commit_signal
+      end
+
+    stub_launcher!(context, """
+    record=$(printf '%s\n' "$2" | sed -n 's/.*~s(\\(#{prefix}:[0-9][0-9]*\\)).*/\\1/p')
+    printf '%s' #{quoted(before)}
+    printf '\n%s\n' "$record"
+    printf '%s' #{quoted(trailing)}
+    """)
+  end
+
+  defp stub_commit_with_status!(
+         context,
+         result,
+         status,
+         before,
+         trailing,
+         stderr
+       ) do
+    prefix =
+      case result do
+        :done -> @commit_done_signal
+        :nothing -> @nothing_to_commit_signal
+      end
+
+    stub_launcher!(context, """
+    record=$(printf '%s\n' "$2" | sed -n 's/.*~s(\\(#{prefix}:[0-9][0-9]*\\)).*/\\1/p')
+    printf '%s' #{quoted(before)}
+    printf '\n%s\n' "$record"
+    printf '%s' #{quoted(trailing)}
+    if [ -n #{quoted(stderr)} ]; then printf '%s\n' #{quoted(stderr)} >&2; fi
+    exit #{status}
+    """)
   end
 
   # Writes a launcher stub: it records every call it is handed, and then runs

@@ -55,6 +55,38 @@ defmodule Forecastle.AssemblyTest do
       end
     end
 
+    test "matches the real launcher's unreachable-node diagnostic", %{forecastle: forecastle} do
+      castle = File.read!(Path.join(forecastle, "bin/castle"))
+
+      assert [_, classified_line] =
+               Regex.run(~r/^lost_connection_line='([^'\n]+)'$/m, castle)
+
+      unique = System.unique_integer([:positive])
+      stdout = Path.join(forecastle, "classifier-#{unique}.stdout")
+      stderr = Path.join(forecastle, "classifier-#{unique}.stderr")
+      on_exit(fn -> File.rm(stdout) end)
+      on_exit(fn -> File.rm(stderr) end)
+
+      script =
+        ~S(exec "$CASTLE_TEST_LAUNCHER" rpc ':ok' >"$CASTLE_TEST_STDOUT" 2>"$CASTLE_TEST_STDERR")
+
+      env = [
+        {"CASTLE_TEST_LAUNCHER", Path.join(forecastle, "bin/sample")},
+        {"CASTLE_TEST_STDOUT", stdout},
+        {"CASTLE_TEST_STDERR", stderr},
+        {"RELEASE_DISTRIBUTION", "sname"},
+        {"RELEASE_NODE", "castle_classifier_missing_#{unique}"},
+        {"RELEASE_COOKIE", "castle_classifier_cookie"},
+        {"ERL_CRASH_DUMP_SECONDS", "0"}
+      ]
+
+      assert {"", status} = cmd("/bin/sh", ["-c", script], env)
+      assert status != 0
+      assert File.read!(stdout) == ""
+
+      assert String.split(File.read!(stderr), "\n", trim: true) == [classified_line]
+    end
+
     test "is not installed by a plain Mix release", %{mix: mix} do
       refute File.exists?(Path.join(mix, "bin/castle"))
     end
@@ -413,7 +445,19 @@ defmodule Forecastle.AssemblyTest do
       # where it ends an awk pass and has nothing to do with the launcher. What
       # this test is about is the fragment never taking the start down, so it has
       # to say that rather than something that happens to be spelled like it.
-      assert env_sh =~ "warning: cannot create $RELEASE_ROOT/releases/RELEASES"
+      # The path interpolated into the warning is the display-safe value with a
+      # fixed fallback, never RELEASE_ROOT itself. Capture the local variable so
+      # this pins the contract without pinning its implementation name.
+      assert [_, display] =
+               Regex.run(
+                 ~r/(\w+)=\$\(castle_safe_display "\$RELEASE_ROOT"\)\s+\|\|\s+\1="<unprintable>"/,
+                 env_sh
+               )
+
+      assert env_sh =~ "warning: cannot create $#{display}/releases/RELEASES"
+      refute env_sh =~ ~s(warning: cannot create $RELEASE_ROOT/releases/RELEASES)
+      assert env_sh =~ "warning: cannot create "
+      assert env_sh =~ "/releases/RELEASES. This"
       assert env_sh =~ "can run and restart but cannot unpack or install upgrades"
       assert env_sh =~ "If the release root should be writable"
       assert env_sh =~ "restart before upgrading"

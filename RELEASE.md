@@ -494,6 +494,10 @@
 
 ### Security
 
+- Rejected release versions and invalid environment settings are shown with a
+  reversible, single-line representation. Diagnostics name the command and
+  preserve visible ASCII; other bytes are percent-encoded, so paths remain
+  identifiable without letting control bytes forge logs or drive a terminal.
 - `bin/castle` built its RPC expression by interpolating the version
   argument into Elixir source, so a version such as `1.2.3));System.stop(1)#`
   closed the sigil and ran arbitrary code on the node with the release
@@ -504,12 +508,22 @@
   add a whole line of its own to that output - including a forgery of the
   launcher's disconnect diagnostic, which `install` reads to decide whether a
   failure was really a reboot, and which would have it confirm and report a
-  success for an install that had failed. Everything else is passed through,
-  since Mix does not constrain a release version. The same sink existed in the
-  launcher Forecastle used to generate.
+  success for an install that had failed. Managed versions must be valid UTF-8
+  and contain no C0, DEL or C1 controls. If that validation is unavailable, the
+  command refuses the version and names the failed validation. The same sink
+  existed in the launcher Forecastle used to generate.
 
 ### Fixed
 
+- Argumentless `bin/castle commit` now uses a dedicated machine result instead
+  of matching human-facing text in command output. Its diagnostic can change
+  without changing the exit status, and launcher output around the result is
+  preserved. A recognised result remains authoritative if the launcher exits
+  afterwards. If no result can be read safely, the command withholds the machine
+  output, reports that permanence is unknown and points to `bin/castle releases`.
+  Install's lost-connection check is isolated as a whole-line launcher
+  diagnostic, so ordinary error copy cannot trigger the restart-confirmation
+  path.
 - `mix forecastle.relup` failed with `:systools is not available` in projects
   that do not themselves depend on `:sasl`, because Elixir prunes unused OTP
   applications from the build's code path.

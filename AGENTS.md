@@ -60,11 +60,43 @@ around it composes instead:
   which for a transition that restarts the emulator is before the upgrade has
   run, and the reply may not outlive the reboot it triggers. A lost connection
   is therefore inconclusive rather than fatal — recognised as the launcher's
-  whole `--rpc-eval … :noconnection` diagnostic at the start of a line, never as
+  whole `--rpc-eval … :noconnection` diagnostic on one complete line, never as
   the bare word, which is a usable release version and turns up in the messages
   that name a version that failed — which is also why `validate_vsn` refuses
   control characters, since a version carrying a newline could otherwise forge
-  that line for itself.
+  that line for itself. Classification and filtering live behind two shell
+  helpers; operator-facing copy does not share their pattern.
+  `Forecastle.AssemblyTest` asks the real generated Mix launcher to call an
+  unreachable local node and compares its stderr line to this contract across
+  the supported Elixir matrix; do not replace that measurement with another
+  restatement of the literal.
+
+  Managed versions are valid UTF-8 with no C0, DEL or C1 controls. The validator
+  distinguishes unsafe input from an unavailable `od` or `awk`; both refuse the
+  command, but unavailable validation is reported as such instead of blaming the
+  value. Its displayed value is independently encoded and falls back to
+  `<unprintable>` if the display tools are unavailable too.
+
+  The version-less `commit` has a separate protocol of its own. The remote
+  expression appends one of two exact record lines, for no provisional release
+  or a successful commit. Each record carries the wrapper invocation's tag,
+  built from `$$` to separate concurrent invocations and reused ordinary output.
+  It is an identifier, not an unpredictable secret, and does not defend against
+  stdout deliberately forged with the current tag. The done record follows an
+  explicit `:ok = Castle.commit(...)`, so a changed Castle return contract cannot
+  accidentally report success.
+  The launcher may write after the expression returns, so the wrapper takes the
+  last exact matching record and strips only that line. Earlier token-like output
+  and output after the record remain operator output, and the local human
+  diagnostic can change without changing control flow. The record remains
+  authoritative if the launcher exits non-zero after emitting it. If the parser
+  itself is unavailable, captured output is withheld because it may contain the
+  record. A status-zero reply
+  without a recognised record is a protocol failure: its captured output is
+  reported, the commit is described as possibly permanent, and the operator is
+  directed to `bin/castle releases`. Once a record is recognised, filtering
+  ordinary output cannot change its outcome: a filtering failure reports that
+  the output was unavailable without replaying the machine record.
 
   The install's two streams are captured apart, for different purposes: its
   standard error is what the classifier reads and is passed through to standard
@@ -226,8 +258,10 @@ around it composes instead:
   OTP constructs its marker as `EVsn ++ " " ++ Vsn`. The fragment splits at the
   first literal space and preserves the remainder as the release version; this
   matters because Mix permits spaces in versions and Castle manages them. POSIX
-  shell parameter expansion makes that split and its validation explicit without
-  forking a parser after Castle's marker has been claimed. A malformed line is
+  shell parameter expansion makes that split and its structural validation
+  explicit without forking a parser after Castle's marker has been claimed.
+  Selection must remain fork-free: failure of a display utility cannot reject
+  valid reboot evidence, quarantine it, or stop the boot. A malformed line is
   renamed to the inert `new_start_erl.data.rejected.<pid>`, warns, and falls back
   to the permanent version. Its diagnostic uses a fixed malformed-line label
   rather than echoing the untrusted contents, which may contain terminal control
@@ -345,11 +379,23 @@ around it composes instead:
   **It overrides rather than refuses, and says so.** An operator who set one of
   these has a configuration conflict, not an emergency, and a failed boot is a
   worse answer than the conflict — but a setting that silently stops taking
-  effect is worse than either, so each value actually being displaced is named on
-  standard error along with what replaced it and why. A deployment that set none
+  effect is worse than either, so each setting actually being displaced is named
+  on standard error along with what replaced it and why. Values use a reversible
+  ASCII representation: visible ASCII is preserved, `%` and every other byte are
+  percent-encoded. Unicode paths stay identifiable and C0, DEL, C1 and invalid
+  UTF-8 cannot forge log lines or control a terminal. A deployment that set none
   of them — every ordinary one — says nothing at all, which is why the checks are
-  on the *value* rather than on the variable being set: `HEART_NO_KILL=TRUE`
-  already agrees, and an empty `HEART_COMMAND` displaces nothing.
+  on the *value* rather than on the variable being set:
+  `HEART_NO_KILL=TRUE` already agrees, and an empty `HEART_COMMAND` displaces
+  nothing.
+
+  Formatting fails closed: a diagnostic whose representation cannot be produced
+  uses the fixed `<unprintable>` label. Every formatter substitution supplies that
+  fallback explicitly because this fragment is sourced under `set -e` and a
+  diagnostic must never stop the boot. Marker selection itself does not depend on
+  `od`, `awk` or any other display tool, and successful selection does not invoke
+  the formatter at all; marker values are formatted only when a warning needs
+  them.
 
   **A variable set to nothing is a value, and `${VAR:-default}` cannot see
   that.** It treats set-and-empty as absent, which is what these were written

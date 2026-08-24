@@ -715,6 +715,51 @@ defmodule Forecastle.EnvScriptTest do
       assert run.env["HEART_NO_KILL"] == "TRUE"
       assert run.env["HEART_BEAT_TIMEOUT"] == "65535"
     end
+
+    test "does not echo control bytes from overridden values", %{root: root} do
+      hostile = "value\nforged\r\e[31m\a" <> <<0xC2, 0x9B>>
+      display = "value%0Aforged%0D%1B[31m%07%C2%9B"
+
+      run =
+        start(root, [
+          {"HEART_COMMAND", hostile},
+          {"HEART_NO_KILL", hostile},
+          {"HEART_BEAT_TIMEOUT", hostile}
+        ])
+
+      assert run.status == 0
+
+      assert run.stderr ==
+               "warning: ignoring HEART_COMMAND=[#{display}] for this " <>
+                 "start; the external supervisor owns restarts. Remove HEART_COMMAND from " <>
+                 "the environment to silence this.\n" <>
+                 "warning: overriding HEART_NO_KILL=[#{display}] with " <>
+                 "TRUE for this start so heart cannot kill the node. Remove HEART_NO_KILL " <>
+                 "from the environment to silence this.\n" <>
+                 "warning: overriding HEART_BEAT_TIMEOUT=[#{display}] " <>
+                 "with 65535 for this start so a heartbeat timeout cannot stop the node. " <>
+                 "Remove HEART_BEAT_TIMEOUT from the environment to silence this.\n"
+
+      assert run.env["HEART_COMMAND"] == "<unset>"
+      assert run.env["HEART_NO_KILL"] == "TRUE"
+      assert run.env["HEART_BEAT_TIMEOUT"] == "65535"
+    end
+
+    test "keeps literal echo escape spellings inert", %{root: root} do
+      run =
+        start(root, [
+          {"HEART_COMMAND", ~S(value\nforged)},
+          {"HEART_NO_KILL", ~S(value\0033[31mforged)},
+          {"HEART_BEAT_TIMEOUT", ~S(value\cforged)}
+        ])
+
+      assert run.status == 0
+      assert run.stderr =~ "HEART_COMMAND=[value\\nforged]"
+      assert run.stderr =~ "HEART_NO_KILL=[value\\0033[31mforged]"
+      assert run.stderr =~ "HEART_BEAT_TIMEOUT=[value\\cforged] with 65535"
+      assert length(String.split(run.stderr, "\n", trim: true)) == 3
+      refute run.stderr =~ "\e"
+    end
   end
 
   describe "a command that does not start the system" do
@@ -741,6 +786,24 @@ defmodule Forecastle.EnvScriptTest do
       # probe's cost bounded to a node start, and it is the reason the removed gate
       # was not the only thing standing between the fork and the common path.
       assert probes(root) == []
+    end
+  end
+
+  describe "RELEASES bootstrap diagnostics" do
+    test "keeps a non-ASCII release root identifiable", %{root: root} do
+      unicode_root = root <> "-café"
+      File.ln_s!(root, unicode_root)
+      on_exit(fn -> File.rm(unicode_root) end)
+      File.rm!(Path.join(root, "releases/RELEASES"))
+
+      run =
+        start(root, [
+          {"RELEASE_ROOT", unicode_root},
+          {"REL_VSN_DIR", Path.join([unicode_root, "releases", @vsn])}
+        ])
+
+      assert run.status == 0
+      assert run.stderr =~ String.replace(unicode_root, "é", "%C3%A9") <> "/releases/RELEASES"
     end
   end
 
@@ -997,11 +1060,12 @@ defmodule Forecastle.EnvScriptTest do
 
     test "does not print control bytes from Castle's marker", %{root: root} do
       controlled = [
-        {"carriage return", "#{@next}\r", "\r"},
-        {"escape", "#{@next}\e[31m", "\e"}
+        {"carriage return", "#{@next}\r", "\r", "%0D"},
+        {"escape", "#{@next}\e[31m", "\e", "%1B[31m"},
+        {"C1 control", "#{@next}" <> <<0xC2, 0x9B>>, <<0xC2, 0x9B>>, "%C2%9B"}
       ]
 
-      for {shape, version, control} <- controlled do
+      for {shape, version, control, encoded} <- controlled do
         File.write!(pending(root), "#{version}\nsome-attempt\n")
         File.write!(provisional(root), "16.0 #{@next}\n")
 
@@ -1010,9 +1074,7 @@ defmodule Forecastle.EnvScriptTest do
         assert run.status == 0, shape
         refute run.stdout =~ @exec, shape
 
-        assert run.stderr =~
-                 "Castle marker [<non-empty line containing whitespace or control bytes>]",
-               shape
+        assert run.stderr =~ "Castle marker [#{@next}#{encoded}]", shape
 
         assert run.stderr =~ "Castle's marker has no usable version", shape
         refute String.contains?(run.stderr, control), shape
@@ -1020,6 +1082,46 @@ defmodule Forecastle.EnvScriptTest do
         refute provisional?(root), shape
         assert claims(root) == [], shape
         assert rejected(root) == [], shape
+      end
+    end
+
+    test "display-tool failures cannot reject valid provisional evidence", %{root: root} do
+      for tool <- ["od", "awk"] do
+        arm(root, @next)
+
+        run = start(root, failing_tool(root, tool))
+
+        assert run.status == 0, tool
+        assert run.stdout =~ "#{@exec}#{@next}", tool
+        assert run.stderr == "", tool
+        refute armed?(root), tool
+        refute provisional?(root), tool
+        assert claims(root) == [], tool
+        assert rejected(root) == [], tool
+
+        if tool == "od" do
+          refute File.exists?(failing_tool_log(root, tool))
+        end
+
+        # A real mismatch still reports its real reason. Only the values fall
+        # back when the display helper is unavailable; neither marker is called
+        # malformed and OTP's valid marker is not quarantined.
+        File.write!(pending(root), "#{@next}\nsome-attempt\n")
+        File.write!(provisional(root), "16.0 #{@vsn}\n")
+
+        mismatch = start(root, failing_tool(root, tool))
+
+        assert mismatch.status == 0, tool
+        refute mismatch.stdout =~ @exec, tool
+        assert mismatch.stderr =~ "Castle marker [<unprintable>]", tool
+        assert mismatch.stderr =~ "OTP marker [<unprintable>]", tool
+        assert mismatch.stderr =~ "the markers name different versions", tool
+        refute mismatch.stderr =~ "malformed", tool
+        assert rejected(root) == [], tool
+
+        if tool == "od" do
+          assert File.exists?(failing_tool_log(root, tool))
+        end
       end
     end
 
@@ -1249,6 +1351,22 @@ defmodule Forecastle.EnvScriptTest do
       {"HEART_BEAT_TIMEOUT", nil}
     ] ++ env
   end
+
+  defp failing_tool(root, tool) do
+    shims = Path.join(root, "failing-#{tool}")
+    File.mkdir_p!(shims)
+
+    File.write!(
+      Path.join(shims, tool),
+      "#!/bin/sh\nprintf x >> #{failing_tool_log(root, tool)}\nexit 1\n"
+    )
+
+    File.chmod!(Path.join(shims, tool), 0o755)
+
+    [{"PATH", shims <> ":" <> System.get_env("PATH")}]
+  end
+
+  defp failing_tool_log(root, tool), do: Path.join(root, "failing-#{tool}-calls")
 
   # ERL_OTP<major>_FLAGS for the emulator the fragment will probe. That is the
   # same one this suite reports with - the sandbox's erts-*/bin/erl hands over to
