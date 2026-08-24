@@ -715,6 +715,51 @@ defmodule Forecastle.EnvScriptTest do
       assert run.env["HEART_NO_KILL"] == "TRUE"
       assert run.env["HEART_BEAT_TIMEOUT"] == "65535"
     end
+
+    test "does not echo control bytes from overridden values", %{root: root} do
+      hostile = "value\nforged\r\e[31m\a" <> <<0xC2, 0x9B>>
+      display = "value%0Aforged%0D%1B[31m%07%C2%9B"
+
+      run =
+        start(root, [
+          {"HEART_COMMAND", hostile},
+          {"HEART_NO_KILL", hostile},
+          {"HEART_BEAT_TIMEOUT", hostile}
+        ])
+
+      assert run.status == 0
+
+      assert run.stderr ==
+               "warning: ignoring HEART_COMMAND=[#{display}] for this " <>
+                 "start; the external supervisor owns restarts. Remove HEART_COMMAND from " <>
+                 "the environment to silence this.\n" <>
+                 "warning: overriding HEART_NO_KILL=[#{display}] with " <>
+                 "TRUE for this start so heart cannot kill the node. Remove HEART_NO_KILL " <>
+                 "from the environment to silence this.\n" <>
+                 "warning: overriding HEART_BEAT_TIMEOUT=[#{display}] " <>
+                 "with 65535 for this start so a heartbeat timeout cannot stop the node. " <>
+                 "Remove HEART_BEAT_TIMEOUT from the environment to silence this.\n"
+
+      assert run.env["HEART_COMMAND"] == "<unset>"
+      assert run.env["HEART_NO_KILL"] == "TRUE"
+      assert run.env["HEART_BEAT_TIMEOUT"] == "65535"
+    end
+
+    test "keeps literal echo escape spellings inert", %{root: root} do
+      run =
+        start(root, [
+          {"HEART_COMMAND", ~S(value\nforged)},
+          {"HEART_NO_KILL", ~S(value\0033[31mforged)},
+          {"HEART_BEAT_TIMEOUT", ~S(value\cforged)}
+        ])
+
+      assert run.status == 0
+      assert run.stderr =~ "HEART_COMMAND=[value\\nforged]"
+      assert run.stderr =~ "HEART_NO_KILL=[value\\0033[31mforged]"
+      assert run.stderr =~ "HEART_BEAT_TIMEOUT=[value\\cforged] with 65535"
+      assert length(String.split(run.stderr, "\n", trim: true)) == 3
+      refute run.stderr =~ "\e"
+    end
   end
 
   describe "a command that does not start the system" do
@@ -741,6 +786,24 @@ defmodule Forecastle.EnvScriptTest do
       # probe's cost bounded to a node start, and it is the reason the removed gate
       # was not the only thing standing between the fork and the common path.
       assert probes(root) == []
+    end
+  end
+
+  describe "RELEASES bootstrap diagnostics" do
+    test "keeps a non-ASCII release root identifiable", %{root: root} do
+      unicode_root = root <> "-café"
+      File.ln_s!(root, unicode_root)
+      on_exit(fn -> File.rm(unicode_root) end)
+      File.rm!(Path.join(root, "releases/RELEASES"))
+
+      run =
+        start(root, [
+          {"RELEASE_ROOT", unicode_root},
+          {"REL_VSN_DIR", Path.join([unicode_root, "releases", @vsn])}
+        ])
+
+      assert run.status == 0
+      assert run.stderr =~ String.replace(unicode_root, "é", "%C3%A9") <> "/releases/RELEASES"
     end
   end
 
@@ -996,12 +1059,30 @@ defmodule Forecastle.EnvScriptTest do
     end
 
     test "does not print control bytes from Castle's marker", %{root: root} do
+      # The expected reason is per shape, and the difference is the contract
+      # rather than an accident. The usability check here is shell-only - by
+      # design, so that a missing `od` or `awk` cannot turn a prepared reboot
+      # into a refused one - and a POSIX shell can match C0 and DEL portably but
+      # not the C1 block, whose UTF-8 encoding is two bytes that the shells
+      # disagree about seeing as one character or two. So C0 makes the version
+      # unusable, while a C1-bearing one is carried as far as the comparison
+      # with OTP's marker and refused there.
+      #
+      # What every shape shares is the part that matters: status 0, no re-exec,
+      # the marker percent-encoded, and no raw control byte anywhere in the
+      # output. Asserting the reason per shape is what stops this passing for
+      # locale-dependent reasons - it used to assert "no usable version" for the
+      # C1 case, which held only under bash in a UTF-8 locale and failed under
+      # dash, so the suite was green on macOS and red on Ubuntu.
       controlled = [
-        {"carriage return", "#{@next}\r", "\r"},
-        {"escape", "#{@next}\e[31m", "\e"}
+        {"carriage return", "#{@next}\r", "\r", "%0D", "Castle's marker has no usable version"},
+        {"escape", "#{@next}\e[31m", "\e", "%1B[31m", "Castle's marker has no usable version"},
+        {"DEL", "#{@next}\d", "\d", "%7F", "Castle's marker has no usable version"},
+        {"C1 control", "#{@next}" <> <<0xC2, 0x9B>>, <<0xC2, 0x9B>>, "%C2%9B",
+         "the markers name different versions"}
       ]
 
-      for {shape, version, control} <- controlled do
+      for {shape, version, control, encoded, reason} <- controlled do
         File.write!(pending(root), "#{version}\nsome-attempt\n")
         File.write!(provisional(root), "16.0 #{@next}\n")
 
@@ -1010,11 +1091,9 @@ defmodule Forecastle.EnvScriptTest do
         assert run.status == 0, shape
         refute run.stdout =~ @exec, shape
 
-        assert run.stderr =~
-                 "Castle marker [<non-empty line containing control bytes>]",
-               shape
+        assert run.stderr =~ "Castle marker [#{@next}#{encoded}]", shape
 
-        assert run.stderr =~ "Castle's marker has no usable version", shape
+        assert run.stderr =~ reason, shape
         refute String.contains?(run.stderr, control), shape
         refute armed?(root), shape
         refute provisional?(root), shape
@@ -1023,17 +1102,44 @@ defmodule Forecastle.EnvScriptTest do
       end
     end
 
+    test "is not selected from a pair that agrees on a C1-bearing version",
+         %{root: root} do
+      # This is the guard that carries C1 now that the shell's control class is
+      # gone, so it is asserted rather than assumed. Both markers name the same
+      # version, so the comparison the case above relies on passes, and what
+      # refuses the selection is the version directory having none of the
+      # launcher's furniture in it.
+      version = "#{@next}" <> <<0xC2, 0x9B>>
+
+      File.write!(pending(root), "#{version}\nsome-attempt\n")
+      File.write!(provisional(root), "16.0 #{version}\n")
+
+      run = start(root)
+
+      assert run.status == 0
+      refute run.stdout =~ @exec
+
+      assert run.stderr =~ "Castle marker [#{@next}%C2%9B]"
+      assert run.stderr =~ "env.sh is missing from the target release"
+      refute String.contains?(run.stderr, <<0xC2, 0x9B>>)
+
+      refute armed?(root)
+      refute provisional?(root)
+    end
+
     test "still names versions whose only oddity is a space", %{root: root} do
-      # A space is a supported release version byte, not a control byte: OTP
-      # builds its marker as `EVsn ++ " " ++ Vsn` and the fragment keeps the
-      # remainder exactly, because Mix permits spaces and Castle manages them.
-      # So when the pair fails to settle for an unrelated reason - here the two
-      # markers naming different versions - the warning has to say *which*
-      # releases to go and look at. Withholding them behind the control-byte
-      # label removed the whole diagnostic from the case that needs it.
+      # A space is a supported release version byte: OTP builds its marker as
+      # `EVsn ++ " " ++ Vsn` and the split keeps the remainder exactly, because
+      # Mix permits spaces in versions and Castle manages them. So when the pair
+      # fails to settle for an unrelated reason - here the two markers naming
+      # different versions - the warning has to say *which* releases to go and
+      # look at.
       #
-      # Both display branches are exercised, because both had the same guard:
-      # the Castle marker's own line, and the version parsed out of OTP's.
+      # The encoder is what makes that hold now: byte 0x20 is inside the printable
+      # ASCII range it passes through, so a space survives into the diagnostic
+      # while every unsafe byte is still percent-encoded. This came from the
+      # display guard that used to withhold any whitespace-bearing version behind
+      # a fixed label; the mechanism changed, the property has to keep holding.
       armed = "#{@next} rc1"
       target = "#{@vsn} beta"
 
@@ -1047,10 +1153,72 @@ defmodule Forecastle.EnvScriptTest do
 
       assert run.stderr =~ "Castle marker [#{armed}]; OTP marker [#{target}]"
       assert run.stderr =~ "the markers name different versions"
-      refute run.stderr =~ "containing control bytes"
+      refute run.stderr =~ "%20"
 
       refute armed?(root)
       refute provisional?(root)
+    end
+
+    test "is selected from a pair naming a version outside ASCII", %{root: root} do
+      # The other direction, and the reason the control class had to go rather
+      # than be pinned to a locale: every valid UTF-8 codepoint outside C0, DEL
+      # and C1 is a permitted version, and `[[:cntrl:]]` refused some of them
+      # under bash in a UTF-8 locale while accepting them under dash. A release
+      # this fragment can start must not depend on the locale it inherited.
+      version = "0.1.2-café"
+
+      release_fixture(root, version)
+      File.write!(pending(root), "#{version}\nsome-attempt\n")
+      File.write!(provisional(root), "16.0 #{version}\n")
+
+      run = start(root)
+
+      assert run.status == 0
+      assert run.stdout =~ "#{@exec}#{version}"
+      assert run.stderr == ""
+
+      refute armed?(root)
+      refute provisional?(root)
+    end
+
+    test "display-tool failures cannot reject valid provisional evidence", %{root: root} do
+      for tool <- ["od", "awk"] do
+        arm(root, @next)
+
+        run = start(root, failing_tool(root, tool))
+
+        assert run.status == 0, tool
+        assert run.stdout =~ "#{@exec}#{@next}", tool
+        assert run.stderr == "", tool
+        refute armed?(root), tool
+        refute provisional?(root), tool
+        assert claims(root) == [], tool
+        assert rejected(root) == [], tool
+
+        if tool == "od" do
+          refute File.exists?(failing_tool_log(root, tool))
+        end
+
+        # A real mismatch still reports its real reason. Only the values fall
+        # back when the display helper is unavailable; neither marker is called
+        # malformed and OTP's valid marker is not quarantined.
+        File.write!(pending(root), "#{@next}\nsome-attempt\n")
+        File.write!(provisional(root), "16.0 #{@vsn}\n")
+
+        mismatch = start(root, failing_tool(root, tool))
+
+        assert mismatch.status == 0, tool
+        refute mismatch.stdout =~ @exec, tool
+        assert mismatch.stderr =~ "Castle marker [<unprintable>]", tool
+        assert mismatch.stderr =~ "OTP marker [<unprintable>]", tool
+        assert mismatch.stderr =~ "the markers name different versions", tool
+        refute mismatch.stderr =~ "malformed", tool
+        assert rejected(root) == [], tool
+
+        if tool == "od" do
+          assert File.exists?(failing_tool_log(root, tool))
+        end
+      end
     end
 
     test "is not selected from a version that could name something else",
@@ -1279,6 +1447,22 @@ defmodule Forecastle.EnvScriptTest do
       {"HEART_BEAT_TIMEOUT", nil}
     ] ++ env
   end
+
+  defp failing_tool(root, tool) do
+    shims = Path.join(root, "failing-#{tool}")
+    File.mkdir_p!(shims)
+
+    File.write!(
+      Path.join(shims, tool),
+      "#!/bin/sh\nprintf x >> #{failing_tool_log(root, tool)}\nexit 1\n"
+    )
+
+    File.chmod!(Path.join(shims, tool), 0o755)
+
+    [{"PATH", shims <> ":" <> System.get_env("PATH")}]
+  end
+
+  defp failing_tool_log(root, tool), do: Path.join(root, "failing-#{tool}-calls")
 
   # ERL_OTP<major>_FLAGS for the emulator the fragment will probe. That is the
   # same one this suite reports with - the sandbox's erts-*/bin/erl hands over to

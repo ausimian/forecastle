@@ -60,11 +60,72 @@ around it composes instead:
   which for a transition that restarts the emulator is before the upgrade has
   run, and the reply may not outlive the reboot it triggers. A lost connection
   is therefore inconclusive rather than fatal — recognised as the launcher's
-  whole `--rpc-eval … :noconnection` diagnostic at the start of a line, never as
+  whole `--rpc-eval … :noconnection` diagnostic on one complete line, never as
   the bare word, which is a usable release version and turns up in the messages
   that name a version that failed — which is also why `validate_vsn` refuses
   control characters, since a version carrying a newline could otherwise forge
-  that line for itself.
+  that line for itself. Classification and filtering live behind two shell
+  helpers; operator-facing copy does not share their pattern.
+  `Forecastle.AssemblyTest` asks the real generated Mix launcher to call an
+  unreachable local node and compares its stderr line to this contract across
+  the supported Elixir matrix; do not replace that measurement with another
+  restatement of the literal.
+
+  Managed versions are valid UTF-8 with no C0, DEL or C1 controls. The validator
+  distinguishes unsafe input from an unavailable `od` or `awk`; both refuse the
+  command, but unavailable validation is reported as such instead of blaming the
+  value.
+
+  **Nothing in either script may express that contract as `[[:cntrl:]]`, and the
+  reason is measured rather than theoretical.** A character class is resolved by
+  the shell against the locale the release inherited, so it describes the host
+  and not the contract. Across the shells a release can be started by: dash, and
+  bash under `LC_ALL=C`, match C0 and DEL; bash in a UTF-8 locale also matches
+  the C1 block, and glibc's tables put U+2028 and U+2029 in the class besides.
+  Both directions of error follow — the class refuses codepoints the contract
+  permits on some hosts, and accepts C1 on others — so the accepted set became a
+  property of the locale. `castle_controls`, a literal set of the C0 bytes and
+  DEL built with `printf`, is what both scripts use instead; it is identical
+  under every shell and locale measured. NUL never reaches it, since no shell
+  variable can hold one.
+
+  In `bin/castle` that set is only a shortcut in front of the decoder, which
+  stays authoritative for invalid UTF-8 and C1 — and the shortcut is now
+  restricted to bytes the decoder also forbids, so it can never refuse a value
+  the decoder would accept. **The `env.sh` fragment has no decoder and is not to
+  be given one**: selection after the claim must not depend on `od` or `awk`
+  being present, or a missing tool turns a prepared reboot into a refused one.
+  So the fragment refuses C0 and DEL byte-exactly and says nothing about C1.
+  That is a real limit and not a hole — a POSIX shell has no portable way to
+  match the C1 block, whose UTF-8 encoding is two bytes that bash in a UTF-8
+  locale sees as one character and dash sees as two, so a bracket of the
+  composed characters would refuse every ordinary version carrying U+00A0 to
+  U+00BF under dash. What closes it is that no release is selected on that check
+  alone: the two markers still have to name one version, and the version
+  directory still has to hold an `env.sh` and a `start.boot`. Castle validates
+  through the decoder before it ever writes a marker. Its displayed value is independently encoded and falls back to
+  `<unprintable>` if the display tools are unavailable too.
+
+  The version-less `commit` has a separate protocol of its own. The remote
+  expression appends one of two exact record lines, for no provisional release
+  or a successful commit. Each record carries the wrapper invocation's tag,
+  built from `$$` to separate concurrent invocations and reused ordinary output.
+  It is an identifier, not an unpredictable secret, and does not defend against
+  stdout deliberately forged with the current tag. The done record follows an
+  explicit `:ok = Castle.commit(...)`, so a changed Castle return contract cannot
+  accidentally report success.
+  The launcher may write after the expression returns, so the wrapper takes the
+  last exact matching record and strips only that line. Earlier token-like output
+  and output after the record remain operator output, and the local human
+  diagnostic can change without changing control flow. The record remains
+  authoritative if the launcher exits non-zero after emitting it. If the parser
+  itself is unavailable, captured output is withheld because it may contain the
+  record. A status-zero reply
+  without a recognised record is a protocol failure: its captured output is
+  reported, the commit is described as possibly permanent, and the operator is
+  directed to `bin/castle releases`. Once a record is recognised, filtering
+  ordinary output cannot change its outcome: a filtering failure reports that
+  the output was unavailable without replaying the machine record.
 
   The install's two streams are captured apart, for different purposes: its
   standard error is what the classifier reads and is passed through to standard
@@ -226,27 +287,30 @@ around it composes instead:
   OTP constructs its marker as `EVsn ++ " " ++ Vsn`. The fragment splits at the
   first literal space and preserves the remainder as the release version; this
   matters because Mix permits spaces in versions and Castle manages them. POSIX
-  shell parameter expansion makes that split and its validation explicit without
-  forking a parser after Castle's marker has been claimed. A malformed line is
+  shell parameter expansion makes that split and its structural validation
+  explicit without forking a parser after Castle's marker has been claimed.
+  Selection must remain fork-free: failure of a display utility cannot reject
+  valid reboot evidence, quarantine it, or stop the boot. A malformed line is
   renamed to the inert `new_start_erl.data.rejected.<pid>`, warns, and falls back
   to the permanent version. Its diagnostic uses a fixed malformed-line label
   rather than echoing the untrusted contents, which may contain terminal control
   bytes.
 
-  **What a fixed label replaces is control bytes, and only control bytes — a
-  space is a supported value and hiding it cost the diagnostic its point.** Both
-  display guards matched `[[:space:]]` beside `[[:cntrl:]]`, so a version
-  carrying the space the paragraph above says is *preserved* was reported as
+  **A fixed label is for a line that could not be parsed, never for a version
+  that merely looks unusual — and a space is the case that proves it.** This
+  fragment reached the encoder by way of two display guards that matched
+  `[[:space:]]` beside `[[:cntrl:]]`, which reported any version carrying the
+  space the paragraph above says is *preserved* as
   `<non-empty line containing whitespace or control bytes>`. That is the case
   where naming the release matters most: the pair can fail to settle for a
-  reason with nothing to do with the version — mismatched markers, a version
-  directory with no `env.sh` — and the operator is then told which releases to
-  inspect by this label and nothing else. Every whitespace byte that is
-  genuinely unsafe to print (tab, newline, carriage return, vertical tab, form
-  feed) is also a control byte, so `[[:cntrl:]]` alone withholds exactly what
-  has to be withheld. Do not put `[[:space:]]` back to make the two guards look
-  symmetrical with the version *validity* checks; validity and displayability
-  are different questions and a space fails neither.
+  reason having nothing to do with the version — mismatched markers, a version
+  directory with no `env.sh` — and the label was then the only thing telling the
+  operator which releases to inspect. The encoder answers it structurally, since
+  `0x20` is inside the printable ASCII range it passes through untouched, so
+  there is no guard left to get wrong. What must not come back is a *class* of
+  value being withheld for looking odd: everything unsafe is already
+  percent-encoded byte by byte, and `<unprintable>` is reserved for a
+  representation that could not be produced at all.
 
   **What is atomic is the claim, not the pair.** The `mv` is one operation, so
   whichever start wins it is the only one that can act on the pair. OTP's marker
@@ -360,11 +424,23 @@ around it composes instead:
   **It overrides rather than refuses, and says so.** An operator who set one of
   these has a configuration conflict, not an emergency, and a failed boot is a
   worse answer than the conflict — but a setting that silently stops taking
-  effect is worse than either, so each value actually being displaced is named on
-  standard error along with what replaced it and why. A deployment that set none
+  effect is worse than either, so each setting actually being displaced is named
+  on standard error along with what replaced it and why. Values use a reversible
+  ASCII representation: visible ASCII is preserved, `%` and every other byte are
+  percent-encoded. Unicode paths stay identifiable and C0, DEL, C1 and invalid
+  UTF-8 cannot forge log lines or control a terminal. A deployment that set none
   of them — every ordinary one — says nothing at all, which is why the checks are
-  on the *value* rather than on the variable being set: `HEART_NO_KILL=TRUE`
-  already agrees, and an empty `HEART_COMMAND` displaces nothing.
+  on the *value* rather than on the variable being set:
+  `HEART_NO_KILL=TRUE` already agrees, and an empty `HEART_COMMAND` displaces
+  nothing.
+
+  Formatting fails closed: a diagnostic whose representation cannot be produced
+  uses the fixed `<unprintable>` label. Every formatter substitution supplies that
+  fallback explicitly because this fragment is sourced under `set -e` and a
+  diagnostic must never stop the boot. Marker selection itself does not depend on
+  `od`, `awk` or any other display tool, and successful selection does not invoke
+  the formatter at all; marker values are formatted only when a warning needs
+  them.
 
   **A variable set to nothing is a value, and `${VAR:-default}` cannot see
   that.** It treats set-and-empty as absent, which is what these were written

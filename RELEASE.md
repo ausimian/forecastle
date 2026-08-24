@@ -194,11 +194,12 @@
   `start_erl.data` exactly as it always did.
   A malformed OTP marker is renamed to `new_start_erl.data.rejected.<pid>` for
   inspection; its contents are not printed or left able to control another start.
-  A version is withheld from the warning for carrying control bytes and for
-  nothing else. An ordinary space is not one of those: OTP builds its marker as
-  `EVsn ++ " " ++ Vsn` and the fragment keeps the remainder exactly, because Mix
-  permits spaces in versions - so a space-bearing release is still named in the
-  warning that tells an operator which releases to inspect.
+  Marker values in a warning are percent-encoded rather than replaced by a
+  label, so the release is still named. An ordinary space survives that
+  encoding, which matters because OTP builds its marker as `EVsn ++ " " ++ Vsn`
+  and the fragment keeps the remainder exactly: Mix permits spaces in versions,
+  so a space-bearing release is still named in the warning that tells an
+  operator which releases to inspect.
 
   The selection comes before anything else the hook configures, and that is
   load-bearing rather than tidy. Re-exec'ing means the hook is read again, so
@@ -499,6 +500,10 @@
 
 ### Security
 
+- Rejected release versions and invalid environment settings are shown with a
+  reversible, single-line representation. Diagnostics name the command and
+  preserve visible ASCII; other bytes are percent-encoded, so paths remain
+  identifiable without letting control bytes forge logs or drive a terminal.
 - `bin/castle` built its RPC expression by interpolating the version
   argument into Elixir source, so a version such as `1.2.3));System.stop(1)#`
   closed the sigil and ran arbitrary code on the node with the release
@@ -509,12 +514,34 @@
   add a whole line of its own to that output - including a forgery of the
   launcher's disconnect diagnostic, which `install` reads to decide whether a
   failure was really a reboot, and which would have it confirm and report a
-  success for an install that had failed. Everything else is passed through,
-  since Mix does not constrain a release version. The same sink existed in the
-  launcher Forecastle used to generate.
+  success for an install that had failed. Managed versions must be valid UTF-8
+  and contain no C0, DEL or C1 controls. If that validation is unavailable, the
+  command refuses the version and names the failed validation. The same sink
+  existed in the launcher Forecastle used to generate.
+
+  Which versions are accepted does not depend on the locale the release
+  inherited. Neither script expresses the forbidden bytes as a `[[:cntrl:]]`
+  character class, because a shell resolves that against its locale: dash and a
+  C-locale bash match C0 and DEL, while a UTF-8 bash also matches the C1 block,
+  and glibc puts U+2028 and U+2029 in the class as well. A literal set of the C0
+  bytes and DEL is used instead, so the answer is the same under every supported
+  shell. `bin/castle` keeps that set only as a shortcut in front of the byte
+  decoder, which remains authoritative for invalid UTF-8 and C1; the `env.sh`
+  fragment, which deliberately forks no tool to choose a version, refuses C0 and
+  DEL and leaves C1 to the marker comparison and the version-directory check
+  that already have to pass.
 
 ### Fixed
 
+- Argumentless `bin/castle commit` now uses a dedicated machine result instead
+  of matching human-facing text in command output. Its diagnostic can change
+  without changing the exit status, and launcher output around the result is
+  preserved. A recognised result remains authoritative if the launcher exits
+  afterwards. If no result can be read safely, the command withholds the machine
+  output, reports that permanence is unknown and points to `bin/castle releases`.
+  Install's lost-connection check is isolated as a whole-line launcher
+  diagnostic, so ordinary error copy cannot trigger the restart-confirmation
+  path.
 - `mix forecastle.relup` failed with `:systools is not available` in projects
   that do not themselves depend on `:sasl`, because Elixir prunes unused OTP
   applications from the build's code path.

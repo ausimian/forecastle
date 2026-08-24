@@ -228,6 +228,8 @@ defmodule Forecastle.RestartUpgradeTest do
     installed = %{output: installed_output, status: installed_status}
 
     committed = %{output: castle!(deploy, ["commit"])}
+    refute committed.output =~ "__CASTLE_COMMIT_"
+    refute committed.output =~ "__CASTLE_NOTHING_TO_COMMIT_"
 
     committed =
       Map.merge(committed, %{
