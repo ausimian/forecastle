@@ -223,6 +223,31 @@ around it composes instead:
   here** — it is the version, and everything after it is Castle's bookkeeping. Do
   not teach this script to parse the rest.
 
+  OTP constructs its marker as `EVsn ++ " " ++ Vsn`. The fragment splits at the
+  first literal space and preserves the remainder as the release version; this
+  matters because Mix permits spaces in versions and Castle manages them. POSIX
+  shell parameter expansion makes that split and its validation explicit without
+  forking a parser after Castle's marker has been claimed. A malformed line is
+  renamed to the inert `new_start_erl.data.rejected.<pid>`, warns, and falls back
+  to the permanent version. Its diagnostic uses a fixed malformed-line label
+  rather than echoing the untrusted contents, which may contain terminal control
+  bytes.
+
+  **What a fixed label replaces is control bytes, and only control bytes — a
+  space is a supported value and hiding it cost the diagnostic its point.** Both
+  display guards matched `[[:space:]]` beside `[[:cntrl:]]`, so a version
+  carrying the space the paragraph above says is *preserved* was reported as
+  `<non-empty line containing whitespace or control bytes>`. That is the case
+  where naming the release matters most: the pair can fail to settle for a
+  reason with nothing to do with the version — mismatched markers, a version
+  directory with no `env.sh` — and the operator is then told which releases to
+  inspect by this label and nothing else. Every whitespace byte that is
+  genuinely unsafe to print (tab, newline, carriage return, vertical tab, form
+  feed) is also a control byte, so `[[:cntrl:]]` alone withholds exactly what
+  has to be withheld. Do not put `[[:space:]]` back to make the two guards look
+  symmetrical with the version *validity* checks; validity and displayability
+  are different questions and a space fails neither.
+
   **What is atomic is the claim, not the pair.** The `mv` is one operation, so
   whichever start wins it is the only one that can act on the pair. OTP's marker
   is then read and removed in separate steps, and no POSIX operation moves two

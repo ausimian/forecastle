@@ -572,9 +572,16 @@ defmodule Forecastle.EnvScriptTest do
       run = start(root, [{"RELEASE_VM_ARGS", path}])
 
       assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
-      assert run.stderr =~ "not adding -heart"
-      assert run.stderr =~ "could not be measured"
-      assert run.stderr =~ "would hang having printed nothing"
+      assert run.stderr =~ "-emu_args_exit did not return an argument vector"
+      assert run.stderr =~ "The probe passed -args_file #{path}"
+      assert run.stderr =~ "Effective RELEASE_VM_ARGS is [#{path}]"
+      assert run.stderr =~ "This start proceeds normally without adding -heart"
+      assert run.stderr =~ "a duplicate -heart can hang startup"
+      assert run.stderr =~ "Inspect that path and the emulator options"
+      assert run.stderr =~ "For restart_emulator upgrades"
+      assert run.stderr =~ "either make -emu_args_exit return an argument vector"
+      assert run.stderr =~ "supply exactly one -heart"
+      assert run.stderr =~ "effective RELEASE_VM_ARGS or emulator options"
       assert [_probe] = probes(root)
     end
 
@@ -586,18 +593,46 @@ defmodule Forecastle.EnvScriptTest do
       # test refuses to read an answer out of output that is not an argument
       # vector. Arranged by an erl that strips the flag before handing over.
       legacy_erl(root)
-      vm_args(root, "-heart\n")
+
+      path = Path.join([root, "releases", @vsn, "vm.args"])
 
       run = start(root)
 
       assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
-      assert run.stderr =~ "could not be measured"
+      assert run.stderr =~ "-emu_args_exit did not return an argument vector"
+      assert run.stderr =~ "The probe passed -args_file #{path}"
+      assert run.stderr =~ "Effective RELEASE_VM_ARGS is [#{path}]"
+      assert run.stderr =~ "This start proceeds normally without adding -heart"
+      assert run.stderr =~ "Inspect that path and the emulator options"
+      assert run.stderr =~ "either make -emu_args_exit return an argument vector"
+      assert run.stderr =~ "supply exactly one -heart"
+      assert run.stderr =~ "effective RELEASE_VM_ARGS or emulator options"
       assert [_probe] = probes(root)
 
       # Nothing was booted and nothing was left behind by the attempt: a crash
       # dump in the directory an operator started the release from would be a
       # regression of its own.
       assert Path.wildcard(Path.join(root, "**/erl_crash.dump")) == []
+    end
+
+    test "reports a skipped missing args file after a failed probe", %{root: root} do
+      legacy_erl(root)
+
+      path = Path.join([root, "releases", @vsn, "vm.args"])
+      File.rm!(path)
+
+      run = start(root)
+
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "<unset>"
+      assert run.stderr =~ "-emu_args_exit did not return an argument vector"
+      assert run.stderr =~ "The probe did not pass -args_file"
+      assert run.stderr =~ "Effective RELEASE_VM_ARGS is [#{path}]"
+      assert run.stderr =~ "This start proceeds normally without adding -heart"
+      assert run.stderr =~ "Inspect that path and the emulator options"
+      assert run.stderr =~ "either make -emu_args_exit return an argument vector"
+      assert run.stderr =~ "supply exactly one -heart"
+      assert run.stderr =~ "effective RELEASE_VM_ARGS or emulator options"
+      assert [_probe] = probes(root)
     end
   end
 
@@ -629,8 +664,8 @@ defmodule Forecastle.EnvScriptTest do
       # setting has stopped taking effect, so silence would be losing it.
       run = start(root, @hostile)
 
-      assert run.stderr =~ "unsetting HEART_COMMAND=[/usr/local/bin/restart-me]"
-      assert run.stderr =~ "restarting the system belongs to whatever supervises it"
+      assert run.stderr =~ "ignoring HEART_COMMAND=[/usr/local/bin/restart-me]"
+      assert run.stderr =~ "the external supervisor owns restarts"
 
       assert run.stderr =~ "overriding HEART_NO_KILL=[FALSE] with TRUE"
       assert run.stderr =~ "overriding HEART_BEAT_TIMEOUT=[11] with 65535"
@@ -721,8 +756,82 @@ defmodule Forecastle.EnvScriptTest do
 
       run = start(root)
 
+      assert run.status == 0
       assert run.stdout =~ "#{@exec}#{@next}"
       assert run.stderr == ""
+    end
+
+    test "falls back safely when OTP's marker has only one field", %{root: root} do
+      File.write!(pending(root), "#{@next}\nsome-attempt\n")
+      File.write!(provisional(root), "#{@next}\n")
+
+      run = start(root)
+
+      assert run.status == 0
+      refute run.stdout =~ @exec
+      assert run.stderr =~ "cannot select the provisional release"
+      assert run.stderr =~ "OTP marker [<malformed non-empty line>]"
+      assert run.stderr =~ "OTP marker is malformed; expected '<erts> <version>'"
+      assert run.stderr =~ "Preserved as releases/new_start_erl.data.rejected."
+      assert run.stderr =~ "Booting the permanent release from releases/start_erl.data"
+      refute armed?(root)
+      refute provisional?(root)
+      assert claims(root) == []
+      assert [evidence] = rejected(root)
+      assert File.read!(evidence) == "#{@next}\n"
+
+      retry = start(root)
+      refute retry.stdout =~ @exec
+      assert retry.stderr == ""
+      assert rejected(root) == [evidence]
+    end
+
+    test "rejects other malformed OTP marker shapes", %{root: root} do
+      malformed = [
+        {"tab separator", "16.0\t#{@next}\n", "\t"},
+        {"trailing carriage return", "16.0 #{@next}\r\n", "\r"},
+        {"path separator", "16.0 ../#{@next}\n", nil}
+      ]
+
+      for {shape, line, control} <- malformed do
+        File.write!(pending(root), "#{@next}\nsome-attempt\n")
+        File.write!(provisional(root), line)
+
+        run = start(root)
+
+        assert run.status == 0, shape
+        refute run.stdout =~ @exec, shape
+        assert run.stderr =~ "OTP marker [<malformed non-empty line>]", shape
+        assert run.stderr =~ "OTP marker is malformed; expected '<erts> <version>'", shape
+        assert run.stderr =~ "Preserved as releases/new_start_erl.data.rejected.", shape
+        refute armed?(root), shape
+        refute provisional?(root), shape
+        assert claims(root) == [], shape
+
+        assert [evidence] = rejected(root)
+        assert File.read!(evidence) == line
+        if control, do: refute(String.contains?(run.stderr, control), shape)
+        File.rm!(evidence)
+      end
+    end
+
+    test "preserves spaces after OTP's first separator as part of the version", %{root: root} do
+      versions = ["#{@next} extra", " #{@next}"]
+
+      for version <- versions do
+        release_fixture(root, version)
+        arm(root, version)
+
+        run = start(root)
+
+        assert run.status == 0, inspect(version)
+        assert run.stdout =~ "#{@exec}#{version}", inspect(version)
+        assert run.stderr == "", inspect(version)
+        refute armed?(root), inspect(version)
+        refute provisional?(root), inspect(version)
+        assert claims(root) == [], inspect(version)
+        assert rejected(root) == [], inspect(version)
+      end
     end
 
     test "consumes both markers before the exec", %{root: root} do
@@ -736,7 +845,7 @@ defmodule Forecastle.EnvScriptTest do
       assert claims(root) == []
     end
 
-    test "still boots when a marker cannot be removed", %{root: root} do
+    test "still boots when the OTP marker cannot be removed", %{root: root} do
       # A removal that fails must not take the launcher down with it. The launcher
       # sources this fragment under `set -e`, and `rm -f` exits non-zero for a path
       # it cannot unlink - a directory at the name being the easy case, since `-f`
@@ -746,7 +855,7 @@ defmodule Forecastle.EnvScriptTest do
       # version, and the wrong version was never the risk here.
       #
       # So the pair is treated as unsettled and the fragment falls through to the
-      # mismatch path: it warns, execs nothing, and leaves the stock launcher to
+      # fallback path: it warns, execs nothing, and leaves the stock launcher to
       # read start_erl.data - the permanent version, which is the safe direction
       # and the one the rollback property rests on.
       #
@@ -763,7 +872,63 @@ defmodule Forecastle.EnvScriptTest do
       run = start(root)
 
       assert run.status == 0, "the launcher was taken down while sourcing env.sh"
-      assert run.stderr =~ "the version to boot could not be settled"
+      assert run.stderr =~ "cannot select the provisional release"
+      assert run.stderr =~ "OTP marker could not be removed"
+      assert run.stderr =~ "Booting the permanent release from releases/start_erl.data"
+      assert provisional?(root)
+      assert claims(root) == []
+      refute run.stdout =~ @exec
+    end
+
+    test "still boots when Castle's claim cannot be removed", %{root: root} do
+      # A directory can be renamed into the claim slot but not removed with
+      # `rm -f`. The OTP marker is still consumed, and the warning identifies
+      # the claim that remains for an operator to inspect.
+      File.mkdir!(pending(root))
+      File.write!(provisional(root), "16.0 #{@next}\n")
+
+      run = start(root)
+
+      assert run.status == 0, "the launcher was taken down while sourcing env.sh"
+      assert run.stderr =~ "Castle marker could not be removed"
+      assert run.stderr =~ "Booting the permanent release from releases/start_erl.data"
+      assert length(claims(root)) == 1
+      refute provisional?(root)
+      refute run.stdout =~ @exec
+    end
+
+    test "reports a Castle claim that cannot be read", %{root: root} do
+      # A symlink to a directory is readable on some systems and rejected by
+      # `head` differently across implementations. The regular-file check makes
+      # the result independent of either behavior.
+      opaque = Path.join(root, "opaque-castle-marker")
+      File.mkdir!(opaque)
+      File.ln_s!(opaque, pending(root))
+      File.write!(provisional(root), "16.0 #{@next}\n")
+
+      run = start(root)
+
+      assert run.status == 0
+      assert run.stderr =~ "Castle marker could not be read"
+      assert claims(root) == []
+      refute provisional?(root)
+      refute run.stdout =~ @exec
+    end
+
+    test "reports an OTP marker that cannot be read", %{root: root} do
+      # As above, use a directory symlink so this does not rely on file modes or
+      # on a particular `head` implementation's handling of directories.
+      opaque = Path.join(root, "opaque-otp-marker")
+      File.mkdir!(opaque)
+      File.write!(pending(root), "#{@next}\nsome-attempt\n")
+      File.ln_s!(opaque, provisional(root))
+
+      run = start(root)
+
+      assert run.status == 0
+      assert run.stderr =~ "OTP marker could not be read"
+      assert claims(root) == []
+      refute provisional?(root)
       refute run.stdout =~ @exec
     end
 
@@ -778,8 +943,9 @@ defmodule Forecastle.EnvScriptTest do
       run = start(root)
 
       refute run.stdout =~ @exec
-      assert run.stderr =~ "the version to boot could not be settled"
-      assert run.stderr =~ "Castle armed [#{@next}] and release_handler recorded []"
+      assert run.stderr =~ "cannot select the provisional release"
+      assert run.stderr =~ "Castle marker [#{@next}]; OTP marker [<absent>]"
+      assert run.stderr =~ "OTP marker is absent; no restart was prepared"
       refute armed?(root)
     end
 
@@ -823,7 +989,66 @@ defmodule Forecastle.EnvScriptTest do
       run = start(root)
 
       refute run.stdout =~ @exec
-      assert run.stderr =~ "Castle armed [#{@next}] and release_handler recorded [#{@vsn}]"
+      assert run.stderr =~ "Castle marker [#{@next}]; OTP marker [#{@vsn}]"
+      assert run.stderr =~ "the markers name different versions"
+      refute armed?(root)
+      refute provisional?(root)
+    end
+
+    test "does not print control bytes from Castle's marker", %{root: root} do
+      controlled = [
+        {"carriage return", "#{@next}\r", "\r"},
+        {"escape", "#{@next}\e[31m", "\e"}
+      ]
+
+      for {shape, version, control} <- controlled do
+        File.write!(pending(root), "#{version}\nsome-attempt\n")
+        File.write!(provisional(root), "16.0 #{@next}\n")
+
+        run = start(root)
+
+        assert run.status == 0, shape
+        refute run.stdout =~ @exec, shape
+
+        assert run.stderr =~
+                 "Castle marker [<non-empty line containing control bytes>]",
+               shape
+
+        assert run.stderr =~ "Castle's marker has no usable version", shape
+        refute String.contains?(run.stderr, control), shape
+        refute armed?(root), shape
+        refute provisional?(root), shape
+        assert claims(root) == [], shape
+        assert rejected(root) == [], shape
+      end
+    end
+
+    test "still names versions whose only oddity is a space", %{root: root} do
+      # A space is a supported release version byte, not a control byte: OTP
+      # builds its marker as `EVsn ++ " " ++ Vsn` and the fragment keeps the
+      # remainder exactly, because Mix permits spaces and Castle manages them.
+      # So when the pair fails to settle for an unrelated reason - here the two
+      # markers naming different versions - the warning has to say *which*
+      # releases to go and look at. Withholding them behind the control-byte
+      # label removed the whole diagnostic from the case that needs it.
+      #
+      # Both display branches are exercised, because both had the same guard:
+      # the Castle marker's own line, and the version parsed out of OTP's.
+      armed = "#{@next} rc1"
+      target = "#{@vsn} beta"
+
+      File.write!(pending(root), "#{armed}\nsome-attempt\n")
+      File.write!(provisional(root), "16.0 #{target}\n")
+
+      run = start(root)
+
+      assert run.status == 0
+      refute run.stdout =~ @exec
+
+      assert run.stderr =~ "Castle marker [#{armed}]; OTP marker [#{target}]"
+      assert run.stderr =~ "the markers name different versions"
+      refute run.stderr =~ "containing control bytes"
+
       refute armed?(root)
       refute provisional?(root)
     end
@@ -834,12 +1059,25 @@ defmodule Forecastle.EnvScriptTest do
       # into the environment of a VM, so one carrying a separator is refused
       # rather than resolved.
       File.write!(pending(root), "../#{@next}\nsome-attempt\n")
-      File.write!(provisional(root), "16.0 ../#{@next}\n")
+      File.write!(provisional(root), "16.0 #{@next}\n")
 
       run = start(root)
 
       refute run.stdout =~ @exec
-      assert run.stderr =~ "could not be settled"
+      assert run.stderr =~ "cannot select the provisional release"
+      assert run.stderr =~ "Castle marker [../#{@next}]; OTP marker [#{@next}]"
+      assert run.stderr =~ "Castle's marker has no usable version"
+    end
+
+    test "is not selected from a version directory without env.sh", %{root: root} do
+      File.rm!(Path.join([root, "releases", @next, "env.sh"]))
+      arm(root, @next)
+
+      run = start(root)
+
+      refute run.stdout =~ @exec
+      assert run.stderr =~ "Castle marker [#{@next}]; OTP marker [#{@next}]"
+      assert run.stderr =~ "env.sh is missing from the target release"
     end
 
     test "is not selected from a version directory with nothing to boot",
@@ -853,7 +1091,9 @@ defmodule Forecastle.EnvScriptTest do
       run = start(root)
 
       refute run.stdout =~ @exec
-      assert run.stderr =~ "could not be settled"
+      assert run.stderr =~ "cannot select the provisional release"
+      assert run.stderr =~ "Castle marker [#{@next}]; OTP marker [#{@next}]"
+      assert run.stderr =~ "start.boot is missing from the target release"
     end
   end
 
@@ -949,7 +1189,7 @@ defmodule Forecastle.EnvScriptTest do
 
       assert run.stdout =~ "#{@exec}#{@next}"
       assert run.env["HEART_COMMAND"] == "<unset>"
-      assert [_before, _after] = String.split(run.stderr, "unsetting HEART_COMMAND")
+      assert [_before, _after] = String.split(run.stderr, "ignoring HEART_COMMAND")
     end
   end
 
@@ -1135,6 +1375,15 @@ defmodule Forecastle.EnvScriptTest do
     File.write!(provisional(root), "16.0 #{vsn}\n")
   end
 
+  defp release_fixture(root, vsn) do
+    dir = Path.join([root, "releases", vsn])
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "env.sh"), "# nothing\n")
+    File.write!(Path.join(dir, "start.boot"), "")
+    File.write!(Path.join(dir, "vm.args"), "## nothing\n-start_epmd false\n")
+    elixir(root, vsn, @erts)
+  end
+
   # Replaces the inert vm.args the setup wrote for a version, which is the file
   # the launcher will pass as -args_file when it boots that one. The default is
   # the version start_erl.data names, because that is the one an ordinary start
@@ -1232,6 +1481,7 @@ defmodule Forecastle.EnvScriptTest do
 
   defp pending(root), do: Path.join(root, "releases/castle-restart-pending")
   defp provisional(root), do: Path.join(root, "releases/new_start_erl.data")
+  defp rejected(root), do: Path.wildcard(provisional(root) <> ".rejected.*")
 
   defp armed?(root), do: File.exists?(pending(root))
   defp provisional?(root), do: File.exists?(provisional(root))

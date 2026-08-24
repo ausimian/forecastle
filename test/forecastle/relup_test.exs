@@ -300,16 +300,14 @@ defmodule Forecastle.RelupTest do
       assert output =~ "sample_dep.appup has no upgrade instructions from #{@from}"
       assert output =~ "sample_dep.appup has no downgrade instructions to #{@from}"
 
-      # Which instruction, and therefore what install_release/1 replies, because
-      # that reply is what an operator or a CI check reads back.
-      assert output =~ "single restart_emulator"
-      assert output =~ "{ok, Vsn, Descr} rather than {continue_after_restart, Vsn, Descr}"
-      assert output =~ "provisional until it is committed"
+      assert output =~ "Each uses restart_emulator"
+      assert output =~ "reboots into the installed release"
+      assert output =~ "stays provisional until committed"
 
       # And the two ways to insist on something else, so that a pipeline which
       # wanted neither has somewhere to go.
-      assert output =~ "Pass --hot to fail on such a transition instead"
-      assert output =~ "--restart to make every transition in the relup one"
+      assert output =~ "Use --hot to refuse restart transitions"
+      assert output =~ "--restart to restart every transition"
 
       assert {:ok,
               [
@@ -396,16 +394,18 @@ defmodule Forecastle.RelupTest do
       # The one gap in `auto`, and the reason the generated relup is inspected
       # rather than trusted. The ERTS case is decided before :systools is asked
       # for anything, but an appup can still name the instruction, and then the
-      # default strategy would have shipped a transition that replies
-      # {continue_after_restart, ...} without anybody choosing it.
+      # default strategy would have shipped an unsupported two-stage transition
+      # without anybody choosing it.
       add_appup_instruction!(ctx.hot, @hot, :restart_new_emulator)
 
       {output, status} = relup(project_only(ctx) ++ ["--outdir", @outdir], @hot)
 
       assert status != 0, "a restart_new_emulator relup was accepted:\n\n#{output}"
       refute_all_hot(output)
-      assert output =~ "asks for the two-stage emulator restart"
+      assert output =~ "Cannot use restart_new_emulator"
       assert output =~ "restart_new_emulator on the upgrade from #{@from}"
+      assert output =~ "Castle supports only restart_emulator"
+      assert output =~ "Remove the instruction from the appup"
       refute File.exists?(ctx.relup), "a refused relup was written anyway"
     end
 
@@ -427,7 +427,7 @@ defmodule Forecastle.RelupTest do
       refute_all_hot(output)
       assert output =~ "an appup asks for the emulator to be restarted"
       assert output =~ "restart_emulator on the upgrade from #{@from}"
-      assert output =~ "single restart_emulator"
+      assert output =~ "Each uses restart_emulator"
 
       assert {:ok, [{@hot_vsn, [{@from_vsn, [], up}], _down}]} =
                :file.consult(to_charlist(ctx.relup))
@@ -657,7 +657,9 @@ defmodule Forecastle.RelupTest do
       {output, status} = relup(hot(ctx), @to)
 
       assert status != 0, "an ERTS change passed for a hot upgrade:\n\n#{output}"
-      assert output =~ "changes ERTS from 0.0.0 to"
+      assert output =~ "Cannot use --hot for the transition between #{@from} and #{@to}"
+      assert output =~ "ERTS changes from 0.0.0 to"
+      assert output =~ "Generate this relup with --restart"
 
       # #7 was this task exiting 0 on a failure. The other half of the same
       # promise is that a refusal writes nothing, so the relup already sitting
@@ -671,17 +673,20 @@ defmodule Forecastle.RelupTest do
       {output, status} = relup(project_only(ctx) ++ ["--hot", "--outdir", @outdir], @hot)
 
       assert status != 0, "an appup that restarts the emulator passed for hot:\n\n#{output}"
-      assert output =~ "the generated relup restarts the emulator"
+      assert output =~ "Cannot use --hot: an appup adds an emulator restart"
       assert output =~ "restart_emulator on the upgrade from #{@from}"
+      assert output =~ "Remove the restart instruction"
       refute File.exists?(ctx.relup), "a refused relup was written anyway"
     end
   end
 
   describe "the restart strategy" do
-    test "makes every transition a single restart_emulator", ctx do
+    test "makes every transition a restart_emulator instruction", ctx do
       output = relup!(upgrade(ctx) ++ ["--restart", "--outdir", @outdir], @to)
 
-      assert output =~ "--restart: every transition in this relup is a single restart_emulator"
+      assert output =~ "--restart: every transition is a restart_emulator instruction"
+      assert output =~ "Appups are ignored; no code is hot-loaded"
+      assert output =~ "restart target is provisional and must be committed"
 
       assert {:ok,
               [

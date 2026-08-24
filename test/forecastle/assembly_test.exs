@@ -335,25 +335,16 @@ defmodule Forecastle.AssemblyTest do
       refute env_sh =~ "sed 's/#"
     end
 
-    test "selects a provisional version from two markers, and consumes them",
-         %{env_sh: env_sh} do
+    test "ships the provisional marker protocol names", %{env_sh: env_sh} do
       # new_start_erl.data is written before the reboot and never removed, so on
       # its own it is not evidence that a reboot was asked for. Castle's marker is
       # the other half, and the two have to name one version.
       #
       # Which selection each state produces is asserted in
       # `Forecastle.EnvScriptTest`, by running the fragment over a release-shaped
-      # directory; what is here is that the two names are the ones Castle and
-      # release_handler write, and that the marker is claimed by rename.
+      # directory. This assembly test owns only the protocol's stable names.
       assert env_sh =~ "releases/castle-restart-pending"
       assert env_sh =~ "releases/new_start_erl.data"
-      assert env_sh =~ ~s(mv "$castle_pending" "$castle_claim")
-      assert env_sh =~ ~s([ "$castle_usable" = "$castle_target" ])
-      assert env_sh =~ ~s(rm -f "$castle_provisional")
-
-      # The claim is per process, so two starts racing for the marker cannot read
-      # each other's - only one of them wins the rename, and the loser must not
-      # find a file the winner is still working through.
       assert env_sh =~ ~s(castle-restart-consumed.$$)
     end
 
@@ -365,8 +356,8 @@ defmodule Forecastle.AssemblyTest do
       # that the warning can still say what was actually in the file.
       assert env_sh =~ ~s(case $castle_armed in)
       assert env_sh =~ ~s("" | */*)
-      assert env_sh =~ ~s([ -f "$RELEASE_ROOT/releases/$castle_usable/env.sh" ])
-      assert env_sh =~ ~s([ -f "$RELEASE_ROOT/releases/$castle_usable/start.boot" ])
+      assert env_sh =~ ~s([ ! -f "$RELEASE_ROOT/releases/$castle_usable/env.sh" ])
+      assert env_sh =~ ~s([ ! -f "$RELEASE_ROOT/releases/$castle_usable/start.boot" ])
     end
 
     test "re-execs the launcher rather than assigning the version", %{env_sh: env_sh} do
@@ -422,7 +413,10 @@ defmodule Forecastle.AssemblyTest do
       # where it ends an awk pass and has nothing to do with the launcher. What
       # this test is about is the fragment never taking the start down, so it has
       # to say that rather than something that happens to be spelled like it.
-      assert env_sh =~ "warning: could not create"
+      assert env_sh =~ "warning: cannot create $RELEASE_ROOT/releases/RELEASES"
+      assert env_sh =~ "can run and restart but cannot unpack or install upgrades"
+      assert env_sh =~ "If the release root should be writable"
+      assert env_sh =~ "restart before upgrading"
       refute env_sh =~ ~r/^\s*exit 1\s*$/m
     end
 

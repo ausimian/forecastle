@@ -10,9 +10,9 @@
   reports the same refusal `unpack` and `install` would, and exits non-zero.
   Nothing has to call it first — those two ask the question for themselves, from
   inside the operation.
-- `bin/castle commit` may now be given no version, in which case it commits
-  whichever release is currently running. It exits non-zero if there was no
-  such release, so that automation can tell nothing was committed.
+- `bin/castle commit` may now be given no version, in which case it commits the
+  provisional release awaiting commit. It exits non-zero if there is none, so
+  automation can tell nothing was committed.
 - `bin/castle install` now confirms that the version it installed is the one
   running before it reports success, rather than trusting what
   `release_handler` replied. That reply says only that the upgrade was
@@ -94,9 +94,9 @@
   the system actually got to.
 
   That polling is what carries an emulator restart, and it is the reason the
-  reply cannot be trusted: `release_handler` answers `{ok, Vsn, Descr}` for a
-  `restart_emulator` transition exactly as it does for a completed hot upgrade,
-  and then reboots, so the reply may not even survive long enough to arrive.
+  initial reply cannot be trusted: `release_handler` accepts a
+  `restart_emulator` transition and then reboots, so the reply may not even
+  survive long enough to arrive.
   `install` treats a lost connection as settling nothing and keeps asking until
   the version it installed answers - across the reboot, and across the cold boot
   after it. Both paths are covered end to end by the `:e2e` suite, and every
@@ -138,14 +138,12 @@
   printed.
 
   Every restart generated is the one-stage `restart_emulator`: the relup is
-  evaluated in full in the running system, `install_release/1` replies
-  `{ok, Vsn, Descr}`, and the emulator then reboots. The two-stage
-  `restart_new_emulator` - which boots a hybrid temporary release carrying the
-  new ERTS, kernel, stdlib and sasl over the old applications, and continues the
-  relup on the way up, replying `{continue_after_restart, Vsn, Descr}` - is not a
-  strategy here, and is refused where it turns up. Which of the two a relup
-  carries is worth saying out loud precisely because those replies differ and
-  automation reads them.
+  evaluated in full in the running system, and the emulator then reboots. The
+  two-stage `restart_new_emulator` - which boots a hybrid temporary release
+  carrying the new ERTS, kernel, stdlib and sasl over the old applications, and
+  continues the relup on the way up - is not a strategy here. It is refused
+  where it turns up. The task keeps the exact instruction name in its output
+  because the two transitions behave differently.
 
   That is also why `auto` decides the ERTS case for itself rather than asking
   `systools` and taking what comes: `systools` inserts `restart_new_emulator` on
@@ -165,12 +163,11 @@
   A run says which transitions restart - or that none of them do - exactly once,
   and the announcement names both ways a restart can arrive: the edges `auto`
   classified, with the reason for each, and any `restart_emulator` an appup asked
-  for by name. It also says what that means for reading the install back, since
-  `install_release/1` replies `{ok, Vsn, Descr}` for such a transition,
-  indistinguishably from a completed hot upgrade, and the emulator then reboots.
-  Both kinds are settled after generation, because only one of them is knowable
-  before it: an appup's own instruction is invisible until `systools` has produced
-  a script. `--hot` and `--restart` remain the ways to insist on something else.
+  for by name. It also says that the emulator reboots into a provisional release
+  that must be committed. Both kinds are settled after generation, because only
+  one of them is knowable before it: an appup's own instruction is invisible
+  until `systools` has produced a script. `--hot` and `--restart` remain the ways
+  to insist on something else.
 - The release now selects a provisional version after an upgrade that restarted
   the emulator, which is what makes such an upgrade work on a deployment
   supervised by systemd, Docker, Kubernetes or runit.
@@ -193,8 +190,15 @@
   requires them to name one version. A re-exec, because by the time the launcher
   sources `env.sh` it has already resolved the version directory, and everything
   it goes on to use - the boot script, `vm.args`, `sys.config`, the `elixir`
-  launcher itself - hangs off that. With no valid pair the fragment does nothing
-  at all and the stock launcher reads `start_erl.data` exactly as it always did.
+  launcher itself - hangs off that. With no valid pair, the stock launcher reads
+  `start_erl.data` exactly as it always did.
+  A malformed OTP marker is renamed to `new_start_erl.data.rejected.<pid>` for
+  inspection; its contents are not printed or left able to control another start.
+  A version is withheld from the warning for carrying control bytes and for
+  nothing else. An ordinary space is not one of those: OTP builds its marker as
+  `EVsn ++ " " ++ Vsn` and the fragment keeps the remainder exactly, because Mix
+  permits spaces in versions - so a space-bearing release is still named in the
+  warning that tells an operator which releases to inspect.
 
   The selection comes before anything else the hook configures, and that is
   load-bearing rather than tidy. Re-exec'ing means the hook is read again, so
@@ -279,12 +283,15 @@
   named for the OTP version of whichever emulator answers.
 
   Where the question cannot be answered - an args file `erl` refuses to read, for
-  instance - the hook adds nothing and says so on standard error. That direction
-  is deliberate: adding a flag that turns out to be a second one hangs the boot
-  in silence, while adding none makes an upgrade that restarts the emulator fail
-  loudly with the system still running. A `vm.args` that is simply *absent* is not
-  such a case: the file is passed to `erl` only when it exists, so a release
-  shipping none is asked about without it rather than reported unmeasurable.
+  instance - the hook adds nothing and says so on standard error. The start
+  proceeds normally. To support `restart_emulator` upgrades, either make the
+  `-emu_args_exit` probe answerable so the hook can add a missing flag, or supply
+  exactly one `-heart` through the effective `RELEASE_VM_ARGS` or emulator
+  options. A duplicate `-heart` hangs the boot in silence. Adding nothing is the
+  safe fallback: an upgrade that needs an emulator restart then fails loudly
+  with the system still running. A `vm.args` that is simply *absent* is not such
+  a case: the file is passed to `erl` only when it exists, so a release shipping
+  none is asked about without it rather than reported unmeasurable.
 
   All three variables are **assigned**, and `HEART_COMMAND` is **unset**, rather
   than defaulted - so a deployment that already has any of them in its
@@ -449,8 +456,8 @@
     `systools_relup:check_for_emulator_restart/5` inserts the two-stage
     `restart_new_emulator` on its own whenever the ERTS version differs, warning
     only that it changed - so the relup carried a transition nobody had chosen,
-    which replies `{continue_after_restart, Vsn, Descr}` and which Castle does
-    not support. `auto` now decides this case for itself, as a one-stage restart
+    which continues across the reboot and which Castle does not support. `auto`
+    now decides this case for itself, as a one-stage restart
     transition, and announces it. `--restart` generates the same thing on
     request. **Materially changed.**
   - **An appup that names an emulator restart itself** was passed straight
@@ -683,13 +690,12 @@ the new version reads the old file.
   temporary hybrid release, whose version directory holds a boot script and a
   configuration and none of the launcher's own files, so there is nothing there
   for a launcher to boot. Castle arms no marker for it for that reason.
-- **A system that cannot write `releases/RELEASES` cannot be upgraded.** The
-  release creates it on its first start; where that fails — a read-only release
-  root is the usual reason — the start warns, the system runs perfectly well, and
-  `bin/castle unpack` and `bin/castle install` then refuse, because upgrading
-  from the release record OTP builds out of the boot script leaves applications
-  on old code without saying so. Make the release root writable, or the
-  `releases` directory within it, and restart once. There is no way to repair a
-  running system: `release_handler` reads that file only in its `init`.
+- **A system that cannot write `releases/RELEASES` cannot be upgraded, only
+  restarted.** The release creates the file on its first start. Where that fails
+  — a deliberately read-only release root is an ordinary case — the start warns,
+  the system can run and restart, and `bin/castle unpack` and `bin/castle install`
+  refuse. If the deployment is intended to be writable, fix the reported error
+  and restart once before upgrading. A running system cannot be repaired in
+  place because `release_handler` reads the file only in its `init`.
 - Windows releases are not supported; see above. What is missing is now
   `bin/castle` rather than a bootable release.

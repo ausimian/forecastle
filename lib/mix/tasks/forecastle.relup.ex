@@ -121,13 +121,11 @@ defmodule Mix.Tasks.Forecastle.Relup do
   rather than two spellings of one:
 
     - `restart_emulator` sits at the end of the script. The relup is evaluated in
-      full in the running system, `release_handler:install_release/1` replies
-      `{ok, Vsn, Descr}`, and the emulator then reboots.
+      full in the running system, and the emulator then reboots.
     - `restart_new_emulator` sits at the front. `release_handler` builds a hybrid
       temporary release - the new ERTS, kernel, stdlib and sasl over the old
       applications - reboots into that, and continues the rest of the relup on
-      the way up. `install_release/1` replies `{continue_after_restart, Vsn,
-      Descr}`.
+      the way up.
 
   Every restart this task generates is `restart_emulator`, the one-stage
   transition. `restart_new_emulator` is not a strategy here and is refused where
@@ -142,8 +140,8 @@ defmodule Mix.Tasks.Forecastle.Relup do
   applications' own appups. So an ERTS change is taken out of `:systools`' hands
   before it is asked for anything, and whatever it does produce is inspected -
   a `restart_new_emulator` arriving from an appup is refused rather than
-  shipped. Both matter to automation, because the reply an operator or a CI
-  check reads back from `install_release/1` differs between the two.
+  shipped. The task keeps the exact instruction name in its output because the
+  two transitions behave differently.
   """
   @shortdoc "Generate a relup file between releases"
 
@@ -722,11 +720,9 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
   defp refuse_erts_change!(from, target) do
     Mix.raise(
-      "--hot was given, but the transition between #{from.vsn} and #{target.vsn} changes " <>
-        "ERTS from #{from.erts} to #{target.erts}. An ERTS change cannot be hot: " <>
-        ":systools inserts restart_new_emulator for one, which reboots the emulator " <>
-        "before any of the relup runs. Generate this relup with --restart, which makes " <>
-        "it a single restart_emulator transition instead."
+      "Cannot use --hot for the transition between #{from.vsn} and #{target.vsn}: " <>
+        "ERTS changes from #{from.erts} to #{target.erts}. Generate this relup with " <>
+        "--restart."
     )
   end
 
@@ -737,10 +733,9 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
       found ->
         Mix.raise(
-          "--hot was given, but the generated relup restarts the emulator: " <>
+          "Cannot use --hot: an appup adds an emulator restart (" <>
             describe_restarts(found) <>
-            ". An appup asked for it. Generate this relup with --restart if the restart " <>
-            "is wanted, or take the instruction out of the appup."
+            "). Remove the restart instruction or generate this relup with --restart."
         )
     end
   end
@@ -751,8 +746,8 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # from an appup that asked for it by name.
   #
   # The two-stage instruction is refused rather than shipped, whatever the
-  # strategy: it boots a hybrid temporary release and replies
-  # `{continue_after_restart, ...}`, and Castle is built for the one-stage one.
+  # strategy: it boots a hybrid temporary release and continues the relup after
+  # the reboot, while Castle is built for the one-stage transition.
   # The one-stage ones are handed back, because a plain `restart_emulator` from an
   # appup is the transition `auto` would have generated for itself, and is
   # settled together with `auto`'s own choices, in the one announcement. Getting
@@ -770,12 +765,10 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
       {two_stage, _one_stage} ->
         Mix.raise(
-          "the generated relup asks for the two-stage emulator restart: " <>
+          "Cannot use restart_new_emulator (" <>
             describe_restarts(two_stage) <>
-            ". restart_new_emulator boots a hybrid temporary release and continues the " <>
-            "relup on the way up, replying {continue_after_restart, Vsn, Descr} rather " <>
-            "than {ok, Vsn, Descr}; Castle is built for the one-stage restart_emulator. " <>
-            "Generate this relup with --restart, or take the instruction out of the appup."
+            "): Castle supports only restart_emulator. Remove the instruction from the " <>
+            "appup or generate this relup with --restart."
         )
     end
   end
@@ -795,14 +788,13 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
   ## Saying which strategy was chosen
 
-  # The two instructions differ in what `install_release/1` replies, and an
-  # operator or a CI check reads that reply, so which one a run chose is not
-  # something to leave implicit.
+  # `restart_emulator` names the supported one-stage strategy. Keep that useful
+  # vocabulary in the announcement without exposing release_handler internals.
   defp announce_restart do
     Mix.shell().info(
-      "--restart: every transition in this relup is a single restart_emulator " <>
-        "instruction. No appup is read and nothing is hot-loaded; install_release/1 " <>
-        "replies {ok, Vsn, Descr} and the emulator then reboots."
+      "--restart: every transition is a restart_emulator instruction. " <>
+        "Appups are ignored; no code is hot-loaded. " <>
+        "The restart target is provisional and must be committed after it boots."
     )
   end
 
@@ -833,10 +825,8 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # generation.
   #
   # This is where `auto` refused, while a restart transition could not be
-  # completed. It announces now, and what it says is what the operator has to know
-  # to read the install back: a `restart_emulator` is replied to with
-  # `{ok, Vsn, Descr}`, indistinguishably from a hot upgrade, and the emulator
-  # then reboots.
+  # completed. It now names the `restart_emulator` transition, the reboot and the
+  # provisional state an operator must commit.
   defp settle_restarts!([], []) do
     Mix.shell().info("auto: every transition in this relup is a hot upgrade.")
   end
@@ -844,11 +834,9 @@ defmodule Mix.Tasks.Forecastle.Relup do
   defp settle_restarts!(chosen, found) do
     Mix.shell().info(
       describe_causes("auto made a restart transition of ", chosen, found) <>
-        ". Each of those is a single restart_emulator, so install_release/1 replies " <>
-        "{ok, Vsn, Descr} rather than {continue_after_restart, Vsn, Descr} and the " <>
-        "emulator then reboots; the system comes back on the version that was installed, " <>
-        "which stays provisional until it is committed. Pass --hot to fail on such a " <>
-        "transition instead, or --restart to make every transition in the relup one."
+        ". Each uses restart_emulator and reboots into the installed release, which " <>
+        "stays provisional until committed. Use --hot to refuse restart transitions " <>
+        "or --restart to restart every transition."
     )
   end
 
