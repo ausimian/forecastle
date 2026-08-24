@@ -31,6 +31,25 @@ commit_invocation_tag=$$
 commit_done_record="__CASTLE_COMMIT_DONE_V2__:$commit_invocation_tag"
 nothing_to_commit_record="__CASTLE_NOTHING_TO_COMMIT_V2__:$commit_invocation_tag"
 
+# The C0 controls and DEL, as literal bytes, for use inside a `case` bracket.
+#
+# **This is spelled out rather than written `[[:cntrl:]]`, and that is a
+# correctness requirement.** A character class is resolved by the shell against
+# the locale the release inherited, so what it matches is a property of the host
+# rather than of the contract below. Measured across the shells a release can be
+# started by: dash, and bash under `LC_ALL=C`, match C0 and DEL; bash in a UTF-8
+# locale also matches the C1 block, and glibc's tables put U+2028 and U+2029 in
+# the class as well. So the class *over*-matches on some hosts - refusing
+# versions this contract permits, which is every valid UTF-8 codepoint outside
+# C0, DEL and C1 - and *under*-matches on others, which together would make the
+# accepted set depend on the locale rather than on the value. Neither direction
+# is acceptable in a check that decides whether a release can be managed.
+#
+# NUL is deliberately absent: no shell variable can hold one, so it can never
+# reach these patterns. The final byte is DEL rather than a newline, which is
+# what keeps command substitution from stripping anything.
+castle_controls=$(printf '\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177')
+
 # A reversible, terminal-inert representation of an untrusted value. Visible
 # ASCII is preserved except `%`, which is escaped so every `%XX` has one meaning.
 # Every other byte is percent-encoded. A Unicode path therefore remains
@@ -66,8 +85,15 @@ castle_safe_display () {
 castle_terminal_safe () {
   # This catches the common C0/DEL case without relying on an external tool.
   # The decoder below remains authoritative for invalid UTF-8 and C1.
+  #
+  # Restricted to exactly the bytes the decoder forbids for themselves - see
+  # `castle_controls` for why the character class cannot be used here - so this
+  # can only ever short-circuit a value the decoder would go on to refuse. A
+  # shortcut that could refuse something the decoder accepts would make the
+  # answer depend on the host, which is the one thing this function promises not
+  # to do.
   case $1 in
-    *[[:cntrl:]]*) return 1 ;;
+    *["$castle_controls"]*) return 1 ;;
   esac
 
   castle_bytes=$(printf '%s' "$1" | od -An -tx1 -v) || return 2

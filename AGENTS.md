@@ -74,7 +74,36 @@ around it composes instead:
   Managed versions are valid UTF-8 with no C0, DEL or C1 controls. The validator
   distinguishes unsafe input from an unavailable `od` or `awk`; both refuse the
   command, but unavailable validation is reported as such instead of blaming the
-  value. Its displayed value is independently encoded and falls back to
+  value.
+
+  **Nothing in either script may express that contract as `[[:cntrl:]]`, and the
+  reason is measured rather than theoretical.** A character class is resolved by
+  the shell against the locale the release inherited, so it describes the host
+  and not the contract. Across the shells a release can be started by: dash, and
+  bash under `LC_ALL=C`, match C0 and DEL; bash in a UTF-8 locale also matches
+  the C1 block, and glibc's tables put U+2028 and U+2029 in the class besides.
+  Both directions of error follow — the class refuses codepoints the contract
+  permits on some hosts, and accepts C1 on others — so the accepted set became a
+  property of the locale. `castle_controls`, a literal set of the C0 bytes and
+  DEL built with `printf`, is what both scripts use instead; it is identical
+  under every shell and locale measured. NUL never reaches it, since no shell
+  variable can hold one.
+
+  In `bin/castle` that set is only a shortcut in front of the decoder, which
+  stays authoritative for invalid UTF-8 and C1 — and the shortcut is now
+  restricted to bytes the decoder also forbids, so it can never refuse a value
+  the decoder would accept. **The `env.sh` fragment has no decoder and is not to
+  be given one**: selection after the claim must not depend on `od` or `awk`
+  being present, or a missing tool turns a prepared reboot into a refused one.
+  So the fragment refuses C0 and DEL byte-exactly and says nothing about C1.
+  That is a real limit and not a hole — a POSIX shell has no portable way to
+  match the C1 block, whose UTF-8 encoding is two bytes that bash in a UTF-8
+  locale sees as one character and dash sees as two, so a bracket of the
+  composed characters would refuse every ordinary version carrying U+00A0 to
+  U+00BF under dash. What closes it is that no release is selected on that check
+  alone: the two markers still have to name one version, and the version
+  directory still has to hold an `env.sh` and a `start.boot`. Castle validates
+  through the decoder before it ever writes a marker. Its displayed value is independently encoded and falls back to
   `<unprintable>` if the display tools are unavailable too.
 
   The version-less `commit` has a separate protocol of its own. The remote

@@ -513,6 +513,18 @@
   command refuses the version and names the failed validation. The same sink
   existed in the launcher Forecastle used to generate.
 
+  Which versions are accepted does not depend on the locale the release
+  inherited. Neither script expresses the forbidden bytes as a `[[:cntrl:]]`
+  character class, because a shell resolves that against its locale: dash and a
+  C-locale bash match C0 and DEL, while a UTF-8 bash also matches the C1 block,
+  and glibc puts U+2028 and U+2029 in the class as well. A literal set of the C0
+  bytes and DEL is used instead, so the answer is the same under every supported
+  shell. `bin/castle` keeps that set only as a shortcut in front of the byte
+  decoder, which remains authoritative for invalid UTF-8 and C1; the `env.sh`
+  fragment, which deliberately forks no tool to choose a version, refuses C0 and
+  DEL and leaves C1 to the marker comparison and the version-directory check
+  that already have to pass.
+
 ### Fixed
 
 - Argumentless `bin/castle commit` now uses a dedicated machine result instead

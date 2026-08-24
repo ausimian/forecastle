@@ -1352,6 +1352,33 @@ defmodule Forecastle.CastleCliTest do
       refute recorded?(context)
     end
 
+    test "the separator codepoints a control class over-matches are still versions",
+         context do
+      # U+2028 and U+2029 are permitted by the contract - valid UTF-8, outside
+      # C0, DEL and C1 - and they are the codepoints that make a `[[:cntrl:]]`
+      # shortcut unsafe: glibc's tables put both in that class, so a bash in a
+      # UTF-8 locale would refuse these while dash accepted them, and which
+      # releases could be managed would come down to the locale the deployment
+      # inherited. The validator's shortcut is a literal C0/DEL byte set for that
+      # reason, and the decoder behind it is bytewise.
+      #
+      # Asserted by comparing the delegated arguments directly rather than
+      # through `Code.string_to_quoted!/1` like the list above: these two are
+      # exactly the characters Elixir's parser warns about seeing raw, and the
+      # claim here is about the bytes surviving, not about the expression's
+      # shape.
+      for version <- ["1.2.3-a\u2028b", "1.2.3-a\u2029b"] do
+        File.rm(context.record)
+
+        assert castle!(context, ["install", version]) == [
+                 "rpc",
+                 "Castle.install(~s(#{version}))",
+                 "rpc",
+                 "Castle.running(~s(#{version}))"
+               ]
+      end
+    end
+
     test "literal echo escape spellings stay literal in rejected versions", context do
       for suffix <- [~S(\nforged), ~S(\0033[31mforged), ~S(\cforged)] do
         version = "0.1.1#{suffix}"

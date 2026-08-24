@@ -1059,13 +1059,30 @@ defmodule Forecastle.EnvScriptTest do
     end
 
     test "does not print control bytes from Castle's marker", %{root: root} do
+      # The expected reason is per shape, and the difference is the contract
+      # rather than an accident. The usability check here is shell-only - by
+      # design, so that a missing `od` or `awk` cannot turn a prepared reboot
+      # into a refused one - and a POSIX shell can match C0 and DEL portably but
+      # not the C1 block, whose UTF-8 encoding is two bytes that the shells
+      # disagree about seeing as one character or two. So C0 makes the version
+      # unusable, while a C1-bearing one is carried as far as the comparison
+      # with OTP's marker and refused there.
+      #
+      # What every shape shares is the part that matters: status 0, no re-exec,
+      # the marker percent-encoded, and no raw control byte anywhere in the
+      # output. Asserting the reason per shape is what stops this passing for
+      # locale-dependent reasons - it used to assert "no usable version" for the
+      # C1 case, which held only under bash in a UTF-8 locale and failed under
+      # dash, so the suite was green on macOS and red on Ubuntu.
       controlled = [
-        {"carriage return", "#{@next}\r", "\r", "%0D"},
-        {"escape", "#{@next}\e[31m", "\e", "%1B[31m"},
-        {"C1 control", "#{@next}" <> <<0xC2, 0x9B>>, <<0xC2, 0x9B>>, "%C2%9B"}
+        {"carriage return", "#{@next}\r", "\r", "%0D", "Castle's marker has no usable version"},
+        {"escape", "#{@next}\e[31m", "\e", "%1B[31m", "Castle's marker has no usable version"},
+        {"DEL", "#{@next}\d", "\d", "%7F", "Castle's marker has no usable version"},
+        {"C1 control", "#{@next}" <> <<0xC2, 0x9B>>, <<0xC2, 0x9B>>, "%C2%9B",
+         "the markers name different versions"}
       ]
 
-      for {shape, version, control, encoded} <- controlled do
+      for {shape, version, control, encoded, reason} <- controlled do
         File.write!(pending(root), "#{version}\nsome-attempt\n")
         File.write!(provisional(root), "16.0 #{@next}\n")
 
@@ -1076,13 +1093,60 @@ defmodule Forecastle.EnvScriptTest do
 
         assert run.stderr =~ "Castle marker [#{@next}#{encoded}]", shape
 
-        assert run.stderr =~ "Castle's marker has no usable version", shape
+        assert run.stderr =~ reason, shape
         refute String.contains?(run.stderr, control), shape
         refute armed?(root), shape
         refute provisional?(root), shape
         assert claims(root) == [], shape
         assert rejected(root) == [], shape
       end
+    end
+
+    test "is not selected from a pair that agrees on a C1-bearing version",
+         %{root: root} do
+      # This is the guard that carries C1 now that the shell's control class is
+      # gone, so it is asserted rather than assumed. Both markers name the same
+      # version, so the comparison the case above relies on passes, and what
+      # refuses the selection is the version directory having none of the
+      # launcher's furniture in it.
+      version = "#{@next}" <> <<0xC2, 0x9B>>
+
+      File.write!(pending(root), "#{version}\nsome-attempt\n")
+      File.write!(provisional(root), "16.0 #{version}\n")
+
+      run = start(root)
+
+      assert run.status == 0
+      refute run.stdout =~ @exec
+
+      assert run.stderr =~ "Castle marker [#{@next}%C2%9B]"
+      assert run.stderr =~ "env.sh is missing from the target release"
+      refute String.contains?(run.stderr, <<0xC2, 0x9B>>)
+
+      refute armed?(root)
+      refute provisional?(root)
+    end
+
+    test "is selected from a pair naming a version outside ASCII", %{root: root} do
+      # The other direction, and the reason the control class had to go rather
+      # than be pinned to a locale: every valid UTF-8 codepoint outside C0, DEL
+      # and C1 is a permitted version, and `[[:cntrl:]]` refused some of them
+      # under bash in a UTF-8 locale while accepting them under dash. A release
+      # this fragment can start must not depend on the locale it inherited.
+      version = "0.1.2-café"
+
+      release_fixture(root, version)
+      File.write!(pending(root), "#{version}\nsome-attempt\n")
+      File.write!(provisional(root), "16.0 #{version}\n")
+
+      run = start(root)
+
+      assert run.status == 0
+      assert run.stdout =~ "#{@exec}#{version}"
+      assert run.stderr == ""
+
+      refute armed?(root)
+      refute provisional?(root)
     end
 
     test "display-tool failures cannot reject valid provisional evidence", %{root: root} do
