@@ -497,6 +497,42 @@ defmodule Forecastle.Appup do
   defp refused?(_instruction), do: false
 
   @doc """
+  The instructions this module reasons about that sit *before* an explicit
+  `point_of_no_return`, where `systools_rc` will not have them.
+
+  `split_script/1` cuts the script at the marker and `check_script/2` allows only
+  `load_object_code` and `apply` in the first half, throwing
+  `bad_op_before_point_of_no_return` for anything else - measured on OTP 28.3:
+  `[{update, M, …}, point_of_no_return]` is refused, `[point_of_no_return,
+  {update, M, …}]` and `[{apply, …}, point_of_no_return, {update, M, …}]` are
+  fine.
+
+  A script with no marker of its own is entirely "after" it, which is where
+  module instructions belong, so nothing is reported for one - and that is the
+  overwhelmingly common case, since the marker is a relup-script feature that an
+  appup rarely spells out.
+
+  This is positional rather than per-instruction, which is why it is separate
+  from `refused/1`: the instruction is perfectly legal, it is only in the wrong
+  half. `effects/4` still credits it, deliberately - it says what the instruction
+  *does*, and the caller reports that the edge will not be built at all.
+  """
+  @spec misplaced([term()]) :: [term()]
+  def misplaced(script) do
+    case Enum.split_while(script, &(&1 != :point_of_no_return)) do
+      {_before, []} -> []
+      {before, [:point_of_no_return | _after]} -> Enum.filter(before, &ours_instruction?/1)
+    end
+  end
+
+  defp ours_instruction?(instruction)
+       when is_tuple(instruction) and tuple_size(instruction) >= 1 do
+    elem(instruction, 0) in @ours
+  end
+
+  defp ours_instruction?(_instruction), do: false
+
+  @doc """
   The modules that more than one dependency-ordered instruction defines, which
   `:systools` refuses as `muldef_module`.
 

@@ -865,6 +865,7 @@ defmodule Mix.Tasks.Castle.Appup do
   # branch.
   defp findings(script, direction, app, old, new) do
     refusals(script) ++
+      misplaced(script) ++
       multiply_defined(script, app, new.inventory) ++
       self_removals(script, app) ++
       if Appup.restarts_emulator?(script, direction) do
@@ -990,6 +991,21 @@ defmodule Mix.Tasks.Castle.Appup do
   # write - `{restart_application, App}` beside an explicit `{update, M, …}` for
   # one of that application's own modules is refused, measured - and because the
   # coverage question alone would call such a module covered and exit zero.
+  # A legal instruction in the wrong half of the script. `split_script/1` cuts at
+  # an explicit `point_of_no_return` and `check_script/2` allows only
+  # `load_object_code` and `apply` before it. Reported rather than credited-and-
+  # forgotten, because the instruction itself is fine and only its position is
+  # not - which is also why it is not a `refusals/1` finding.
+  defp misplaced(script) do
+    for instruction <- Appup.misplaced(script) do
+      {:gap,
+       "#{inspect(instruction)} comes before this entry's point_of_no_return, where " <>
+         "systools_rc allows only load_object_code and apply. It refuses that as " <>
+         "bad_op_before_point_of_no_return, so no relup is produced for this edge - the " <>
+         "instruction is fine, its position is not."}
+    end
+  end
+
   # A `remove_application` naming the application whose appup this is.
   # `:systools` refuses it as `removed_application_present` whenever the
   # application is still in the release being moved to - and it always is here,

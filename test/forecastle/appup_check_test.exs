@@ -37,6 +37,17 @@ defmodule Forecastle.AppupCheckTest do
   @counter {:update, Sample.Counter, {:advanced, []}}
   @unmentioned {:update, Sample.Unmentioned, {:advanced, []}}
 
+  # The same two in the **long** form `check_op/1` accepts directly, for the cases
+  # that put an instruction somewhere the short-form rewrite does not reach - a
+  # nested fragment, or the wrong side of a `point_of_no_return`. Defined here
+  # rather than inside the describe that first needed them, because a module
+  # attribute is evaluated where it is written: used from a describe earlier in
+  # the file it is `nil`, and a script of `[nil, nil]` covers nothing and fails
+  # for the wrong reason.
+  @counter_long {:update, Sample.Counter, {:advanced, []}, :brutal_purge, :brutal_purge, []}
+  @unmentioned_long {:update, Sample.Unmentioned, {:advanced, []}, :brutal_purge, :brutal_purge,
+                     []}
+
   setup_all do
     {:ok,
      from: assemble!(into: "appup-from", vsn: @from), to: assemble!(into: "appup-to", vsn: @to)}
@@ -388,6 +399,40 @@ defmodule Forecastle.AppupCheckTest do
       assert output =~ "Sample.Unmentioned changed, and no instruction loads it"
     end
 
+    test "a module instruction before point_of_no_return is refused for its position", ctx do
+      # `split_script/1` cuts the script at an explicit `point_of_no_return` and
+      # `check_script/2` allows only `load_object_code` and `apply` before it.
+      # Measured on OTP 28.3: `[{update, M, ...}, point_of_no_return]` is refused
+      # with `bad_op_before_point_of_no_return`, while the same instruction after
+      # the marker, or an `{apply, ...}` before it, is fine.
+      #
+      # Positional rather than per-instruction, which is why it reads differently
+      # from a bad instruction: the instruction is legal, its position is not.
+      misplaced = [@counter_long, @unmentioned_long, :point_of_no_return]
+      set_appup!(ctx.to, @to, misplaced, misplaced)
+
+      {output, status} = appup(both(ctx))
+
+      assert status != 0, "a module instruction before the marker passed:\n\n#{output}"
+      assert output =~ "comes before this entry's point_of_no_return"
+      assert output =~ "bad_op_before_point_of_no_return"
+      refute output =~ "every module that moved is covered"
+    end
+
+    test "a module instruction after point_of_no_return is where it belongs", ctx do
+      # The other half, so this is a claim about position rather than about the
+      # marker appearing at all. A script with no marker of its own is entirely
+      # "after" it, which is the common case and the one every other test here
+      # uses.
+      placed = [:point_of_no_return, @counter_long, @unmentioned_long]
+      set_appup!(ctx.to, @to, placed, placed)
+
+      output = appup!(both(ctx))
+
+      assert output =~ "every module that moved is covered"
+      refute output =~ "point_of_no_return"
+    end
+
     test "a module defined by two instructions is refused by systools, and said to be", ctx do
       # `systools_rc` builds a dependency graph of the instructions carrying
       # `DepMods` and throws `{muldef_module, Mod}` for a module with more than
@@ -465,10 +510,6 @@ defmodule Forecastle.AppupCheckTest do
     # splice happens instead of the per-instruction expansion rather than before
     # it - measured on OTP 28.3: `[[{load_module, m1}]]` is refused with
     # `{bad_instruction, {load_module, m1}}`, while the long form is accepted.
-    @counter_long {:update, Sample.Counter, {:advanced, []}, :brutal_purge, :brutal_purge, []}
-    @unmentioned_long {:update, Sample.Unmentioned, {:advanced, []}, :brutal_purge, :brutal_purge,
-                       []}
-
     test "is read for coverage", ctx do
       nested = [[@counter_long, @unmentioned_long]]
       set_appup!(ctx.to, @to, nested, nested)
