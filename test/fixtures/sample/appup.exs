@@ -9,7 +9,8 @@
 # states and `mix castle.appup` exists to catch.
 #
 # `Forecastle.UpgradeTest` asserts the stale outcome against a real booted
-# release. Completing this appup would take that away.
+# release; `Forecastle.AppupCheckTest` asserts that `mix castle.appup` reports
+# it. Completing this appup would take away both.
 case System.get_env("SAMPLE_VSN", "0.1.0") do
   "0.1.0" ->
     {~c"0.1.0", [], []}

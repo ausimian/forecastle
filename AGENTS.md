@@ -1216,18 +1216,430 @@ repository the suite is running in. `File.cd/1` is not an answer either: it move
 the whole OS process, and `forecastle_test.exs` and `env_script_test.exs` are
 `async: true`. Do not "simplify" that suite by calling the resolver directly.
 
+## Appup coverage
+
+`mix castle.appup` diffs two builds of an application and reports how the
+committed appup covers the modules that moved.
+[forecastle#27](https://github.com/ausimian/forecastle/issues/27), and
+`design/upgrade-tooling.md` §D3 and §3 in ausimian/castle, are where the
+reasoning started.
+
+**It is the primary artefact of the whole upgrade-tooling design, not a
+convenience.** The `:appup` compiler never sees a second version of the
+application, so it cannot tell whether the instructions it compiles are right,
+and nothing downstream closes that gap: `:systools.make_relup/4` fails when an
+appup has no *entry* for the from-version, and does not and cannot notice that
+an entry is *incomplete*. Two modules changed, the appup mentions one, the relup
+generates, the install succeeds, and the unmentioned one goes on serving calls
+from the code that was loaded before. That failure is invisible to the compiler,
+to `:systools`, to `--hot` and at install time, and it becomes visible on the
+next restart — when the code changes underneath a system nobody was upgrading.
+
+**The check and `auto` read appups through one module, and that is the point of
+`Forecastle.Appup` existing.** `mix castle.relup`'s `auto` asks whether an appup
+covers a transition at all; the check asks what the entry it finds actually does.
+Both are questions about one file keyed by one from-version, and a check that
+pronounced an appup adequate while `auto` restarted the same edge — or the
+reverse — would be worse than no check. So the reading, the
+`appup_search_for_version/2` matching and the "what does this instruction cover"
+rule all live there, once, and `project_apps/0` with them, since the check
+defaults to the same set of applications `auto` treats as the project's own.
+
+**Coverage is asked per *effect*, not per mention, and getting that wrong is how
+the check came to pass the worst appup it can be given.** `systools_rc` does not
+treat the four module instructions alike:
+`translate_dep_to_low/3` turns `update` and `load_module` into a `{load, …}`
+with a `load_object_code` behind it, `translate_add_module_instrs/2` rewrites
+`add_module` into a `load_module` first — and `delete_module` becomes
+`{remove, …}` plus `{purge, …}` and **loads nothing**. So a changed module named
+only by a `delete_module` was reported as covered, and what the upgrade would
+actually do is delete working code out of a release that still has it. The
+whole-application instructions split the same way in
+`translate_application_instrs/3`: `add_application` adds every new module,
+`remove_application` removes every old one, `restart_application` does both.
+
+`Forecastle.Appup.effects/4` therefore answers in `:load` or `:removal`. A
+changed or added module needs `:load`; a removed one needs `:removal`. Do not
+collapse them back into a single "mentioned" set.
+
+**The order instructions run in is deliberately NOT modelled, and that is the
+answer to five review rounds of getting it wrong rather than a gap in the
+sixth.** The class kept coming back because the model was a reimplementation of
+`systools_rc`, and each round found another respect in which the two differed:
+
+1. two sets, one loaded and one removed — could not see a load undone by a
+   removal at all, because the module was in both and the subtraction cancelled
+   it. `release_handler_1` implements `remove` with `code:purge/1` and
+   `code:delete/1`, so the module really is gone.
+2. a sequence in *source* order — wrong too. Measured on OTP 28.3:
+   `[{update, dict, …, [lists]}, {remove, {lists, …}}, {update, lists, …}]` is
+   accepted and translated to `[{load, lists}, {load, dict}, {remove, lists}]`.
+   The dependency-connected updates are hoisted *past* the independent low-level
+   `remove`, in both directions, so `lists` ends up removed where source order
+   says loaded.
+
+Modelling (2) faithfully means building `translate_dependent_instrs/4`'s digraph
+— reimplementing the thing `Forecastle.Appup` exists to avoid reimplementing. So
+the question is asked only where order cannot change the answer: a module with
+exactly one effect has it; a module whose effects agree has it; a module whose
+effects **disagree** is a `{:conflict, instructions}` that the task reports
+instead of resolving. An ordinary appup names each module once, so the common case
+is exact and the reported case is one an author needs to see anyway.
+
+**Do not "improve" this by reintroducing an order.** Both directions of guessing
+have now been measured wrong, and the conservative report is the whole point. The
+one exception is measured, not assumed: a `restart_application` is *itself* a
+removal of every old module and a load of every new one, and
+`translate_application_instrs/3` emits them in that order within the single
+instruction — verified to come out `remove, remove, purge, load, load` in both
+directions — so where a module's only effects come from one `restart_application`
+the answer is `:load`. That also retires the old rule where
+`deleted_but_present/2` was asked of the removals *minus* the loads, which was a
+heuristic that happened to be right for `restart_application` and blind to
+everything else.
+
+**A module defined by more than one dependency-ordered instruction is refused by
+`:systools` outright, and gets its own finding.** `systools_rc` builds a digraph
+of the instructions carrying `DepMods` and throws `{muldef_module, Mod}` for a
+module with more than one vertex, before producing anything. Measured: an
+application-level instruction counts, through its expansion to an `add_module`
+per module the `.app` names — so `{restart_application, App}` beside an explicit
+`{update, M, …}` for one of `App`'s own modules is refused. That is a
+reasonable-looking thing to write, and asking only about coverage called every
+module of it covered and exited zero. `remove_application`'s half contributes no
+vertex (it expands to the low-level `remove` and `purge`), and neither does a
+hand-written `load` or `remove` — which is exactly why `[{update, M, …},
+{remove, {M, …}}]` is *accepted* and has to be reported as a conflict rather than
+as a muldef.
+
+**The low-level `load` and `remove` count too, and leaving them out was wrong in
+both directions.** `check_op/1` accepts them in an appup — they are what the
+high-level instructions translate *into* — so a `remove` undoing a covered load
+was a false pass, and a removal written as one rather than as a `delete_module`
+was a false gap. They are the one pair carrying their module *inside* a tuple
+instead of at the second element, which is why `subject/1` exists: it also keeps
+`{purge, Mods}`, `{apply, {M, F, A}}` and `{load_object_code, {Lib, Vsn, Mods}}`
+out by the general rule that a second element which is not an atom names no
+single module, rather than by listing them.
+
+**"Every module of the application" is the `.app` resource's `modules` list, not
+the beams in `ebin`, and it took a second review round to get that right.**
+`translate_application_instrs/3` expands over `#application.modules`, which comes
+from the `.app` — so `effects/4` takes the inventories as *parameters* rather than
+returning an `:all` sentinel, and it takes the right one per effect and
+direction: the new side's for `:load`, the old side's for `:removal`. Returning
+`:all` meant a changed beam the `.app` did not name was reported as covered by a
+`restart_application`, while a successful upgrade left its old copy loaded — this
+task producing the exact failure it exists to catch.
+
+`Mix.Tasks.Compile.App` fills `:modules` in with `Keyword.put_new_lazy/3`, so a
+project supplying its own list in `application/0` keeps it, which is how an
+ordinary build reaches the mismatch. The fixture's own `.app` is consistent,
+which is precisely why the covered case could not expose it — two tests now
+rewrite the inventory directly, one per effect, and both were checked to fail
+against the old behaviour.
+
+A beam the `.app` does not name is reported for *that* rather than for the appup,
+because `get_lib/2` resolves object code through the same list and throws when
+nothing in the release has the module — so no instruction could carry it whatever
+the appup said, and the appup is not where the problem is.
+
+One consequence of the split that is easy to get wrong, and was:
+
+- the *notes* use `Appup.named/2`, which deliberately does **not** expand an
+  application-level instruction. "You named a module that did not change" is a
+  remark about what somebody wrote, and an `add_application` names no module at
+  all — expanding it turned every unchanged module into a remark about a leftover
+  nobody left.
+
+The mirror finding is a gap too, and asymmetrically so: a `delete_module` naming
+a module the *target* build still has is a defect, because module names are
+global and it can only be this application's. A *load* naming a module this
+application does not have is only a note, because `systools_rc:get_lib/2`
+resolves a module against every application in the release — it may be somebody
+else's, and if it is nobody's, `:systools` refuses the relup itself.
+
+**What is a gap, and what is only reported.** Non-zero on gaps and nothing else:
+
+- a module that changed or was added and that no instruction *loads*, or was
+  removed and that no instruction *deletes*
+- a module a `delete_module` names that is still in the target build
+- no entry at all for the from-version — the coarse version of the same failure,
+  reported here because every module that moved is then mentioned nowhere. It is
+  what `:systools.make_relup/4` refuses outright, so an appup deliberately
+  offering no downgrade path is reported: the same answer, arriving earlier
+- an application whose modules moved while its version did not. `release_handler`
+  compares versions and `:systools` consults no appup for one that did not
+  change, so no instruction anywhere could carry that code, and the remedy is
+  the version rather than an instruction — which is why that finding names the
+  version rather than listing the modules
+
+A module an instruction mentions that *did not* change is reported and is **not**
+a gap, and that is a decision rather than an omission. It is usually a leftover
+naming the wrong module — and where it is, the module that really did change is
+mentioned nowhere and fails on its own account, so refusing the build twice buys
+nothing. An instruction loading a module whose code is identical is inert, so
+failing a pipeline for one would refuse a build for something that cannot go
+wrong. A mention of a module in neither build is the same kind of note: it may
+belong to another application, since `systools_rc` resolves modules against the
+whole release rather than against one appup's owner.
+
+**Which module an instruction names is exact, and `DepMods` is deliberately not
+it.** Four instructions name one module — `update`, `load_module`, `add_module`,
+`delete_module` — and in every arity `appup(4)` allows the module is the second
+element; `systools_rc:expand_script/1` and `normalize_instrs/1` expand every
+short form and leave it there. `DepMods` is the *last* element of most of those
+and names modules the instruction's own module depends on, used only for
+ordering: a module appearing only in somebody else's `DepMods` is never loaded,
+and counting it would turn an exact question into a substring search. Same for
+`{apply, {M, F, A}}`.
+
+**An instruction is credited only once its whole shape is one `:systools`
+accepts, and that is the structural answer to a class of finding that came back
+twice.** Reading an instruction by its head and the position of its module was
+wrong in two independent ways — it missed a legal shape (the nested fragment
+below) and it credited an illegal one. The second is the worse of the two:
+`{restart_application, App, Anything}` is refused by
+`systools_rc:check_syntax/1` as a `bad_instruction`, so the edge produces no
+relup at all, yet by leading elements alone it looked like a whole-application
+instruction and covered the entire inventory. The check announced that every
+module that moved was covered, of an appup that cannot be used — a false *pass*.
+
+So recognition is now positive rather than positional. `Forecastle.Appup`'s
+`legal?/1` writes out every shape `expand_script/1` and `check_op/1` between them
+accept, `effects/4` and `named/2` credit nothing else, and `refused/1` hands the
+rest back so the task can report it — because a module reported as uncovered when
+an instruction names it is confusing unless the instruction is named too.
+
+`legal?/1` is `check_op/1` and nothing more, and that exactness is bought by
+`script/2` producing the very script `check_syntax/1` would see — see the
+fragment section below, which is what lets one vocabulary serve both a top-level
+instruction and a fragment member with neither carrying a note about where it
+came from. It is deliberately allowed to be **narrower** than `:systools`, and
+the asymmetry is the whole design: too narrow costs a false gap with the
+instruction printed beside it, too wide costs a false pass. Only this module's
+own vocabulary is judged: `{apply, …}`, `point_of_no_return` and the rest name no
+module here whatever their shape, were never credited with anything, and
+`:systools` checks them anyway.
+
+**A script element may itself be a list, `appup(4)` does not say so, and
+`Forecastle.Appup.script/2` is `expand_script/1` — both of its effects, in its
+order.** That function runs each element through a `case` that rewrites the short
+forms into long ones and then, *if the result is a list*, appends it into the
+script instead of consing it on. No clause of that `case` matches a list or
+returns one, so the two branches never meet: **a list element is spliced verbatim
+and everything else is expanded, and a fragment's members are never passed back
+through the expansion.**
+
+Reading only the top level of the list was mostly *noisy* — gaps reported on an
+edge `:systools` would have restarted, or on a module a nested instruction loads
+— but a nested `{delete_module, Mod, []}` translates to the `remove` and `purge`
+pair, and missing that failed **silently**, since nothing then said the upgrade
+deletes code the target still has.
+
+**Splicing first and expanding afterwards is a different function, and the
+difference is a false pass.** That was the first attempt at this and it was
+wrong: a nested short form got the expansion `:systools` would not give it, so
+`{load_module, Mod}` inside a fragment was credited with coverage — and a nested
+`{add_application, App}` with the entire inventory — for an appup no relup can
+be produced from at all. Measured against OTP 28.3 through
+`translate_scripts/4`:
+
+| script | answer |
+| --- | --- |
+| `[{load_module, m}]` | syntax OK (`no_such_module` later) |
+| `[[{load_module, m}]]` | `{bad_instruction, {load_module, m}}` |
+| `[[{update, m}]]` | `{bad_instruction, {update, m}}` |
+| `[[{add_application, a}]]` | `{bad_instruction, {add_application, a}}` |
+| `[[{add_application, a, permanent}]]` | syntax OK |
+| `[[{add_module, m}]]`, `[[{delete_module, m}]]` | syntax OK |
+| `[[[restart_emulator]]]` | `{ok, [point_of_no_return, restart_emulator]}` |
+| `[[[[restart_emulator]]]]` | `{bad_instruction, [restart_emulator]}` |
+
+The three heads refused nested are exactly the three whose short forms exist only
+because the expansion rewrites them; the ones accepted are the arities
+`check_op/1` has itself. So the fix is not an origin flag threaded through the
+script — it is doing the two effects in the right order and letting `legal?/1` be
+`check_op/1`, which every instruction in an expanded script is held to whichever
+branch produced it. `effects/4`, `named/2` and `restarts_emulator?/2` do no
+expanding of their own and must be given a script `script/2` handed back.
+
+**An edge that ends by restarting the emulator is passed over in silence, and
+which edges those are is `systools_rc`'s answer rather than the appup's
+ordering.** Measured against OTP 28.3, `sasl-4.3`, in
+`sort_emulator_restart/3`: a `restart_emulator` is filtered out wherever the
+appup wrote it and appended to the end, so **its position does not matter** and a
+check reading the last instruction would be wrong; a `restart_new_emulator` in a
+*downgrade* script is replaced by a trailing `restart_emulator`, so that is a
+one-stage restart too; and one in an *upgrade* script is hoisted before the point
+of no return, with the rest of the relup running after the reboot — so coverage
+still matters there, and the check says so rather than leaving the reader to meet
+`mix castle.relup`'s refusal of that transition later.
+
+**That exemption is sound but deliberately incomplete, and the distinction is
+worth keeping because a review will raise it again.** `:systools` merges every
+application's script for one relup edge before `sort_emulator_restart/3` runs, so
+a restart in *any* application's appup restarts the whole edge. A restart named
+in *this* application's own entry therefore really does restart the edge that
+entry belongs to — the exemption never lets a dangerous appup through. What it
+cannot see is a restart supplied by an application `--app` did not name, or one
+`:systools` inserts for an ERTS change.
+
+That was raised as a finding and **declined**, with the reasoning: there is no
+release here to read a restart out of. At `:compile` level there is no `.rel` at
+all, applications named in one invocation need not be in one release, and each is
+checked against *its own* from-version rather than a release version — so "the
+edge" is not a thing this task can know. Suppressing one application's gaps
+because another's appup restarts would be a claim about a relup it never sees.
+The residual error is that gaps get reported on an edge that would have
+restarted, which is the conservative direction, and `mix castle.relup` is what
+decides restarts properly, having both `.rel` files to do it with.
+
+**The other form of the same boundary was raised in a later round and declined
+for the same reason: an instruction is credited only to the application whose
+appup it is in.** `:systools` merges every application's script before
+translating it and `get_lib/2` resolves each module through the whole
+application list, so an instruction in *A*'s appup naming a module of *B* really
+does load it — and this reports that module as a gap under *B*, saying under *A*
+only that it is in neither build of *A* and may belong to another application.
+
+Crediting it would need what the task has not got, and in two ways rather than
+one. Whether `:systools` consults *A*'s appup for this edge at all depends on
+whether *A*'s own version moved, and which applications share an edge is a fact
+about a release — `--app` may name two applications that are in no release
+together, each is checked against its own from-version, and at `:compile` level
+there is no `.rel`. Aggregating named effects across whatever `--app` happened to
+list would credit an appup `:systools` may never read, which is a false pass in
+place of a false gap. The reported direction is the conservative one, and the
+note under *A* is what points a reader at it.
+
+**Change detection is `:beam_lib.md5/1` *and* the persisted attributes, and a
+digest of the file bytes would be useless.** `Mix.Release.strip_beam/2` rebuilds
+each beam from `@additional_chunks ++ :beam_lib.significant_chunks()`, so a
+release's copy of a module is different bytes from the `_build` copy of identical
+code — measured on Elixir 1.19.5 / OTP 28, `AtU8 Code StrT ImpT ExpT FunT LitT
+LocT Attr CInf Dbgi Docs ExCk Line Type` before and `Attr Line Type AtU8 Code
+StrT ImpT ExpT FunT LitT` after. The md5 is stable across that, which is the
+whole reason `--from` can name a stripped release while `--to` is an unstripped
+build.
+
+The md5 alone was not enough, and `:beam_lib`'s own documentation says why — it
+covers the code, and "compilation date and other attributes are not included".
+Measured: two modules differing only in an explicit `@vsn`, or in an attribute
+registered with `persist: true`, have the same md5. Those attributes are loaded
+with the module and readable through `module_info/1`, and an explicit `@vsn` is
+exactly what hot-upgrade code carries, so reporting such a module as unchanged
+was a false pass. Pairing them costs nothing: `Attr` is one of the chunks
+stripping keeps, and the *decoded* attribute list is identical either side of it
+while the bytes are not — asserted by the suite rather than assumed. Docs are not
+in `Attr`, so a `@doc` change still moves nothing, and a module with no explicit
+`@vsn` is given its own md5 as one, so for ordinary code the pair moves exactly
+when the code does.
+
+The fixture for that is a beam whose `Attr` chunk is rebuilt in place with
+`:beam_lib.all_chunks/1` and `build_module/1`, and it asserts that the md5 did
+*not* move — otherwise the case would pass against a check comparing md5 alone
+and be asserting nothing.
+
+A beam with **no** `Attr` chunk is read with `allow_missing_chunks` and
+fingerprinted with `[]`, not refused. Measured on OTP 28.3: such a module loads,
+answers calls, and reports `[]` from `module_info(attributes)`, so `[]` is what
+it really has and the md5 alone is the right comparison for it. And
+`:beam_lib.strip/1` — already named as a trap because it drops `Attr` — is how
+one turns up in somebody's dependency, so insisting on the chunk made this a gate
+that could not *answer* rather than one that said no.
+
+**Absence is a meaningful answer here, which makes a spurious absence the worst
+bug this task can have — and it had it.** An application in one build and not the
+other is a *note*, since `:systools` covers that with `add_application` /
+`remove_application` and neither needs an appup. So anything that makes an
+application merely *look* absent exits **zero**. A mistyped `--from` did exactly
+that: the library directory was not there, every application looked added, and
+the run reported success having compared nothing. Nothing else was going to catch
+it either — `Forecastle.Baseline` resolves a `rel:` spec without touching the
+filesystem, deliberately, because the caller is what reads the release and can
+say what it could not read, and this task reads no `.rel` at all.
+
+So the library directory is *listed* once per build and a failure to read it is a
+refusal, and an application directory with no `ebin` in it is a refusal too
+rather than an absence. Listing also closes a narrower form of the same bug: a
+`{app,app-*}/ebin` glob is a pattern built out of a path, and
+`:filelib.wildcard/1` cannot quote the part that is a path — a project under a
+directory named `a{b}` matched nothing and every application looked absent again.
+Do not put a glob back in either place, or in the `*.beam` listing beside them.
+
+The third form of it is one level further in still, and it is why `app_dirs/2`
+returns two lists rather than one filtered list. *Whether anything matched the
+name at all* and *whether what matched is usable* are different questions, and
+filtering non-directories out answered the second as though it were the first: a
+regular file, or a symlink with nothing at the end of it, named for the
+application left it looking absent and exited zero. An application whose matches
+are **all** non-directories is now a refusal. One beside a real directory is
+still passed over rather than refused — a legacy `sample-<vsn>.ez` archive
+matches the prefix and is not what an upgrade would read, and refusing there
+would break a layout that works.
+
+**`--to` defaults to the current build, and that is why the task compiles — in
+`current_build/0`, not in `@requirements`.** The everyday question is *what has
+changed since 1.0.0, and does my appup cover it?*, which should cost a
+`mix compile` and nothing more, and a check run against beams that do not
+reflect the source is a wrong answer rather than a stale one. But
+`@requirements` runs before `run/1` and so before anything has looked at the
+arguments, which made `--from tar:a --to tar:b` — two artefacts, neither of them
+this checkout — wait for a compile of a working tree it was not going to read,
+and fail outright if that tree does not compile. A read-only comparison of two
+things that already exist must not need the working tree to be in a fit state.
+Do not put the requirement back.
+
+**Reading a build is not synchronised against something rebuilding it, and that
+was raised and declined.** The `.app` is consulted, then `ebin` is listed, then
+each beam is read, then the appup: a `mix release --overwrite` into the same tree
+during that window can be observed half-done, and a beam replaced at the right
+moment could compare unchanged. There is nothing to fix it with. There is no lock
+protocol on a `_build` tree or on a release directory to acquire, and no snapshot
+to read; checking digests before and after would double the reading to narrow a
+window rather than close it, and would still be a time-of-check-to-time-of-use
+gap. The invariant relied on is the one every build tool relies on — nobody
+rebuilds the tree you are reading while you read it — and two `mix release`
+runs into one directory are already undefined without this task in the picture.
+
+**A malformed `.app` is read leniently and deliberately, and that is not a gap
+in the validation.** A missing or malformed `modules` list is read as an empty
+one, where `systools_make:check_item/2` would `throw({missing_param, Item})` or
+`{bad_param, Item}`, and a `vsn` spelled as a binary is accepted where
+`string_p/1` would refuse it. Validating a `.app` is that function's job and it
+does it when a release or relup is built; a second, weaker copy here could only
+disagree with the first. What makes leaving it there safe is the direction: an
+empty inventory resolves nothing, so every module that moved is reported by
+`unresolvable/2` and an application-level instruction covers only what it names
+by hand — strictly more findings and a non-zero exit. A malformed resource
+cannot buy a clean bill of health, which is the only outcome that would matter.
+
+**The fixture is the failure.** `Sample.Counter` and `Sample.Unmentioned` are the
+same module twice — both supervised GenServers, both carrying a compile-time
+`@vsn_tag`, both exporting a `code_change/3` that would set the new tag — and
+`appup.exs` names only the first. Do not complete that appup. Two suites rest on
+it: `appup_check_test.exs` asserts the check reports the gap, and
+`upgrade_test.exs` asserts what happens when nothing does, which is
+[#25](https://github.com/ausimian/forecastle/issues/25) and the pinning §3.5
+asks for. Both children have to be *supervised* for the comparison to mean
+anything, because `update` only reaches processes found through the supervision
+tree.
+
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
 | `lib/forecastle.ex` | Release step hooks (the whole of the build-time logic) |
 | `lib/forecastle/baseline.ex` | The baseline resolver — `rel:`, `tar:` and `ref:` specs, and the cache under `_build/castle/baselines` |
+| `lib/forecastle/appup.ex` | Reading appups and asking them what `systools` asks: the from-version matching, what an instruction covers, and which applications the project owns the appups for |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
+| `lib/mix/tasks/castle.appup.ex` | `mix castle.appup` — the read-only coverage check. Non-zero when a module that moved is mentioned nowhere |
 | `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — chooses an upgrade strategy per transition, and writes the relup |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
-| `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see `test/fixtures/sample/appup.exs` |
+| `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it |
 | `test/support` | The workspace the fixture is built in, the case template for tests that build it, and the helpers that drive one once it is built |
 
@@ -1262,6 +1674,7 @@ directory to start from a clean slate.
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
 | `test/forecastle/relup_test.exs` | `mix castle.relup` as a command, against three assembled releases: argument handling, exit status, and all three upgrade strategies |
 | `test/forecastle/baseline_test.exs` | The baseline grammar and all three sources. `tar:` against a release-shaped tree built in the test; `ref:` against a throwaway git repository holding a Mix project of its own |
+| `test/forecastle/appup_check_test.exs` | `mix castle.appup` as a command, against two assembled releases: what it reports, what it passes over, and the exit status |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 

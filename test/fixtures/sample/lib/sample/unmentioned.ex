@@ -11,13 +11,14 @@ defmodule Sample.Unmentioned do
   # that an entry is incomplete - so the relup generates, the install succeeds,
   # and this process goes on serving calls from the code that was loaded before,
   # with the new code sitting on disk, reachable and unused. That is the failure
-  # `design/upgrade-tooling.md` §1.1 states, and `Forecastle.UpgradeTest` pins
-  # that it really happens rather than leaving it as a mechanism nobody
-  # demonstrated.
+  # `design/upgrade-tooling.md` §1.1 states, and `mix castle.appup` exists to
+  # catch it. `Forecastle.UpgradeTest` pins that it really happens rather than
+  # leaving it as a mechanism nobody demonstrated.
   #
-  # **Do not add this module to `appup.exs`**, and do not "fix" the appup. The
-  # upgrade suite asserts that this module still answers with the old tag after
-  # an upgrade that reported success, and completing the appup takes that away.
+  # **Do not add this module to `appup.exs`**, and do not "fix" the appup. Two
+  # suites read this: the upgrade suite asserts this module still answers with
+  # the old tag after a successful upgrade, and the coverage suite asserts that
+  # `mix castle.appup` says so before one is ever attempted.
   @vsn_tag System.get_env("SAMPLE_VSN", "0.1.0")
 
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
