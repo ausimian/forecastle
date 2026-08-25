@@ -29,6 +29,15 @@ defmodule Forecastle.RelupTest do
   than through whatever the task prints, and publication, whose promise - that a
   failed run leaves the previous relup whole - can only be tested from inside the
   window in which it could be broken.
+
+  Baseline specs are covered here only as far as the task's own part in them -
+  that a bare path still means what it always meant, that `rel:` and `tar:` reach
+  the same release, and that `--target` says so when it is handed a spec.
+  `Forecastle.BaselineTest` covers the grammar and the three sources themselves,
+  `ref:` included, and it does that in a repository of its own for reasons its
+  moduledoc gives. Nothing here builds a git ref: the fixture's `:tar` step
+  already leaves an artefact beside every assembly, so `tar:` costs this suite
+  nothing, and `ref:` would cost it another `mix release`.
   """
 
   use Forecastle.ReleaseCase
@@ -102,6 +111,136 @@ defmodule Forecastle.RelupTest do
 
       assert {:ok, [{@to_vsn, [{@from_vsn, [], [_ | _]}], [{@from_vsn, [], [_ | _]}]}]} =
                :file.consult(to_charlist(ctx.relup))
+    end
+  end
+
+  describe "naming a baseline" do
+    test "a bare path is still a path to an assembled release", ctx do
+      # Every other test in this suite spells its baselines this way, which is
+      # what the grammar has to keep meaning: the switches took a path long
+      # before they took a spec.
+      relup!(hot(ctx) ++ ["--outdir", @outdir], @to)
+
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], [_ | _]}], [_ | _]}]} =
+               :file.consult(to_charlist(ctx.relup))
+    end
+
+    test "rel: names the same thing the bare path does", ctx do
+      relup!(
+        ["--target", rel(ctx.to, @to), "--fromto", "rel:#{rel(ctx.from, @from)}", "--hot"] ++
+          ["--outdir", @outdir],
+        @to
+      )
+
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], [_ | _]}], [_ | _]}]} =
+               :file.consult(to_charlist(ctx.relup))
+    end
+
+    test "tar: generates against the artefact that shipped", ctx do
+      # The recommended source, and the one with no rebuild in it: the fixture's
+      # `:tar` step packages every assembly, so what is named here is the same
+      # bytes a deployment would have been given.
+      relup!(
+        ["--target", rel(ctx.to, @to), "--fromto", "tar:#{tarball(ctx.from, @from)}", "--hot"] ++
+          ["--outdir", @outdir],
+        @to
+      )
+
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], [_ | _]}], [{@from_vsn, [], [_ | _]}]}]} =
+               :file.consult(to_charlist(ctx.relup))
+    end
+
+    test "two spellings of one release are one transition", ctx do
+      # `rel:x` and a bare `x` are the same release named two ways. Resolved and
+      # then left as they came, the same from-version would appear twice in the
+      # one direction of the relup - inert, since `release_handler` selects by
+      # from-version and takes the first, but not something to write.
+      relup!(
+        ["--target", rel(ctx.to, @to), "--upfrom", rel(ctx.from, @from)] ++
+          ["--upfrom", "rel:#{rel(ctx.from, @from)}", "--hot", "--outdir", @outdir],
+        @to
+      )
+
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], [_ | _]}], []}]} =
+               :file.consult(to_charlist(ctx.relup))
+    end
+
+    test "one release reached two ways is one baseline, not an ambiguity", ctx do
+      # `rel:` hands back the path it was given, deliberately, so one release
+      # arrives under as many names as there are ways to write it. A symlinked
+      # spelling is the case a textual comparison cannot see through - the two
+      # paths share not one character after the workspace - and refusing it would
+      # block a command that names one release twice and means it.
+      aliased = Path.join(Fixture.workspace(), "relup-from-alias")
+      File.rm(aliased)
+      File.ln_s!(ctx.from, aliased)
+      on_exit(fn -> File.rm(aliased) end)
+
+      relup!(
+        ["--target", rel(ctx.to, @to), "--upfrom", rel(ctx.from, @from)] ++
+          ["--upfrom", rel(aliased, @from), "--hot", "--outdir", @outdir],
+        @to
+      )
+
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], [_ | _]}], []}]} =
+               :file.consult(to_charlist(ctx.relup))
+    end
+
+    test "two different baselines for one version are refused, not silently picked", ctx do
+      # The assembled 0.1.0 and the artefact packaged from it are the same
+      # release named two ways, and they resolve to two different trees - naming
+      # both while checking they agree is a natural thing to write. A relup
+      # carries one entry per from-version and `release_handler` selects by
+      # version, so only one could ever be used and which one would come down to
+      # the order the switches were written in.
+      {output, status} =
+        relup(
+          ["--target", rel(ctx.to, @to), "--fromto", rel(ctx.from, @from)] ++
+            ["--fromto", "tar:#{tarball(ctx.from, @from)}"],
+          @to
+        )
+
+      assert status != 0, "two baselines for one version were accepted:\n\n#{output}"
+      assert output =~ "2 different baselines were named for the upgrade from #{@from}"
+    end
+
+    test "a prefix that names no source is refused", ctx do
+      {output, status} =
+        relup(["--target", rel(ctx.to, @to), "--fromto", "re:#{rel(ctx.from, @from)}"], @to)
+
+      assert status != 0, "a mistyped baseline source was accepted:\n\n#{output}"
+      assert output =~ ~s(baseline source "re:")
+    end
+
+    test "--target is a path, and says so when it is given a spec", ctx do
+      # Read as a path it would fail looking for `tar:...tar.gz.rel`, which
+      # mentions neither the switch that does take a spec nor the reason this one
+      # does not.
+      {output, status} =
+        relup(
+          ["--target", "tar:#{tarball(ctx.to, @to)}", "--fromto", rel(ctx.from, @from)],
+          @to
+        )
+
+      assert status != 0, "--target accepted a baseline spec:\n\n#{output}"
+      assert output =~ "--target takes a path"
+    end
+
+    test "reads the target before it resolves a baseline", ctx do
+      # Both are wrong, so which one is reported is the whole assertion.
+      # Resolving a baseline can mean unpacking an artefact or building a commit,
+      # and spending that before noticing the target is not where the caller said
+      # it was is the wrong way round to fail - but nothing about the message for
+      # either failure would show it, so the two are broken together and the
+      # order decides which one comes out.
+      absent = Path.join(Fixture.workspace(), "never-shipped.tar.gz")
+
+      {output, status} =
+        relup(["--target", rel(ctx.to, @to) <> "-nope", "--fromto", "tar:#{absent}"], @to)
+
+      assert status != 0, "a missing target was accepted:\n\n#{output}"
+      assert output =~ "could not be read as a release file"
+      refute output =~ "never-shipped.tar.gz"
     end
   end
 
@@ -849,6 +988,11 @@ defmodule Forecastle.RelupTest do
   defp project_only(ctx), do: ["--target", rel(ctx.hot, @hot), "--fromto", rel(ctx.from, @from)]
 
   defp rel(release, vsn), do: Path.join(release, "releases/#{vsn}/sample")
+
+  # The fixture's release steps end in `:tar`, so every assembly leaves the
+  # artefact a deployment would be shipped beside the tree it was made from.
+  # Nothing here has to build one.
+  defp tarball(release, vsn), do: Path.join(release, "sample-#{vsn}.tar.gz")
 
   defp relup(args, vsn), do: mix(["castle.relup" | args], env(vsn))
 

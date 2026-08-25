@@ -880,11 +880,348 @@ about appup-supplied instructions. The `auto` cases that need a restart edge are
 made by rewriting `sample_dep`'s appup in the assembled target release, not by
 changing the fixture.
 
+## Baselines
+
+A relup needs a previous release to compare against, and `Forecastle.Baseline`
+is the one place that turns the name of one into something on disk.
+[forecastle#26](https://github.com/ausimian/forecastle/issues/26), and
+`design/upgrade-tooling.md` §D4 in ausimian/castle, are where the reasoning
+started.
+
+**One grammar, three sources, no sniffing.** `rel:` is an assembled release,
+`tar:` a shipped artefact, `ref:` a git ref. A value with no prefix is a `rel:`
+path, which is the whole of the backwards compatibility story: `--fromto` and its
+two siblings took a path long before they took a spec, and everything written
+then still means what it meant. Direction stays on the switch name and source
+stays in the value — crossing them into separate switches is a switch per
+combination, and there are twelve.
+
+**A prefix-shaped value that names no source is a mistyped spec, not a path.**
+`re:v1.0.0` read as a filename fails looking for a release called `re:v1.0.0`,
+which mentions neither the typo nor the fact that there is a grammar. The
+pattern needs two characters before the colon, which is what keeps a Windows
+drive letter out of it — Windows is unsupported here, but being unable to name
+`c:/...` at all would be a poor way to say so, and `rel:` in front of anything is
+the way through. `spec?/1` is the same test exposed, and is how `--target` — which
+takes a path and never a spec — answers rather than resolving the typo.
+
+**`tar:` is the recommended source and the reason is correctness.**
+`release_handler` selects a relup entry by from-version *string* and never
+verifies that the running code is what the relup assumed. Rebuild an old tag
+today and you get today's Elixir and OTP patch releases, today's hex tarballs for
+anything not fully pinned, today's compiler output; if the module set differs at
+all from what is deployed, the instructions miss modules. That is §1.1's failure
+arrived at from the other direction, and it is why `ref:` says on **every**
+resolution — cache hit included — that what it produced was rebuilt. The claim is
+about the baseline, not about the work done to get it.
+
+**`rel:` deliberately touches no filesystem.** It hands back the path it was
+given. `mix castle.relup` reads the `.rel` a moment later and says exactly what
+it could not read and why, so a check in the resolver would either duplicate that
+message or stand in front of it with less to say. `relup_test.exs` pins the
+ordering with a run where the target *and* the baseline are both wrong: which
+failure comes out is the assertion, because resolving can mean unpacking an
+artefact or building a commit and neither message would otherwise show it.
+
+**Two different baselines for one release version are refused, not chosen
+between.** A relup carries one entry per from-version and `release_handler`
+selects by version, so only one of a pair sharing a version could ever be used —
+and which one would be whichever `:systools` happened to emit first, which is to
+say whichever order the switches were written in. The specs make that easy to
+reach without meaning to: one release can be named three ways, and
+`tar:my_app-1.0.0.tar.gz` beside `ref:v1.0.0` is a natural thing to write while
+checking that the two agree. They may not.
+
+Identical `.rel` terms would not settle it either, so do not "improve" this into
+a deduplication. A `.rel` names applications and their versions and nothing about
+the code inside them, so two releases can agree on every line of it and share not
+one module — which is the entire reason `tar:` is recommended over `ref:`.
+
+What *is* collapsed first is one release reached two ways. `rel:` hands back the
+path it was given, deliberately, so a release arrives under as many names as
+there are ways to write it — `./rel/…` and its absolute form, and a symlinked
+spelling of the same tree. `baseline_identity/1` settles that with the `.rel`
+file's device and inode, which is the same file by the only definition that does
+not depend on how it was reached, falling back to `Path.expand/1` where the file
+cannot be read (and `read_rel!/1` a moment later says why). A textual comparison
+was not enough: it saw a symlinked spelling as a second baseline and refused a
+command that named one release twice and meant it.
+
+**Every cache entry is immutable, and its existence is the whole of the
+question.** Nothing is built or unpacked in place: the work happens in a staging
+directory and the finished thing is *renamed* into position, so an entry appears
+only once it is whole. That is what makes "the directory is there" a safe answer
+to "is this usable?", and what makes an interrupted run leave nothing a later run
+would mistake for a hit — the same promise, and the same mechanism, as
+`publish_relup!/3`.
+
+It is also what makes concurrency a non-question. Two runs resolving the same
+baseline each build their own and the first to finish wins; the loser's rename
+fails with `EEXIST` and it throws its copy away, because the key names everything
+that decides the contents and the two are therefore the same thing.
+
+**The staging directory is *claimed*, not chosen.** `File.mkdir/1` is `mkdir(2)`,
+which either creates the directory or reports that somebody else holds it, and
+that atomicity is the mechanism: a name this run believes is unique is not
+something it may act on destructively. It once cleared its candidate with
+`File.rm_rf!/1` first, on the reasoning that a name carrying the OS pid and a
+per-run counter could not already be taken — but two BEAMs in separate PID
+namespaces (two containers over one bind-mounted `_build`) can hold the same pid,
+and `System.unique_integer/1` is unique *within* a BEAM rather than between them.
+The two runs then agree on a name and the second deletes the first's live
+workspace. The name now carries random bytes, which makes the collision
+vanishingly unlikely, and `mkdir` makes it harmless when it happens anyway.
+
+A staging directory is removed on every path out, success or failure, so one left
+behind means a run was killed outright. Clearing those in passing would be the
+worktree-prune mistake again — nothing here can tell a dead workspace from a live
+one — so they wait for the cache-clearing task the design defers.
+
+An earlier revision built in place under `.compiled` / `.released` stamp files,
+and it had two ways to hand back a half-built baseline: one run could clear
+`rel/` while another was assembling into it, and one could write the stamp while
+another was still writing artefacts beside it. Do not reintroduce a stamp — a directory that
+is still being written to cannot also be the signal that it is finished.
+
+**A cache key has to name everything that could make the contents different.**
+`tar:` is keyed on a digest of the artefact's *bytes* — not its path, because a
+pipeline that writes `my_app-1.0.0.tar.gz` afresh every build would otherwise be
+served the first build's release for ever. `ref:` is keyed on the resolved sha
+(via `^{commit}`, so an annotated tag keys on the commit rather than the tag
+object) **and on the build context**: level, `MIX_ENV`, `MIX_TARGET`, the Elixir
+version and the ERTS version. Each entry carries a `context.txt` recording it, so
+what is in the cache can be read rather than inferred from a digest.
+
+The environment is in the key because the child is built with the caller's
+`MIX_ENV` while the cache sits beside the environments rather than inside one, so
+without it a `prod` build answers a `dev` caller with a `lib` directory nothing
+ever produced. The *project* is in it because an umbrella's children share one
+`_build`, and therefore one baseline cache: without it `apps/a` and `apps/b`
+resolving the same ref land on one entry and whichever built first answers for
+both. The toolchain versions are in it for a reason specific to what a baseline
+is *for*: an ordinary build cache can leave them out because Mix notices a
+version change and recompiles, but nothing recompiles a hit here — the point is
+to skip the build — so an Elixir upgrade would otherwise leave every cached
+baseline compiled by the old one, and the relup would then be generated between
+module sets from two different compilers. That is the drift `tar:` exists to
+avoid, arriving through the door `ref:` came in by. `os` is the same argument for
+a `_build` shared across a container boundary, which a bind mount does every day.
+
+**Where the key stops, and why it is a boundary rather than a gap.** Three
+successive review rounds found something missing from this key, and each was a
+real omission — but the sequence is the point, not the individual fixes. A
+`mix.exs` is arbitrary code and may read anything at all to decide what it
+builds: an environment variable, a file, the clock. No key computable from here
+can name that, and Mix's own build directory does not try. So the contract is
+stated rather than approximated: **the key covers what Forecastle chooses
+(`level`, `project`, `MIX_ENV`, `MIX_TARGET`) and what the toolchain is (Elixir,
+ERTS, OS).** A project whose build depends on something outside that has two
+honest options, and both beat a key that grew until it looked complete — name the
+artefact with `tar:`, which is the recommended source anyway, or clear
+`_build/castle/baselines`. Do not extend the key to chase the next example
+without deciding that boundary has moved.
+
+**A `tar:` artefact is copied into staging before it is unpacked**, and the
+digest that keys the entry is taken of the copy. Hashing the path and then
+unpacking the path is two reads of something that can change in between — and
+rewriting `my_app-1.0.0.tar.gz` is exactly what a pipeline does — so artefact A
+could be hashed while artefact B was unpacked and published under A's digest,
+after which every request for A silently gets B. The digest of the *live* file is
+still taken first, but only to answer "is this already unpacked?", where a hit is
+by construction an entry unpacked from bytes with that digest; the copy is on the
+miss path, which is the only path that publishes anything.
+
+**Everything the build writes goes outside the worktree**, which is what makes
+"remove the worktree, keep the artefacts" true rather than aspirational.
+`MIX_BUILD_ROOT`, `MIX_DEPS_PATH` and the release's `--path` all point into the
+cache directory; `MIX_BUILD_PATH` is *unset* for the child, because it names one
+build directory outright and takes precedence over `MIX_BUILD_ROOT`, so one
+inherited from the calling build would put the baseline's artefacts where the
+caller's already are. `Forecastle.Fixture` scrubs the same variable for the same
+reason. `MIX_ENV` is the calling build's rather than a hardcoded `prod`:
+comparing a `prod` release against a `dev` baseline reports differences that are
+the environment rather than the change.
+
+**`MIX_TARGET` is passed, and `MIX_EXS` is cleared.** Neither is optional.
+`Mix.target/0` is *process state* in the calling build — it can come from `def
+cli`'s `preferred_targets` or from `Mix.target/1`, not only from the environment
+— and `System.cmd/3` carries none of that across, so without passing it the child
+could build for `:host` under an entry whose key claims otherwise. `MIX_EXS`
+names the full path of the project file, so an absolute one inherited from the
+caller would have the child load *today's* `mix.exs` while standing in a worktree
+of an old commit, and publish that under the old commit's key: the baseline would
+be configured by current code and nothing would say so. Those two, plus the build
+paths above, are the whole set of Mix variables that change *which* project is
+built or *where* its output goes; everything else describes how a build runs in
+the user's environment and applies to caller and baseline alike.
+
+**The compiled `lib` directory is found, not reconstructed.** Mix builds into
+`<root>/<target_><env>`, except that `build_per_environment: false` replaces the
+environment with `shared` and `:host` contributes no prefix at all — and the
+first of those is the *baseline project's* configuration, which the calling
+project cannot know. Since `MIX_BUILD_ROOT` belongs to one entry alone, whatever
+single directory is under it is the one the build wrote. An earlier revision
+joined `<env>` on by hand and returned a path that did not exist for any
+non-host target.
+
+**A separate deps path is not a tidiness measure.** Sharing the caller's `deps/`
+would have `mix deps.get` in the baseline rewrite it to the *old* commit's
+versions, which corrupts the caller's build. The cost is a fetch per baseline and
+it is not avoidable.
+
+**`git worktree prune` is not used, and that is deliberate.** A registration
+whose directory has gone — a killed run, a deleted `_build` — does need clearing,
+and `git worktree remove` cannot do it, because it validates the directory before
+it will touch the record and so refuses exactly the case that needs clearing. But
+prune operates on *every* worktree in the repository, and a checkout of
+somebody's on a disk that is not mounted today is indistinguishable from a dead
+one. A relup task has no business deregistering it. So the registrations are
+walked directly — they are directories under `<git common dir>/worktrees` holding
+a `gitdir` file naming the checkout — and one is removed only when its recorded
+path is inside this cache **and** it is not locked. `git worktree lock` is how
+somebody says "the directory is missing on purpose", which is precisely the case
+a blanket prune gets wrong. `baseline_test.exs` registers an unrelated worktree,
+deletes its directory, resolves a baseline, and asserts the registration survived.
+
+The worktree itself lives inside the staging directory, so it is unique per run
+by construction and two runs resolving the same ref cannot collide on it.
+
+**Removing the worktree needs `--force` and must not raise.** `mix deps.get`
+rewrites `mix.lock` wherever the old lock cannot be satisfied as written, and an
+unforced remove refuses a worktree with modified tracked files. And by the time
+it runs the baseline is built and usable, so a directory that will not come away
+is reported and cleared rather than thrown away with the build.
+
+**The recursion guard is a refusal, not a depth limit.** `CASTLE_BASELINE` holds
+the sha being built. Building an old commit runs *its* `mix.exs`, which in a
+project using Castle calls `Castle.customize/1` and may want a relup — and so a
+baseline, and so another commit. There is no build in which a baseline of a
+baseline is the right thing, so a run that asks for one is misconfigured. The
+variable is named for Castle rather than for Forecastle because the recursion
+arrives through Castle's entry point, which is where the other half will read it.
+
+**Shallow clones are named because CI makes them constantly.** Left alone, a tag
+outside the clone's slice surfaces as `git worktree add` failing on an unknown
+revision, which says nothing about why. `--is-shallow-repository` decides which
+of the two messages to give, and only the shallow one mentions `--unshallow`.
+
+**Where a git command's output is a *value*, the two streams stay apart.** Git
+writes advice and warnings to standard error and still exits zero — dubious
+repository ownership, a deprecated configuration key, a hint about something
+unrelated — so a `rev-parse` read through `stderr_to_stdout: true` hands back
+those lines with the object id on the end. One did, and the warning text went on
+to become part of a directory name and part of a revision to check out. `out/3`
+is for a command whose output is read back; `cmd/4`, which merges, is for one
+whose output is only ever quoted in a diagnostic. What comes back from
+`rev-parse` is then checked against a 40- or 64-character hex pattern rather than
+trusted. `baseline_test.exs` puts a `git` on `PATH` that writes a warning and
+delegates, so the merge cannot come back unnoticed.
+
+**The build runs where the project is, not where the repository starts.** `git
+worktree add` checks out the whole repository, so a project in a subdirectory —
+a monorepo, an umbrella one level down — has to be built at that same relative
+position inside the worktree, or the child finds no `mix.exs` or builds the wrong
+one. `git rev-parse --show-prefix` is git's own answer to "where am I relative to
+the top level"; subtracting the top level from the working directory instead gets
+it wrong wherever a symlink stands between the two, which on macOS is `/tmp`
+every time. A commit where nothing is at that prefix is refused by name rather
+than left to fail as a Mix error in a directory the caller never named.
+
+**Two levels, because a coverage check needs `mix compile` and a relup needs
+`mix release`,** and on a real project that is a large difference. The level
+changes nothing for `rel:` and `tar:`, which name something already built. At
+`:compile` a `ref:` baseline has no `.rel` and its `lib_dir` is a Mix build's —
+`<app>/ebin`, with no version in the directory name — rather than a release's
+`<app>-<vsn>/ebin`. `<lib_dir>/*/ebin` matches both, and that is the only thing
+the struct promises about the layout.
+
+The level is *in the key*, so the two do not share an entry and a project wanting
+both pays for both. The earlier design shared one and let a release satisfy a
+later compile — true of the artefacts, false of the guarantee, because the shared
+entry had to be mutated in place to grow from one level to the other.
+
+**An unpacked release's two `.rel` files are one release.** The version directory
+of a release unpacked by `release_handler` holds both `<name>.rel` and
+`<name>-<vsn>.rel` (see the known limitation below), so a tarball made from a
+deployment rather than from a build matches the glob twice. They are
+byte-identical, so duplicates that consult to the same term collapse; only a
+tarball holding genuinely different releases is refused.
+
+**`:erl_tar` mishandles members two different ways and returns `:ok` for both.**
+Verified in OTP 28.3, `stdlib-7.2`. `write_extracted_element/3` sends anything it
+has no clause for — a **hard link** included — to a final clause that logs
+"unsupported type" and returns `not_written`; and its clauses for `char`, `block`
+and `fifo` create **empty regular files**. So the list of types that survive a
+round trip is shorter than the list it tolerates, and it is exactly
+`regular | directory | symlink`.
+
+The hard link is the one that turns up in practice, and a release tree is full of
+identical files for `tar` to store as one. `:erl_tar.create/3` does not write
+them, so an artefact Mix packaged has none; but `tar:` is meant to be the
+artefact that *shipped*, which may have been rolled by GNU tar somewhere in a
+pipeline, and GNU tar does. Silently that costs a `.beam` out of
+`lib/<app>-<vsn>/ebin`, and a relup generated against a release missing modules is
+the very failure this resolver exists to prevent, arriving through the one source
+that was supposed to be beyond doubt — and a FIFO at a payload path is the same
+failure with an empty file in place of the modules. So the archive's table is
+read before it is unpacked and anything that would not come back as itself is
+named. Refusing a device node in a release tarball costs nothing real: no release
+wants one, and `rel:` names an already-unpacked tree for anyone who disagrees.
+
+Do not widen that list back to what `:erl_tar` *accepts*. It was `regular |
+directory | symlink | char | block | fifo` for one revision, on the reasoning
+that the device types are "written" — they are, as empty files, which is the
+whole problem.
+
+**Which builder each test archive uses is load-bearing, and the two go opposite
+ways.** The hard-link and FIFO artefacts are built by the **system `tar`**,
+because `:erl_tar` cannot write those member types at all and an archive it built
+would assert nothing. The colliding-members artefact is built by **`:erl_tar`**,
+because `tar` given one file twice notices the repeated inode and writes the
+second as a *hard link* — so the type check refuses it before the collision check
+is reached. That passed on macOS and failed on Linux, which is bsdtar and GNU tar
+disagreeing about when to hard-link, and it is why that archive is now assembled
+from two genuinely different files named onto one destination. Every one of these
+tests asserts its member really is in the archive before using it, so a builder
+that quietly stops producing it fails loudly rather than passing vacuously.
+
+**Two members landing on one path are refused too**, which is the same failure
+by a different route: extraction is sequential, so which of them survives is a
+property of the order rather than of the archive, and a symlink over an existing
+file is refused by the filesystem outright. Names are compared after the two
+transformations `:erl_tar` itself applies — a leading `/` dropped, `./` segments
+collapsed — and after nothing else. Predicting its destination in general would
+mean a second implementation of `make_safe_path/2` to keep in step with OTP,
+which is the same reasoning that keeps the traversal check out of here entirely
+(`:erl_tar` refuses `..` and absolute paths itself, with `unsafe_path` and
+`unsafe_symlink`). What this does instead is refuse an archive that names one
+thing twice, which no release tarball does.
+
+**A `ref:` worktree is a sibling of the artefacts, not a parent of them.**
+Staging holds `src/` and `out/`, and only `out/` is published. That is structural
+rather than careful: the worktree is not *removed from* the thing that gets
+renamed into the cache, it was never inside it. An earlier revision built into
+staging directly and removed the worktree before publishing, which was correct
+only while the removal worked — a `git worktree remove` failure fell back to an
+**unchecked** `File.rm_rf/1`, so a checkout that would not delete was published
+into an entry that is supposed to be immutable and finished, carrying a `src/`
+and a dangling worktree pointer. The fallback now reports what actually happened
+rather than what it attempted.
+
+**`baseline_test.exs` drives `ref:` through `mix run` in a repository of its
+own, and that is not incidental.** The resolver takes its repository from the
+working directory and its cache from `Mix.Project`, so calling it in process
+resolves against *Forecastle's own checkout* — it would add git worktrees to the
+repository the suite is running in. `File.cd/1` is not an answer either: it moves
+the whole OS process, and `forecastle_test.exs` and `env_script_test.exs` are
+`async: true`. Do not "simplify" that suite by calling the resolver directly.
+
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
 | `lib/forecastle.ex` | Release step hooks (the whole of the build-time logic) |
+| `lib/forecastle/baseline.ex` | The baseline resolver — `rel:`, `tar:` and `ref:` specs, and the cache under `_build/castle/baselines` |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
 | `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — chooses an upgrade strategy per transition, and writes the relup |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
@@ -924,6 +1261,7 @@ directory to start from a clean slate.
 | `test/forecastle/env_script_test.exs` | The `env.sh` fragment as a shell script, sourced in a release-shaped directory with a launcher stub: the heart environment it leaves behind, and which provisional version each state of the two markers selects |
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
 | `test/forecastle/relup_test.exs` | `mix castle.relup` as a command, against three assembled releases: argument handling, exit status, and all three upgrade strategies |
+| `test/forecastle/baseline_test.exs` | The baseline grammar and all three sources. `tar:` against a release-shaped tree built in the test; `ref:` against a throwaway git repository holding a Mix project of its own |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 
