@@ -544,6 +544,33 @@ defmodule Forecastle.AppupCheckTest do
       assert output =~ "every module that moved is covered"
     end
 
+    test "nested two levels deep is refused, not passed over", ctx do
+      # `expand_script/1` splices one level, so a script written two levels deep
+      # leaves a *list* sitting where an instruction should be, and `check_op/1`
+      # has no clause for one - measured, `[[[[restart_emulator]]]]` fails with
+      # `{bad_instruction, [restart_emulator]}`.
+      #
+      # Skipping it because it is not a tuple was a false pass with a nasty shape:
+      # the `restart_emulator` inside is invisible to the restart check too, so an
+      # appup whose other instructions happen to cover everything exited zero on
+      # an edge that produces no relup at all. Which is exactly this script - the
+      # two updates cover both modules that moved.
+      nested = [
+        [[:restart_emulator]],
+        @counter_long,
+        @unmentioned_long
+      ]
+
+      set_appup!(ctx.to, @to, nested, nested)
+
+      {output, status} = appup(both(ctx))
+
+      assert status != 0, "a doubly-nested fragment passed the check:\n\n#{output}"
+      assert output =~ "is not an instruction :systools accepts"
+      assert output =~ "bad_instruction"
+      refute output =~ "every module that moved is covered"
+    end
+
     test "is read for a delete_module, which is the direction that failed silently", ctx do
       # The one direction of this that was not merely noisy. A nested
       # `delete_module` translates to the `remove` and `purge` pair - measured -

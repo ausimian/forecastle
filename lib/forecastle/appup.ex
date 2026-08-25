@@ -472,16 +472,29 @@ defmodule Forecastle.Appup do
   module here whatever their shape, and were never credited with anything - so
   saying something about their shape would be a claim outside what this module
   is for, and `:systools` makes it anyway.
+
+  **An element that is still a *list* after `expand/1` is refused too, and it has
+  to be judged here because nothing else looks at it.** `expand_script/1` splices
+  one level, so a script written two levels deep leaves a list sitting where an
+  instruction should be, and `check_op/1` has no clause for one: measured,
+  `[[[[restart_emulator]]]]` fails with `{bad_instruction, [restart_emulator]}`.
+  Skipping it because it is not a tuple was a false pass with a nasty shape - the
+  `restart_emulator` inside is invisible to `restarts_emulator?/2` as well, so an
+  appup whose other instructions happened to cover everything exited zero on an
+  edge that produces no relup at all.
   """
   @spec refused([term()]) :: [term()]
   def refused(script) do
-    for instruction <- script,
-        is_tuple(instruction),
-        tuple_size(instruction) >= 1,
-        elem(instruction, 0) in @ours,
-        not legal?(instruction),
-        do: instruction
+    for instruction <- script, refused?(instruction), do: instruction
   end
+
+  defp refused?(instruction) when is_list(instruction), do: true
+
+  defp refused?(instruction) when is_tuple(instruction) and tuple_size(instruction) >= 1 do
+    elem(instruction, 0) in @ours and not legal?(instruction)
+  end
+
+  defp refused?(_instruction), do: false
 
   @doc """
   The modules that more than one dependency-ordered instruction defines, which
