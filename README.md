@@ -11,9 +11,13 @@ upgrades. This includes:
     the standard Mix launcher.
 
 Additionally, `Forecastle` ships with an appup compiler and a mix task for relup
-generation. Both are named for `Castle` rather than for the package that
-implements them - `mix castle.relup` and the `:appup` compiler - because where the
-build-time code lives is a packaging decision, and what a developer types is not.
+generation. The task is `mix castle.relup`, named for `Castle` rather than for
+the package that implements it, because where the build-time code lives is a
+packaging decision and what a developer types is not.
+
+The compiler is named for neither package. It is `mix compile.appup`, reached
+through the project's `:compilers` list rather than invoked by name, so there is
+no `mix castle.appup`.
 
 ## Installation
 

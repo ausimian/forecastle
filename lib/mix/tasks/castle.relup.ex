@@ -2,8 +2,8 @@ defmodule Mix.Tasks.Castle.Relup do
   @moduledoc """
   Generate a relup file between releases.
 
-  This task is provided by `Forecastle`, Castle's build-time half, and named
-  `castle.*` like the rest of the tooling a developer runs.
+  This task is provided by `Forecastle`, Castle's build-time half, and named for
+  `Castle` because that is the package a project depends on.
 
   `mix castle.relup` will generate a relup between a `target` release and
   any number of other releases. The paths specifed in the options should
