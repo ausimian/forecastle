@@ -30,6 +30,25 @@ defmodule Mix.Tasks.Castle.Appup do
   install time. This is where it becomes visible.
   `Forecastle.UpgradeTest` pins that it really happens.
 
+  ## What it does not answer
+
+  **It asks whether the appup names everything that moved. It does not ask
+  whether the resulting script is one `systools_rc` will accept.** Those are
+  different questions, and only the first needs help.
+
+  `:systools.make_relup/4` *does* fail on a malformed script - loudly, and at the
+  moment a relup is generated, which `mix castle.relup` does anyway. What it
+  cannot see is an entry that is **incomplete**, which is the failure above. So
+  script validity is deliberately somebody else's job: a project that runs this
+  check and never generates a relup has verified its *coverage*, not its
+  validity.
+
+  Some invalid scripts are reported here anyway, because an instruction
+  `:systools` will not accept covers nothing, and crediting one would overstate
+  coverage. Those are cases this catches on the way to answering its own
+  question, and not a promise that it catches every such script. It is not a
+  substitute for `make_relup/4` and does not try to be one.
+
   ## Naming the two builds
 
   `--from` is a *baseline spec*: the same grammar `mix castle.relup` takes on

@@ -313,6 +313,17 @@ myapp 1.0.0 -> 1.1.0
 It exits non-zero when it finds a gap, so it can be a pipeline gate. It writes
 nothing at all.
 
+**What it does not do** is tell you the appup is *valid*. It asks whether the
+appup names everything that moved; it does not ask whether the resulting script
+is one `:systools` will accept. Those are different questions, and only the first
+needs help - `make_relup/4` already fails loudly on a malformed script, at the
+moment a relup is generated. What it cannot see is an entry that is
+*incomplete*, which is the whole of what this is for. Some invalid scripts are
+reported here anyway, because an instruction `:systools` will not accept covers
+nothing and crediting one would overstate coverage, but that is a side effect
+rather than a promise: a green run means your coverage is complete, not that a
+relup will build.
+
 `--from` takes a [baseline spec](#naming-the-baseline), the same grammar
 `mix castle.relup` takes, so the baseline can be an assembled release, the
 artefact that shipped or a git ref. `--to` defaults to **the current build**, so

@@ -450,6 +450,15 @@
   downgrade lists are independent and a from-version present in one need not be
   present in the other.
 
+  **It asks whether the appup names everything that moved, and not whether the
+  resulting script is one `:systools` will accept.** Only the first question
+  needs help: `make_relup/4` already fails loudly on a malformed script, at the
+  moment a relup is generated, and what it cannot see is an entry that is
+  *incomplete*. Some invalid scripts are reported here anyway, because an
+  instruction `:systools` will not accept covers nothing and crediting one would
+  overstate coverage — but that is a side effect rather than a promise. A green
+  run means the coverage is complete, not that a relup will build.
+
   **Coverage is judged by what an instruction does, not by which modules it
   names.** `update`, `load_module` and `add_module` put new code into the running
   system; `delete_module` takes code out and loads nothing. So a changed module

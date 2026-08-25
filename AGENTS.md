@@ -1394,54 +1394,55 @@ ordering: a module appearing only in somebody else's `DepMods` is never loaded,
 and counting it would turn an exact question into a substring search. Same for
 `{apply, {M, F, A}}`.
 
-### Open: the task reimplements `systools_rc`'s acceptance, piecemeal
+### Decided: coverage is the question, script validity is not
 
-**Everything below this heading is one recurring class, and the next instance of
-it should be met with the structural fix rather than a seventh patch.** The
-pattern is always the same: `systools_rc` enforces a rule about the *script* that
-this task's per-instruction model does not know about, so a script `:systools`
-refuses outright can be pronounced covered — a false pass, which is the one
-answer a gate must never give. Six instances so far, every one found by review
-rather than by the suite:
+**This check answers "does the appup name everything that moved". It does not
+answer "is the resulting script one `systools_rc` will accept", and that is a
+boundary rather than a gap in it.**
 
-| Refused by | Where `:systools` decides it |
-| --- | --- |
-| `bad_instruction` (shape) | `check_syntax/1` → `check_op/1` |
-| `bad_instruction` (a leftover nested list) | same, after `expand_script/1` splices one level |
-| `muldef_module` | `translate_dependent_instrs/4`'s digraph |
-| `removed_application_present` | `translate_application_instrs/3` |
-| `bad_op_before_point_of_no_return` | `split_script/1` + `check_script/2` |
-| a `modules` value that is not a list of atoms | `systools_make:check_item/2` |
+The distinction is `design/upgrade-tooling.md` §1.1's, and the whole reason this
+task exists. `:systools.make_relup/4` *does* fail on a malformed script — that
+is not the failure anybody needed help with. What it cannot see, structurally, is
+an **incomplete** entry: one that names some of the modules that changed and not
+the rest. The relup generates, the install succeeds, and the unmentioned module
+goes on serving calls from the code that was loaded before. Incompleteness is the
+question here; shape validity is `:systools`' own, and it is enforced the moment a
+relup is generated, which `mix castle.relup` does anyway.
 
-Each is now checked, each check is measured against OTP 28.3, and each was
-individually small. But the list is not closed by construction — `sync_nodes`
-shapes, `mnesia_backup`, and purge validation on the low-level forms are all
-still unmodelled — so the honest reading is that *enumerating* what `:systools`
-refuses is the wrong approach.
+**So a script `systools_rc` would refuse is out of scope, and a future finding of
+that class is not a defect in this check.** Six of them were raised in review on
+this branch — `bad_instruction` for a bad shape and for a nested list left after
+one splice, `muldef_module`, `removed_application_present`,
+`bad_op_before_point_of_no_return`, and a `modules` value that is not a list of
+atoms. Each is now caught, each is measured against OTP 28.3, and they are worth
+keeping: they are cheap, they are tested, and they turn a confusing failure later
+into a clear one now. But they are **cases this happens to catch, not a modelled
+contract**, and nothing here should be written as though the set were complete.
+Do not reopen this to close "the remaining ones".
 
-**The structural answer is to ask `systools_rc` instead of modelling it**, which
-is the doctrine `Forecastle.Appup` already follows for
-`appup_search_for_version/2` and states in its own moduledoc: call the function
-`systools` uses rather than reimplement it. Concretely, call
-`systools_rc:translate_scripts/4` with the two sides' real inventories and report
-any `{error, systools_rc, Reason}` as a gap. That is exact by construction and
-cannot drift.
+**Why not close the class by asking `systools_rc` directly.** The obvious
+structural fix — call `systools_rc:translate_scripts/4` and report any
+`{error, systools_rc, Reason}` — is exact by construction and cannot drift, and it
+is the doctrine this module follows elsewhere for `appup_search_for_version/2`.
+It was **considered and rejected.** `translate_scripts/4` needs `#application`
+records, and `systools.hrl` is internal: not under `include/`, not reachable from
+Elixir, so the record has to be built positionally against a 16-field layout. That
+couples the gate to an OTP implementation detail and breaks it for whoever
+upgrades OTP first — bought against holes that `make_relup` closes downstream
+anyway, in a task that is explicitly *not* a substitute for it.
 
-**What makes it a decision rather than an obvious win** is that
-`translate_scripts/4` needs `#application` records, and `systools.hrl` is
-internal — not under `include/`, and not reachable from Elixir. Building the
-record positionally coupled this task to an internal 16-field layout, which would
-break loudly on an OTP that changes it. Loudly is better than silently, but
-"loudly" here means the *gate* stops working for whoever upgrades OTP first.
-Weigh that against six known holes and an open tail before choosing. Do not
-half-do it: a fallback that tries `translate_scripts/4` and silently drops back
-to the enumeration on error would combine the coupling with the holes.
+That the unmodelled cases have no natural end — `sync_nodes` shapes,
+`mnesia_backup`, purge validation on the low-level forms — is the evidence that
+enumeration was the wrong shape for the problem, not a list of work outstanding.
+Scoping closes the class by construction, which enumerating it never could.
 
 **An instruction is credited only once its whole shape is one `:systools`
-accepts, and that is the structural answer to a class of finding that came back
-twice.** Reading an instruction by its head and the position of its module was
-wrong in two independent ways — it missed a legal shape (the nested fragment
-below) and it credited an illegal one. The second is the worse of the two:
+accepts.** That is a *coverage* rule before it is a validity one, which is why it
+survives the scoping above: an instruction `:systools` will not accept covers
+nothing, so crediting it overstated coverage. Reading an instruction by its head
+and the position of its module was wrong in two independent ways — it missed a
+legal shape (the nested fragment below) and it credited an illegal one. The
+second is the worse of the two:
 `{restart_application, App, Anything}` is refused by
 `systools_rc:check_syntax/1` as a `bad_instruction`, so the edge produces no
 relup at all, yet by leading elements alone it looked like a whole-application
