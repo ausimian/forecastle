@@ -6,15 +6,15 @@ defmodule Mix.Tasks.Castle.Relup do
   `Castle` because that is the package a project depends on.
 
   `mix castle.relup` will generate a relup between a `target` release and
-  any number of other releases. The paths specifed in the options should
-  be the paths to `.rel` files (but without the .rel extension)
+  any number of other releases.
 
   ## Command-line options:
 
-    - `--target` - the path to the .rel file in the target release
-    - `--fromto` - the path to the .rel file from a previous release
-    - `--upfrom` - the path to the .rel file from a previous release
-    - `--downto` - the path to the .rel file from a previous release
+    - `--target` - the path to the .rel file in the target release, without the
+      .rel extension
+    - `--fromto` - a baseline spec for a previous release
+    - `--upfrom` - a baseline spec for a previous release
+    - `--downto` - a baseline spec for a previous release
     - `--outdir` - the directory to write the relup. Defaults to the current directory
     - `--hot` - require every transition to be a hot upgrade
     - `--restart` - make every transition a full emulator restart
@@ -28,6 +28,37 @@ defmodule Mix.Tasks.Castle.Relup do
 
   At least one of them is required: a relup with no transitions in it is not an
   upgrade plan.
+
+  ## Naming a baseline
+
+  The value of `--fromto`, `--upfrom` and `--downto` is a *baseline spec*: one
+  grammar naming the three places a previous release can come from.
+
+      # an assembled release, named by its .rel file without the extension
+      mix castle.relup --target ... --fromto rel:_build/prod/rel/my_app/releases/1.0.0/my_app
+
+      # the artefact that shipped
+      mix castle.relup --target ... --fromto tar:artifacts/my_app-1.0.0.tar.gz
+
+      # a git ref, checked out into a worktree and built
+      mix castle.relup --target ... --fromto ref:v1.0.0
+
+  A value with no prefix is a `rel:` path, so every invocation written before
+  specs existed means exactly what it meant then. The direction stays on the
+  switch name and the source stays in the value; crossing the two into separate
+  switches would be a switch per combination.
+
+  `--target` is not a spec. It names the release being generated *for*, which is
+  the one that has just been assembled, so it is always a path to a `.rel` file
+  on disk.
+
+  **`tar:` is the source to prefer, and the reason is correctness rather than
+  convenience.** `release_handler` selects a relup entry by from-version string
+  and never checks that the running code is the code the relup was generated
+  against, so a baseline rebuilt from source - with today's Elixir, today's OTP
+  and today's dependencies - can have a different module set from the one that is
+  deployed, and the relup then misses modules. `Forecastle.Baseline` documents
+  what each source costs, what `ref:` caches and where, in full.
 
   The task fails if the relup could not be generated, so that a build pipeline
   does not carry on and package whatever relup happened to be lying around. It
@@ -188,9 +219,21 @@ defmodule Mix.Tasks.Castle.Relup do
     outdir = get_outdir(args)
 
     target = read_rel!(fetch_target!(args))
-    ups = rel_paths(args, :upfrom) ++ rel_paths(args, :fromto)
-    downs = rel_paths(args, :downto) ++ rel_paths(args, :fromto)
+
+    # The baselines are resolved after the target has been read, because
+    # resolving one can mean unpacking a tarball or building a git ref, and
+    # spending minutes on that only to find the target release is not where the
+    # caller said it was is the wrong order to fail in.
+    up_specs = specs(args, :upfrom) ++ specs(args, :fromto)
+    down_specs = specs(args, :downto) ++ specs(args, :fromto)
+    resolved = resolve_baselines!(up_specs ++ down_specs)
+
+    ups = baseline_paths(up_specs, resolved)
+    downs = baseline_paths(down_specs, resolved)
     froms = read_froms!(ups ++ downs, target)
+
+    refuse_ambiguous!("upgrade from", ups, froms)
+    refuse_ambiguous!("downgrade to", downs, froms)
 
     strategy
     |> plan!(target, froms, ups, downs)
@@ -275,9 +318,27 @@ defmodule Mix.Tasks.Castle.Relup do
 
   defp fetch_target!(cmdline_args) do
     case Keyword.get_values(cmdline_args, :target) do
-      [target] -> target
+      [target] -> path_not_spec!(target)
       [] -> Mix.raise("--target is required: there is nothing to generate a relup for")
       many -> Mix.raise(repeated("--target", many))
+    end
+  end
+
+  # `--target` is the release the relup is generated *for*, which has just been
+  # assembled and is therefore on disk by definition - there is nothing for a
+  # spec to resolve. Said here rather than left to resolve as a path, because a
+  # `--target tar:my_app-1.0.0.tar.gz` read as a path fails looking for
+  # `tar:my_app-1.0.0.tar.gz.rel`, which mentions neither the switch that does
+  # take a spec nor the reason this one does not.
+  defp path_not_spec!(target) do
+    if Forecastle.Baseline.spec?(target) do
+      Mix.raise(
+        "--target #{target} looks like a baseline spec, and --target takes a path. It names " <>
+          "the release being generated for, which is always an assembled release on disk. " <>
+          "Only --fromto, --upfrom and --downto take a spec."
+      )
+    else
+      target
     end
   end
 
@@ -307,8 +368,92 @@ defmodule Mix.Tasks.Castle.Relup do
     end
   end
 
-  defp rel_paths(cmdline_args, type) do
+  defp specs(cmdline_args, type) do
     cmdline_args |> Keyword.take([type]) |> Keyword.values()
+  end
+
+  ## Resolving the baselines
+
+  # Each distinct spec resolved once, and the result mapped back onto the switch
+  # order rather than resolved per occurrence: `--fromto ref:v1.0.0` puts the
+  # same spec in both directions, and building that commit twice - or, worse,
+  # once per direction into two cache entries - is work nobody asked for.
+  #
+  # Two spellings of one release converge here rather than being deduplicated
+  # here: `rel:x` and a bare `x` resolve to the same path, and `read_froms!/2`
+  # reads each distinct *path* once.
+  #
+  # `:release` because a relup is generated from assembled releases. That is the
+  # expensive level, and it is the one this task needs; the coverage check is
+  # what `:compile` is there for.
+  defp resolve_baselines!(specs) do
+    Map.new(Enum.uniq(specs), fn spec ->
+      {spec, Forecastle.Baseline.resolve!(spec, :release).rel_path}
+    end)
+  end
+
+  # Made unique *after* resolution as well as before it, because two specs can be
+  # one release: `rel:x` and a bare `x` are the same path written two ways, and
+  # two artefacts with the same bytes resolve to the same unpacking. Left in, the
+  # same from-version would appear twice in one direction of the relup -
+  # `release_handler` selects by from-version and would take the first, so the
+  # second is at best inert, and `:systools` was never asked a question that
+  # needed asking twice.
+  #
+  # Each direction on its own, because a release belongs in both directions of a
+  # `--fromto` and that is not a duplicate.
+  defp baseline_paths(specs, resolved) do
+    specs |> Enum.map(&Map.fetch!(resolved, &1)) |> Enum.uniq_by(&baseline_identity/1)
+  end
+
+  # Which release a path *is*, rather than how it was spelled. `rel:` hands back
+  # the path it was given, deliberately, so one release reaches here under as
+  # many names as there are ways to write it: `./rel/...` and its absolute form
+  # are the same release, and so is a symlinked spelling of the same tree.
+  #
+  # The `.rel` file's device and inode settle it where the filesystem will say -
+  # that is the same file by the only definition that does not depend on how it
+  # was reached. `Path.expand/1` is the fallback, which handles the relative and
+  # absolute spellings and the `.`/`..` segments, and is what a path that cannot
+  # be read falls back to: this is not the place to report that, and `read_rel!/1`
+  # a moment later says exactly what it could not read and why.
+  defp baseline_identity(path) do
+    case File.stat(path <> ".rel") do
+      {:ok, %File.Stat{major_device: device, inode: inode}} -> {device, inode}
+      {:error, _reason} -> Path.expand(path)
+    end
+  end
+
+  # Two *different* releases that share a version are not two transitions. A
+  # relup entry is selected by from-version, so only one of them could ever be
+  # used, and which one would be whichever `:systools` happened to put first -
+  # which is to say, whichever order the switches were written in. A relup that
+  # silently describes an upgrade from one of two candidate releases is worse
+  # than no relup, so this refuses rather than choosing.
+  #
+  # The specs now make this easy to reach without meaning to: one release can be
+  # named three ways, and `tar:my_app-1.0.0.tar.gz` beside `ref:v1.0.0` is a
+  # natural thing to write while checking that they agree. They may well not.
+  #
+  # Identical `.rel` terms would not settle it either. A `.rel` names
+  # applications and their versions and nothing about the code inside them, so
+  # two releases can agree on every line of it and share not one module - which
+  # is the whole reason `tar:` is recommended over `ref:` in the first place.
+  # Deduplicating on the path is therefore as far as this can go on its own; past
+  # that it is a question for whoever wrote the command line.
+  defp refuse_ambiguous!(label, paths, froms) do
+    paths
+    |> Enum.group_by(&froms[&1].vsn)
+    |> Enum.reject(&match?({_vsn, [_only]}, &1))
+    |> Enum.each(fn {vsn, ambiguous} -> Mix.raise(ambiguity(label, vsn, ambiguous)) end)
+  end
+
+  defp ambiguity(label, vsn, paths) do
+    "#{length(paths)} different baselines were named for the #{label} #{vsn}: " <>
+      Enum.map_join(paths, ", ", &inspect/1) <>
+      ". A relup carries one entry per from-version and release_handler selects by " <>
+      "version, so only one of these could ever be used and which one would depend on " <>
+      "the order they were given in. Name the one you mean."
   end
 
   ## Reading the releases

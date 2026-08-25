@@ -326,6 +326,93 @@
   would wait. The `env.sh` hook is also run directly, over a release-shaped directory,
   so that what it selects and what environment it leaves behind are asserted by
   observation rather than by reading the script.
+- `mix castle.relup`'s `--fromto`, `--upfrom` and `--downto` now take a
+  *baseline spec*: one grammar naming the three places the release being upgraded
+  from can come from. `rel:` is an assembled release, `tar:` is a shipped
+  artefact, and `ref:` is a git ref that is checked out and built. A value with no
+  prefix is a `rel:` path, so every invocation written before this means exactly
+  what it meant then. The direction stays on the switch name and the source stays
+  in the value. `--target` is not a spec: it names the release being generated
+  for, which has just been assembled, and it says so if it is handed one.
+
+  **`tar:` is the source to prefer, and the reason is correctness rather than
+  convenience.** `release_handler` selects a relup entry by from-version *string*
+  and never checks that the code actually running is the code the relup was
+  generated against. A baseline rebuilt from source is built with today's Elixir,
+  today's OTP and today's hex tarballs for whatever the lock does not fully pin,
+  so its module set can differ from the one that is deployed — and where it does,
+  the relup's instructions miss modules and the upgrade loads part of the new
+  code over a system still running the rest of the old. A relup generated against
+  a rebuilt baseline describes a transition from a release that never existed.
+
+  `ref:` is still the right answer for development, for testing an upgrade path
+  before anything ships, and for the common case where nobody kept the artefact —
+  and it says on every use that what it produced was rebuilt rather than
+  deployed. The commit is checked out into a git worktree, built there, and the
+  worktree removed; what it built is kept, because none of it was ever inside the
+  worktree. A shallow clone that does not hold the ref is named as such, with the
+  `git fetch --tags --unshallow` that fixes it, rather than surfacing as an
+  unknown revision from `git worktree add`. A project that does not sit at the top
+  of its repository is built where it actually is. And because building an old
+  commit runs that commit's own `mix.exs` — which in a project using Castle
+  configures its release, and may want a relup of its own — `CASTLE_BASELINE`
+  carries the sha being built, and a resolution that finds it set refuses rather
+  than recursing.
+
+  Both `tar:` and `ref:` keep what they produced under
+  `_build/castle/baselines`, and every entry there is immutable: the work happens
+  in a staging directory and the finished thing is renamed into place, so an
+  entry exists only once it is whole, an interrupted run leaves nothing a later
+  one would take for a usable baseline, and two runs resolving the same baseline
+  at once each build their own with the first to finish winning.
+
+  What an entry is keyed on is everything that could change its contents. A
+  `tar:` artefact is keyed on a digest of its bytes rather than on its path, so a
+  pipeline writing the same filename on every build is never served the previous
+  build's release — and the artefact is copied before it is unpacked, so the bytes
+  that were hashed are the bytes that get unpacked. A `ref:` baseline is keyed on
+  the resolved commit *and* on what it was built with: which project inside the
+  commit, the Mix environment and target, and the Elixir version, ERTS version
+  and operating system. Without the toolchain versions, upgrading Elixir would
+  leave every cached baseline compiled by the old one and the relup would be
+  generated between module sets from two different compilers, which is the very
+  drift that makes `tar:` the source to prefer; without the project, an
+  umbrella's children would share one entry, since they share one `_build`.
+
+  What that key cannot cover is stated rather than approximated: a `mix.exs` is
+  arbitrary code and may read anything to decide what it builds. Where a build
+  depends on something outside the key, name the artefact with `tar:` or clear
+  `_build/castle/baselines`.
+
+  A `tar:` artefact holding anything unpacking would not reproduce as itself is
+  refused rather than unpacked in part. Erlang's tar reader writes regular files,
+  directories and symlinks; a hard link is dropped and a device node or FIFO
+  becomes an empty file, in both cases while still reporting success. A hard link
+  is the one that turns up in practice — GNU tar writes one for the second copy
+  of a file and a release tree has plenty of those — and it would come out as a
+  missing `.beam` and a relup generated against a release short of modules. Two
+  members that unpack to the *same* path are refused for the same reason: which
+  of them survives is decided by the order they appear in rather than by the
+  archive.
+
+  Naming two *different* baselines for the same release version is refused too.
+  A relup carries one entry per from-version and `release_handler` selects by
+  version, so only one of them could ever be used and which one would depend on
+  the order the switches were written in. Specs make that easy to reach without
+  meaning to — `tar:my_app-1.0.0.tar.gz` beside `ref:v1.0.0` is a natural thing
+  to write while checking the two agree, and they may not. One release named two
+  ways is not that, and is not refused: the relative, absolute and symlinked
+  spellings of one release are recognised as the one file.
+
+  Two levels are available to callers: an appup coverage check needs only
+  `mix compile` in the worktree, while a relup needs `mix release`, and on a real
+  project that is a large difference.
+
+  Nothing in this touches worktree registrations it did not make. `git worktree
+  prune` would clear a stale one in a word, but it clears every stale one in the
+  repository, and a checkout on a disk that is not mounted today looks exactly
+  like a dead one — so only registrations inside the baseline cache are removed,
+  and never a locked one.
 
 ### Changed
 

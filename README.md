@@ -302,6 +302,63 @@ that sprang into existence is how a relup ends up somewhere nothing looks for.
 At least one of `--fromto`, `--upfrom` and `--downto` is required: a relup with
 no transitions in it is not an upgrade plan.
 
+### Naming the baseline
+
+The value those three switches take is a *baseline spec* - one grammar for the
+three places the release being upgraded from can come from:
+
+```shell
+# an assembled release, named by its .rel file without the extension
+> mix castle.relup --target ... --fromto rel:_build/prod/rel/myapp/releases/1.0.0/myapp
+
+# the artefact that shipped
+> mix castle.relup --target ... --fromto tar:artifacts/myapp-1.0.0.tar.gz
+
+# a git ref, checked out into a worktree and built
+> mix castle.relup --target ... --fromto ref:v1.0.0
+```
+
+A value with no prefix is a `rel:` path, so anything written before specs
+existed means what it always meant. The direction stays on the switch name and
+the source stays in the value. `--target` is *not* a spec: it names the release
+being generated for, which has just been assembled, so it is always a path.
+
+**Prefer `tar:`, for correctness rather than convenience.** `release_handler`
+picks a relup entry by from-version *string*, and never checks that the code
+running is the code the relup was generated against. A baseline rebuilt from
+source gets today's Elixir, today's OTP and today's hex tarballs for anything
+the lock does not fully pin - so if the module set that comes out differs from
+what is deployed, the relup's instructions miss modules, and the upgrade loads
+part of the new code over a system still running the rest of the old. A relup
+generated against a rebuilt baseline describes a transition from a release that
+never existed.
+
+`ref:` is the right answer for development, for testing an upgrade path before
+anything ships, and for the common case where nobody kept the artefact. It says
+on every use that what it produced was rebuilt rather than deployed. The commit
+is checked out into a git worktree, built, and the worktree removed. A shallow
+clone that does not hold the ref is told to `git fetch --tags --unshallow` rather
+than being left with an unknown revision from `git worktree add`, and
+`CASTLE_BASELINE` is set while a baseline is being built so that a build which
+asks for a baseline of its own is refused rather than going round again.
+
+What `tar:` unpacks and what `ref:` builds are both kept under
+`_build/castle/baselines` and reused. An entry is written in a staging directory
+and renamed into place, so it exists only once it is whole: an interrupted run
+leaves nothing behind that a later one would treat as usable, and two runs
+resolving the same baseline at once each build their own with the first to finish
+winning. A `tar:` entry is keyed on a digest of the artefact's bytes rather than
+on its path, so a pipeline that rewrites the same filename is never served the
+previous build's release. A `ref:` entry is keyed on the resolved commit together
+with the Mix environment and target and the Elixir and ERTS versions it was built
+with, so a toolchain upgrade produces a fresh baseline rather than serving one
+compiled by the version before it.
+
+Only worktree registrations inside that cache are ever cleaned up.
+`git worktree prune` is not used: it clears every stale registration in the
+repository, and a checkout on a disk that is not mounted today is
+indistinguishable from a dead one.
+
 The task fails if it could not generate the relup, so a build pipeline can tell,
 and a failure writes nothing at all - so any earlier relup is still sitting where
 post-assembly looks for one, rather than having been replaced by a plan that was
