@@ -449,16 +449,18 @@ defmodule Mix.Tasks.Castle.Appup do
       # appup describes. `:systools` covers both with `add_application` and
       # `remove_application`, which are hot - nothing has to be changed in
       # place, only started or stopped - so there is nothing here to be missing.
-      {nil, _to_ebin} ->
+      {nil, to_ebin} ->
         whole_application(
           app,
+          to_ebin,
           "#{app} is in #{to.describe} and not in #{from.describe}: an application added " <>
             "between the two, which :systools covers with add_application."
         )
 
-      {_from_ebin, nil} ->
+      {from_ebin, nil} ->
         whole_application(
           app,
+          from_ebin,
           "#{app} is in #{from.describe} and not in #{to.describe}: an application removed " <>
             "between the two, which :systools covers with remove_application."
         )
@@ -468,8 +470,25 @@ defmodule Mix.Tasks.Castle.Appup do
     end
   end
 
-  defp whole_application(app, phrase) do
-    %{heading: to_string(app), sections: [%{label: nil, findings: [{:note, phrase}]}]}
+  # The one side there is still gets its `modules` list looked at. The appup
+  # question really is moot for an application the transition adds or removes -
+  # `:systools` writes the instruction itself - but "no appup needed" and "this
+  # resource is one `systools_make` refuses" are different claims, and only the
+  # first was being made. A named application whose `.app` cannot be accepted is
+  # reported wherever it lives, so that the answer does not depend on which side
+  # of the transition it happens to be on.
+  #
+  # Only the `modules` list, and only for an application `--app` named: this is
+  # not a release validator, and the resources of applications nobody asked about
+  # are still `systools_make`'s business alone.
+  defp whole_application(app, ebin, phrase) do
+    resource = Path.join(ebin, "#{app}.app")
+    {_vsn, _inventory, listed?} = app_resource!(resource, app)
+
+    %{
+      heading: to_string(app),
+      sections: [%{label: nil, findings: [{:note, phrase} | unlisted(resource, listed?)]}]
+    }
   end
 
   # `<app>` for a Mix build and `<app>-<vsn>` for a release, which is the only
@@ -519,7 +538,18 @@ defmodule Mix.Tasks.Castle.Appup do
     end
   end
 
-  defp ours?(dir, app), do: File.regular?(Path.join([dir, "ebin", "#{app}.app"]))
+  # An **exact** name match is ours whatever it contains, and only a *prefix*
+  # match has to prove itself. `_build/<env>/lib/foo` is named for the
+  # application with no version after it, so it cannot be another application's
+  # directory - and a `bar.app` inside it, or no readable `foo.app`, makes it an
+  # unfinished or broken build of `foo` rather than somebody else's. Treating that
+  # as somebody else's read it as absent, and an absent application is one the
+  # transition removed, which needs no appup and exits zero. Only `foo-bar-1.0.0`
+  # is genuinely ambiguous about whose it is, because only a prefix match can
+  # belong to a longer name.
+  defp ours?(dir, app) do
+    Path.basename(dir) == "#{app}" or File.regular?(Path.join([dir, "ebin", "#{app}.app"]))
+  end
 
   # Nothing that matched the name holds this application's resource. Either they
   # all belong to other applications - in which case this one really is absent -
@@ -663,17 +693,22 @@ defmodule Mix.Tasks.Castle.Appup do
   # general: the version is already refused if it is not a string, and nothing
   # else in the resource is consulted.
   defp resources(from, to) do
-    findings =
-      for side <- [from, to], not side.listed? do
-        {:gap,
-         "#{Path.relative_to_cwd(side.resource)} has no modules list that :systools will " <>
-           "accept - it is missing, or it is not a list of atoms. systools_make refuses that " <>
-           "as a missing_param or a bad_param before it builds anything, and it is what an " <>
-           "application-level instruction expands over, so nothing here can be judged " <>
-           "against it."}
-      end
+    findings = Enum.flat_map([from, to], &unlisted(&1.resource, &1.listed?))
 
     %{label: nil, findings: findings}
+  end
+
+  defp unlisted(_resource, true), do: []
+
+  defp unlisted(resource, false) do
+    [
+      {:gap,
+       "#{Path.relative_to_cwd(resource)} has no modules list that :systools will accept - " <>
+         "it is missing, or it is not a list of atoms. systools_make refuses that as a " <>
+         "missing_param or a bad_param before it builds anything, and it is what an " <>
+         "application-level instruction expands over, so nothing here can be judged against " <>
+         "it."}
+    ]
   end
 
   # An application whose version did not move is one `:systools` will not

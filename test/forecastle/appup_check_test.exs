@@ -791,6 +791,29 @@ defmodule Forecastle.AppupCheckTest do
       # finding swallowing it.
       assert output =~ "the emulator restarts on this edge"
     end
+
+    test "is reported for an application that exists on only one side", ctx do
+      # The appup question is genuinely moot for an application the transition
+      # adds or removes - `:systools` writes the instruction itself - but "no
+      # appup needed" and "this resource is one systools_make refuses" are
+      # different claims, and only the first was being made. So the one side
+      # there is still gets its modules list read.
+      remove_beam!(ctx.to, @to, Sample.Unmentioned)
+      malform_inventory!(ctx.from, @from)
+
+      # `sample` is in the baseline and not in the target, which is the branch
+      # that used to return without reading the resource at all.
+      dir = Path.join(ctx.to, "lib/sample-#{@to}")
+      moved = Path.join(ctx.to, "lib/moved-aside")
+      File.rename!(dir, moved)
+      on_exit(fn -> File.rename!(moved, dir) end)
+
+      {output, status} = appup(both(ctx))
+
+      assert status != 0, "a malformed resource on the sole side passed:\n\n#{output}"
+      assert output =~ "an application removed between the two"
+      assert output =~ "has no modules list that :systools will accept"
+    end
   end
 
   describe "an application whose version did not move" do
