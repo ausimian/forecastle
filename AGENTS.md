@@ -958,11 +958,29 @@ would mistake for a hit — the same promise, and the same mechanism, as
 It is also what makes concurrency a non-question. Two runs resolving the same
 baseline each build their own and the first to finish wins; the loser's rename
 fails with `EEXIST` and it throws its copy away, because the key names everything
-that decides the contents and the two are therefore the same thing. An earlier
-revision built in place under `.compiled` / `.released` stamp files, and it had
-two ways to hand back a half-built baseline: one run could clear `rel/` while
-another was assembling into it, and one could write the stamp while another was
-still writing artefacts beside it. Do not reintroduce a stamp — a directory that
+that decides the contents and the two are therefore the same thing.
+
+**The staging directory is *claimed*, not chosen.** `File.mkdir/1` is `mkdir(2)`,
+which either creates the directory or reports that somebody else holds it, and
+that atomicity is the mechanism: a name this run believes is unique is not
+something it may act on destructively. It once cleared its candidate with
+`File.rm_rf!/1` first, on the reasoning that a name carrying the OS pid and a
+per-run counter could not already be taken — but two BEAMs in separate PID
+namespaces (two containers over one bind-mounted `_build`) can hold the same pid,
+and `System.unique_integer/1` is unique *within* a BEAM rather than between them.
+The two runs then agree on a name and the second deletes the first's live
+workspace. The name now carries random bytes, which makes the collision
+vanishingly unlikely, and `mkdir` makes it harmless when it happens anyway.
+
+A staging directory is removed on every path out, success or failure, so one left
+behind means a run was killed outright. Clearing those in passing would be the
+worktree-prune mistake again — nothing here can tell a dead workspace from a live
+one — so they wait for the cache-clearing task the design defers.
+
+An earlier revision built in place under `.compiled` / `.released` stamp files,
+and it had two ways to hand back a half-built baseline: one run could clear
+`rel/` while another was assembling into it, and one could write the stamp while
+another was still writing artefacts beside it. Do not reintroduce a stamp — a directory that
 is still being written to cannot also be the signal that it is finished.
 
 **A cache key has to name everything that could make the contents different.**

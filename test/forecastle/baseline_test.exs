@@ -234,6 +234,20 @@ defmodule Forecastle.BaselineTest do
       assert Path.basename(Path.dirname(second.rel_path)) == "1.0.1"
     end
 
+    test "leaves another run's staging directory alone", ctx do
+      # A staging directory is one run's private workspace, and nothing here can
+      # tell a live one from a dead one. Sweeping them in passing - or clearing a
+      # candidate name on the assumption that it must be this run's - is the
+      # worktree-prune mistake with a different directory.
+      other = Path.join(cache_dir(), ".staging-99999-deadbeefdeadbeef")
+      File.mkdir_p!(other)
+      File.write!(Path.join(other, "half-unpacked"), "")
+
+      Baseline.resolve!("tar:#{ctx.tarball}", :release)
+
+      assert File.exists?(Path.join(other, "half-unpacked"))
+    end
+
     test "says so when the artefact is not there", ctx do
       missing = Path.join(ctx.dir, "absent.tar.gz")
 

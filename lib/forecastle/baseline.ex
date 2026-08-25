@@ -53,7 +53,7 @@ defmodule Forecastle.Baseline do
       _build/castle/baselines/
         tar-<digest of the artefact>/         # the unpacked release
         ref-<sha>/<build context>/            # build/ deps/ rel/ context.txt
-        .staging-<pid>-<n>/                   # work in progress, never read
+        .staging-<pid>-<random>/              # work in progress, never read
 
   Nothing is ever built or unpacked in place. Work happens in a staging directory
   and the finished thing is *renamed* into position, so an entry exists only once
@@ -192,6 +192,12 @@ defmodule Forecastle.Baseline do
   # it guards against arrives through `Castle.customize/1`, which is the other
   # half's entry point and the other half's business to read.
   @recursion_guard "CASTLE_BASELINE"
+
+  # How many names to try before concluding that something other than a name
+  # collision is wrong. Each candidate carries 8 random bytes, so needing a second
+  # one at all already means something strange; needing this many means the
+  # directory is not behaving like a directory.
+  @staging_attempts 5
 
   @prefixes %{"rel:" => :rel, "tar:" => :tar, "ref:" => :ref}
 
@@ -1140,17 +1146,45 @@ defmodule Forecastle.Baseline do
   # nothing looks up. Unique per run, because two runs resolving the same
   # baseline at once must not share a directory - which is the whole reason the
   # work happens somewhere other than where it ends up.
+  # The directory is *claimed*, not chosen and then cleared. `File.mkdir/1` is
+  # `mkdir(2)`, which either creates the directory or tells you somebody else has
+  # it - and that atomicity is the whole mechanism, because a name this run
+  # believes is unique is not something it may act on destructively.
+  #
+  # It once cleared the candidate with `File.rm_rf!/1` first, on the reasoning
+  # that the name carried the OS pid and a per-run counter and so could not
+  # already be taken. Both halves of that are weaker than they look: two BEAMs in
+  # separate PID namespaces - two containers over one bind-mounted `_build` - can
+  # hold the same pid, and `System.unique_integer/1` is unique within one BEAM
+  # rather than between them. The two runs then agree on a name, and the second
+  # deletes the first's live workspace out from under it. Random bytes make the
+  # collision vanishingly unlikely and `mkdir` makes it harmless.
   defp staging_dir do
-    dir =
-      Path.join(
-        cache_dir(),
-        ".staging-#{System.pid()}-#{System.unique_integer([:positive])}"
-      )
+    File.mkdir_p!(cache_dir())
+    claim_staging_dir(@staging_attempts)
+  end
 
-    File.rm_rf!(dir)
-    File.mkdir_p!(dir)
+  defp claim_staging_dir(0) do
+    Mix.raise(
+      "could not claim a staging directory under #{cache_dir()}: every candidate name was " <>
+        "already taken. Something else is writing there."
+    )
+  end
 
-    dir
+  defp claim_staging_dir(attempts) do
+    token = 8 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+    dir = Path.join(cache_dir(), ".staging-#{System.pid()}-#{token}")
+
+    case File.mkdir(dir) do
+      :ok ->
+        dir
+
+      {:error, :eexist} ->
+        claim_staging_dir(attempts - 1)
+
+      {:error, reason} ->
+        Mix.raise("#{dir} could not be created: #{:file.format_error(reason)}")
+    end
   end
 
   defp publish!(staging, dest) do
