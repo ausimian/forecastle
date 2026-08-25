@@ -10,7 +10,10 @@ upgrades. This includes:
   - Adding a `bin/castle` command for unpacking and installing releases, alongside
     the standard Mix launcher.
 
-Additionally, `Forecastle` ships with a appup compiler and a mix task for relup generation.
+Additionally, `Forecastle` ships with an appup compiler and a mix task for relup
+generation. Both are named for `Castle` rather than for the package that
+implements them - `mix castle.relup` and the `:appup` compiler - because where the
+build-time code lives is a packaging decision, and what a developer types is not.
 
 ## Installation
 
@@ -223,7 +226,7 @@ on, with nobody intervening. `bin/<release> version` reports that version too,
 because what it prints is the version *to be booted*; ask the running system if
 you want to know what is running.
 
-**Only the one-stage `restart_emulator` is supported.** `mix forecastle.relup`
+**Only the one-stage `restart_emulator` is supported.** `mix castle.relup`
 never generates the two-stage `restart_new_emulator` and refuses it wherever it
 finds one; see below.
 
@@ -277,12 +280,12 @@ build wrote stays where it is.
 
 ## Relup Generation
 
-Forecastle contains a mix task, `forecastle.relup`, that simplifies the generation of
-the relup file. Assuming you have two _unpacked_ releases e.g. `0.1.0` and `0.1.1` 
-and you wish to generate a relup between them:
+`Forecastle` provides the mix task `castle.relup`, which simplifies the generation
+of the relup file. Assuming you have two _unpacked_ releases e.g. `0.1.0` and
+`0.1.1` and you wish to generate a relup between them:
 
 ```shell
-> mix forecastle.relup --target myapp/releases/0.1.1/myapp --fromto myapp/releases/0.1.0/myapp
+> mix castle.relup --target myapp/releases/0.1.1/myapp --fromto myapp/releases/0.1.0/myapp
 ```
 
 If the generated file is in the project root, it will be copied during
@@ -314,13 +317,13 @@ not of either release, so it is chosen per relup:
 
 ```shell
 # auto: hot where it can be
-> mix forecastle.relup --target ... --fromto ...
+> mix castle.relup --target ... --fromto ...
 
 # require a hot upgrade, and fail rather than degrade
-> mix forecastle.relup --target ... --fromto ... --hot
+> mix castle.relup --target ... --fromto ... --hot
 
 # force a full emulator restart, with no appups at all
-> mix forecastle.relup --target ... --fromto ... --restart
+> mix castle.relup --target ... --fromto ... --restart
 ```
 
 `--hot` and `--restart` are mutually exclusive, and each may be given once.

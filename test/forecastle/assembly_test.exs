@@ -573,7 +573,7 @@ defmodule Forecastle.AssemblyTest do
     end
 
     test "is refused when it is an upgrade plan for another version" do
-      # The relup comes from a separate `mix forecastle.relup` run, so a stale
+      # The relup comes from a separate `mix castle.relup` run, so a stale
       # one can be sitting here - `--outdir` sends a successful generation
       # somewhere else and leaves this one behind. Packaging it would hand
       # `release_handler` the wrong version's instructions.

@@ -34,7 +34,7 @@ defmodule SampleDep.MixProject do
 
   `SAMPLE_DEP_VSN` pins it independently of the sample's, so that the fixture
   can be assembled as a transition in which *only* project-owned applications
-  changed. `mix forecastle.relup`'s `auto` strategy makes a transition a restart
+  changed. `mix castle.relup`'s `auto` strategy makes a transition a restart
   when the version of an application the project does not own moved, and this
   application - a dependency of the sample - otherwise always moves with it.
   Unset, which is how every other suite builds the fixture, it moves in step as

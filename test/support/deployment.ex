@@ -44,11 +44,11 @@ defmodule Forecastle.Deployment do
     args = ["--target", rel_path(to, to_vsn), "--fromto", rel_path(from, from_vsn)]
 
     Fixture.mix!(
-      ["forecastle.relup" | args ++ extra_args],
+      ["castle.relup" | args ++ extra_args],
       [{"SAMPLE_VSN", to_vsn}, {"MIX_BUILD_ROOT", Path.join(workspace, "_build-#{to_vsn}")}]
     )
 
-    assert File.exists?(relup), "mix forecastle.relup did not produce a relup"
+    assert File.exists?(relup), "mix castle.relup did not produce a relup"
 
     # And that it is a plan between these two versions, not merely a file.
     contents = File.read!(relup)

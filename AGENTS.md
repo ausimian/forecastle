@@ -664,7 +664,7 @@ around it composes instead:
 
 ## Relup generation and upgrade strategy
 
-`mix forecastle.relup` takes an upgrade strategy — `auto` by default, `--hot`,
+`mix castle.relup` takes an upgrade strategy — `auto` by default, `--hot`,
 or `--restart` — and it is a property of each transition in the relup rather
 than of the release, because that is what it is: a relup for release X carries
 one entry per from-version, and whether that particular edge can be hot has
@@ -886,7 +886,7 @@ changing the fixture.
 | --- | --- |
 | `lib/forecastle.ex` | Release step hooks (the whole of the build-time logic) |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
-| `lib/mix/tasks/forecastle.relup.ex` | `mix forecastle.relup` — chooses an upgrade strategy per transition, and writes the relup |
+| `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — chooses an upgrade strategy per transition, and writes the relup |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
@@ -923,7 +923,7 @@ directory to start from a clean slate.
 | `test/forecastle/castle_cli_test.exs` | `bin/castle` as a shell script, against a launcher stub that records its arguments |
 | `test/forecastle/env_script_test.exs` | The `env.sh` fragment as a shell script, sourced in a release-shaped directory with a launcher stub: the heart environment it leaves behind, and which provisional version each state of the two markers selects |
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
-| `test/forecastle/relup_test.exs` | `mix forecastle.relup` as a command, against three assembled releases: argument handling, exit status, and all three upgrade strategies |
+| `test/forecastle/relup_test.exs` | `mix castle.relup` as a command, against three assembled releases: argument handling, exit status, and all three upgrade strategies |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 

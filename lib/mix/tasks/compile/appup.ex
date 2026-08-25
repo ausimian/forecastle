@@ -2,6 +2,8 @@ defmodule Mix.Tasks.Compile.Appup do
   @moduledoc """
   Compiles appup files into the application's ebin folder.
 
+  This compiler is provided by `Forecastle`, Castle's build-time half.
+
   The `:appup` project key names a file, relative to the project file, that is
   evaluated for its value. It must not introduce top-level bindings. Whatever it
   returns is written to `<app>.appup` alongside the application's beams.
