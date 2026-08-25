@@ -1153,10 +1153,19 @@ wants one, and `rel:` names an already-unpacked tree for anyone who disagrees.
 Do not widen that list back to what `:erl_tar` *accepts*. It was `regular |
 directory | symlink | char | block | fifo` for one revision, on the reasoning
 that the device types are "written" — they are, as empty files, which is the
-whole problem. The tests build their archives with the system `tar`,
-deliberately: one built by `:erl_tar` cannot contain the members `:erl_tar`
-declines to read back, so it would assert nothing, and each asserts the member is
-really in the archive before using it.
+whole problem.
+
+**Which builder each test archive uses is load-bearing, and the two go opposite
+ways.** The hard-link and FIFO artefacts are built by the **system `tar`**,
+because `:erl_tar` cannot write those member types at all and an archive it built
+would assert nothing. The colliding-members artefact is built by **`:erl_tar`**,
+because `tar` given one file twice notices the repeated inode and writes the
+second as a *hard link* — so the type check refuses it before the collision check
+is reached. That passed on macOS and failed on Linux, which is bsdtar and GNU tar
+disagreeing about when to hard-link, and it is why that archive is now assembled
+from two genuinely different files named onto one destination. Every one of these
+tests asserts its member really is in the archive before using it, so a builder
+that quietly stops producing it fails loudly rather than passing vacuously.
 
 **Two members landing on one path are refused too**, which is the same failure
 by a different route: extraction is sequential, so which of them survives is a

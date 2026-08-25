@@ -616,20 +616,45 @@ defmodule Forecastle.BaselineTest do
     tarball
   end
 
-  # Named twice on one `tar` command line, once plainly and once through `./`,
-  # which is how an archive comes to carry two members for one destination
-  # without anybody setting out to build one.
+  # Built with `:erl_tar.create/3` rather than the system `tar`, which is the
+  # opposite choice from the other two artefacts here and for the same underlying
+  # reason: what each test needs is a member type its builder can actually
+  # produce. `tar` given one file twice notices the repeated inode and writes the
+  # second as a *hard link*, so the type check refuses it before the collision
+  # check is reached - which is what this asserted on macOS and not on Linux
+  # until the archive stopped being built that way. `:erl_tar.create/3` writes
+  # exactly the members it is given, names and all.
+  #
+  # Two different files, spelled onto one destination: `lib/…/my_app.app` and
+  # `./lib/…/my_app.app` differ as strings and not as paths.
   defp tarball_with_colliding_members!(ctx) do
     tarball = Path.join(ctx.dir, "colliding.tar.gz")
     member = "lib/my_app-1.0.0/ebin/my_app.app"
-    File.write!(Path.join(ctx.tree, member), "{application, my_app, []}.")
 
-    {output, status} =
-      System.cmd("tar", ["-czf", tarball, "-C", ctx.tree, "releases", member, "./" <> member],
-        stderr_to_stdout: true
-      )
+    first = Path.join(ctx.dir, "first.app")
+    second = Path.join(ctx.dir, "second.app")
+    File.write!(first, "{application, my_app, [{vsn, \"1\"}]}.")
+    File.write!(second, "{application, my_app, [{vsn, \"2\"}]}.")
 
-    assert status == 0, "could not build the colliding artefact:\n\n#{output}"
+    members = [
+      {~c"releases", to_charlist(Path.join(ctx.tree, "releases"))},
+      {to_charlist(member), to_charlist(first)},
+      {to_charlist("./" <> member), to_charlist(second)}
+    ]
+
+    :ok = :erl_tar.create(to_charlist(tarball), members, [:compressed])
+
+    # Both spellings really are in there, and both as ordinary files: if either
+    # were dropped or stored as something else, this would be testing the type
+    # check again rather than the collision check.
+    {:ok, entries} = :erl_tar.table(to_charlist(tarball), [:compressed, :verbose])
+
+    for name <- [member, "./" <> member] do
+      assert Enum.any?(entries, fn {n, type, _size, _mtime, _mode, _uid, _gid} ->
+               to_string(n) == name and type == :regular
+             end),
+             "the colliding artefact has no regular member named #{name}"
+    end
 
     tarball
   end
