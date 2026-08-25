@@ -350,19 +350,55 @@ defmodule Mix.Tasks.Castle.Appup do
   # `a{b}` is enough - matches nothing and every application looks absent again.
   # `:filelib.wildcard/1` has no way to quote the part of a pattern that is a
   # path, so the fix is not to build a pattern out of one.
+  #
+  # **Readable is not the same as being a library directory, and the difference
+  # was a silent pass that only showed up on Linux.** `Forecastle.Baseline`
+  # derives the library directory of a `rel:` spec by climbing three levels from
+  # the `.rel` path, so a nonsense spec lands on a real path: `rel:/nope/x`
+  # resolves to `/lib`. That does not exist on macOS, so `File.ls/1` failed and
+  # the refusal below fired. On Linux `/lib` is a directory - the system one -
+  # so the listing *succeeded*, held no application being checked, and every one
+  # of them read as removed between the two builds. A removal is a legitimate hot
+  # transition that `:systools` covers with `remove_application` and that needs no
+  # appup, so the run reported "every module that moved is covered" and exited
+  # **zero** having compared nothing. The same class as the mistyped `--from`
+  # above, reached through a path that happens to exist.
+  #
+  # So a library directory has to *look* like one, which is decided structurally
+  # rather than by trusting the spec: at least one entry that is an application
+  # directory with an `ebin` in it. A build's library directory always has one -
+  # an empty one is not a build - and no directory that is merely nearby does.
+  # The one check that cannot be fooled by a path being resolvable.
   defp build(describe, lib_dir) do
     case File.ls(lib_dir) do
       {:ok, entries} ->
-        %{describe: describe, lib_dir: lib_dir, entries: entries}
+        if Enum.any?(entries, &application_dir?(lib_dir, &1)) do
+          %{describe: describe, lib_dir: lib_dir, entries: entries}
+        else
+          refuse_lib_dir!(
+            describe,
+            lib_dir,
+            "nothing in it is an application directory with an ebin in it"
+          )
+        end
 
       {:error, reason} ->
-        Mix.raise(
-          "#{describe}: #{Path.relative_to_cwd(lib_dir)} could not be read as a library " <>
-            "directory: #{:file.format_error(reason)}. Every application would look absent " <>
-            "from it, which reads as a transition that adds or removes applications rather " <>
-            "than as a path that is not there, so this refuses instead of reporting one."
-        )
+        refuse_lib_dir!(describe, lib_dir, :file.format_error(reason))
     end
+  end
+
+  defp application_dir?(lib_dir, name), do: File.dir?(Path.join([lib_dir, name, "ebin"]))
+
+  # One phrase for both, because they are one bug with two symptoms and which of
+  # them a given machine shows depends on whether the resolved path happens to
+  # exist there.
+  defp refuse_lib_dir!(describe, lib_dir, because) do
+    Mix.raise(
+      "#{describe}: #{Path.relative_to_cwd(lib_dir)} is not a library directory of a build - " <>
+        "#{because}. Every application would look absent from it, and an absent application " <>
+        "reads as one this transition adds or removes, which needs no appup and passes. So " <>
+        "this refuses rather than reporting one."
+    )
   end
 
   # Made unique, because the same application named twice is one application:
@@ -662,12 +698,24 @@ defmodule Mix.Tasks.Castle.Appup do
   # missing" would be true and would let a reader take a restart transition for
   # a hot one that happens to be completely covered, which are very different
   # things to have just been told about a release.
-  # An instruction `:systools` refuses is reported whichever branch is taken,
-  # because `check_syntax/1` runs before anything else `systools_rc` does: the
-  # edge produces no relup at all, so the emulator is not going to restart on it
-  # either.
+  # **What `:systools` refuses outright is reported whichever branch is taken,
+  # and the test for "outright" is where in `translate_merged_script/4` the
+  # refusal happens.** Both of these are raised before
+  # `sort_emulator_restart/3` is reached, so the edge produces no relup and the
+  # emulator never restarts on it - reporting them only on the hot branch was a
+  # clean exit for a script that cannot be built:
+  #
+  #   * a bad instruction, from the first `check_syntax/1`.
+  #   * a `muldef_module`, from `translate_dependent_instrs/4`. Measured on OTP
+  #     28.3: a script of `[restart_emulator, {update, M, …}, {load_module, M,
+  #     …}]` still fails with `{muldef_module, M}`, while `restart_emulator`
+  #     with a single instruction is fine.
+  #
+  # Coverage is the thing a restart really does excuse, and it stays inside the
+  # branch.
   defp findings(script, direction, app, old, new) do
     refusals(script) ++
+      multiply_defined(script, app, new.inventory) ++
       if Appup.restarts_emulator?(script, direction) do
         [
           {:note,
@@ -756,7 +804,6 @@ defmodule Mix.Tasks.Castle.Appup do
       ) ++
       deleted_but_present(removals, new.modules) ++
       conflicts(effects) ++
-      multiply_defined(script, app, new.inventory) ++
       mentions(
         Appup.named(script, :load),
         Appup.named(script, :removal),
@@ -1026,10 +1073,22 @@ defmodule Mix.Tasks.Castle.Appup do
     end
   end
 
+  # A list with a non-atom anywhere in it is read as **empty**, not filtered down
+  # to the atoms in it. `systools_make:a_list_p/1` is all-or-nothing - one
+  # non-atom and the whole `modules` value is a `bad_param` - so keeping the valid
+  # subset invented an inventory `:systools` never accepts, and a
+  # whole-application instruction could then cover a changed module out of it and
+  # exit zero. That is the one thing the conservative reading of a malformed `.app`
+  # is supposed to rule out: it errs toward *more* findings precisely so a
+  # malformed resource cannot buy a clean bill of health, and a surviving subset
+  # broke that.
   defp inventory(opts) do
     case List.keyfind(opts, :modules, 0) do
-      {:modules, modules} when is_list(modules) -> MapSet.new(Enum.filter(modules, &is_atom/1))
-      _absent_or_malformed -> MapSet.new()
+      {:modules, modules} when is_list(modules) ->
+        if Enum.all?(modules, &is_atom/1), do: MapSet.new(modules), else: MapSet.new()
+
+      _absent_or_malformed ->
+        MapSet.new()
     end
   end
 

@@ -821,15 +821,60 @@ defmodule Forecastle.AppupCheckTest do
       {output, status} = appup(["--from", "rel:/nowhere/does/not/exist/sample"])
 
       assert status != 0, "a baseline that is not on disk passed the check:\n\n#{output}"
-      assert output =~ "could not be read as a library directory"
+      assert output =~ "is not a library directory of a build"
       refute output =~ "an application added between the two"
 
       # And the target side gets the same treatment, since the same inference is
       # made about it.
+      #
+      # **This half was a real hole, and it only showed on Linux.** The library
+      # directory of a `rel:` spec is three levels up from the `.rel` path, so
+      # `rel:/nope/x` resolves to `/lib` - which does not exist on macOS, where
+      # the listing failed and the refusal fired, but *is* the system library
+      # directory on Linux, where the listing succeeded, held no application
+      # being checked, and made every one of them read as removed between the two
+      # builds. A removal needs no appup, so the run reported everything covered
+      # and exited zero. Being readable is not the same as being a library
+      # directory, so that is now decided structurally rather than by whether the
+      # path resolves - and one phrase covers both symptoms, since which one a
+      # machine shows is an accident of its filesystem.
       {output, status} = appup(["--from", "rel:" <> rel(ctx.from, @from), "--to", "rel:/nope/x"])
 
       assert status != 0, "a target that is not on disk passed the check:\n\n#{output}"
-      assert output =~ "could not be read as a library directory"
+      assert output =~ "is not a library directory of a build"
+      refute output =~ "an application removed between the two"
+      refute output =~ "every module that moved is covered"
+    end
+
+    test "a library directory that is readable but holds no application is refused", ctx do
+      # The case above, made to happen on every platform rather than only where
+      # the resolved path happens to exist. `/lib` is a directory on Linux and
+      # absent on macOS, so the hole it exposed was invisible on half the CI
+      # matrix - and the point is not that `/lib` in particular resolves, it is
+      # that *any* readable directory did.
+      #
+      # Shaped like the thing it stands in for: a couple of ordinary system
+      # directories, no `ebin` anywhere. The spec resolves three levels up, so
+      # `.../a/b/c/sample` puts the library directory at `.../a/lib`.
+      root = Path.join(Fixture.workspace(), "not-a-lib-dir")
+      File.rm_rf!(root)
+      on_exit(fn -> File.rm_rf!(root) end)
+      File.mkdir_p!(Path.join(root, "a/lib/x86_64-linux-gnu"))
+      File.mkdir_p!(Path.join(root, "a/lib/systemd"))
+
+      {output, status} =
+        appup([
+          "--from",
+          "rel:" <> rel(ctx.from, @from),
+          "--to",
+          "rel:" <> Path.join(root, "a/b/c/sample")
+        ])
+
+      assert status != 0, "a readable non-library directory passed the check:\n\n#{output}"
+      assert output =~ "is not a library directory of a build"
+      assert output =~ "nothing in it is an application directory with an ebin in it"
+      refute output =~ "an application removed between the two"
+      refute output =~ "every module that moved is covered"
     end
 
     test "a library path containing glob metacharacters is read, not silently skipped", ctx do

@@ -1560,6 +1560,25 @@ it either — `Forecastle.Baseline` resolves a `rel:` spec without touching the
 filesystem, deliberately, because the caller is what reads the release and can
 say what it could not read, and this task reads no `.rel` at all.
 
+**Being readable is not the same as being a library directory, and that
+distinction cost a silent pass that only appeared on Linux.**
+`Forecastle.Baseline` derives a `rel:` spec's library directory by climbing three
+levels from the `.rel` path, so a nonsense spec still lands somewhere real:
+`rel:/nope/x` resolves to `/lib`. On macOS that does not exist, the listing
+failed, and the refusal fired. On Linux `/lib` *is* a directory — the system one
+— so the listing succeeded, held none of the applications being checked, and
+every one of them read as **removed** between the two builds. A removal is a
+legitimate hot transition needing no appup, so the run announced that every
+module that moved was covered and exited **zero** having compared nothing.
+
+So `build/2` decides it structurally rather than by whether the path resolves: at
+least one entry that is an application directory with an `ebin` in it. A build's
+library directory always has one, an empty one is not a build, and a directory
+that merely happens to sit at the resolved path does not. Both symptoms share one
+message, because which of them a machine shows is an accident of its filesystem —
+and the suite pins the readable-but-empty case with a directory it builds itself,
+rather than relying on `/lib` existing, so it fails on either platform.
+
 So the library directory is *listed* once per build and a failure to read it is a
 refusal, and an application directory with no `ebin` in it is a refusal too
 rather than an absence. Listing also closes a narrower form of the same bug: a
@@ -1649,6 +1668,23 @@ tree.
   `compile --warnings-as-errors`, `deps.unlock --unused`, `format`,
   `credo --strict`, `test --include e2e`. Do not run the individual checks
   piecemeal.
+- **`mix precommit` green does not mean CI green, and the gap is structural
+  rather than bad luck.** `mix.exs` allows `~> 1.18` and the CI matrix runs
+  1.18, 1.19 and 1.20, but the only cell running `--warnings-as-errors` is
+  pinned to 1.19 — so a warning that exists on 1.20 alone is invisible to
+  precommit *and* fails no test cell, because those run a plain `mix test`.
+  Two concrete instances so far: `File.stream!/3` with modes before the byte
+  count, deprecated in 1.20, which merged on #26 and was only found later; and
+  a `defp` fallback clause that 1.20's set-theoretic inference proves dead,
+  which failed every 1.20 cell. When touching code near either, compile against
+  the top of the supported range as well:
+  `mise x elixir@1.20.3-otp-28 -- mix compile --warnings-as-errors --force`.
+- **CI failing on one OS and not the other is a signal, not flakiness.** Two
+  instances now: bsdtar and GNU tar disagree about hard links, and `/lib` is a
+  real directory on Linux and absent on macOS — which is what let a nonsense
+  `rel:` spec resolve to something readable and pass the coverage check. When a
+  cell splits by platform, find what differs about the filesystem or the tool
+  before touching the assertion.
 - `@version` in `mix.exs` is the single source of truth for the version.
 - Add user-visible changes to `RELEASE.md` on the feature branch, using
   [Keep a Changelog](https://keepachangelog.com/) sections. Do not defer release
