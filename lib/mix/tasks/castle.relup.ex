@@ -1,8 +1,11 @@
-defmodule Mix.Tasks.Forecastle.Relup do
+defmodule Mix.Tasks.Castle.Relup do
   @moduledoc """
   Generate a relup file between releases.
 
-  `mix forecastle.relup` will generate a relup between a `target` release and
+  This task is provided by `Forecastle`, Castle's build-time half, and named
+  `castle.*` like the rest of the tooling a developer runs.
+
+  `mix castle.relup` will generate a relup between a `target` release and
   any number of other releases. The paths specifed in the options should
   be the paths to `.rel` files (but without the .rel extension)
 
@@ -893,7 +896,7 @@ defmodule Mix.Tasks.Forecastle.Relup do
     end
   end
 
-  # Unique per run: two `mix forecastle.relup` invocations sharing an `--outdir`
+  # Unique per run: two `mix castle.relup` invocations sharing an `--outdir`
   # must not stage over each other, so the name carries both the OS process and a
   # counter within it. And unmistakable for a relup - a leading dot and a `.tmp`
   # suffix - because post-assembly reads the path `relup`, and a staging file

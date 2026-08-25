@@ -171,7 +171,7 @@ defmodule Forecastle do
   # Checked in `pre_assemble/1`, before Mix has created anything, so all that is
   # left here is to put the bytes that were checked into the release.
   # Re-emitted from the term that was checked rather than copied from the file
-  # again: `:file.consult/1` reopens the path, and a `mix forecastle.relup`
+  # again: `:file.consult/1` reopens the path, and a `mix castle.relup`
   # running alongside the build can replace it in between, so a second read is
   # not necessarily the bytes that were checked. The format is the one
   # `systools` writes and `release_handler` reads - a UTF-8 coding comment and
@@ -190,11 +190,11 @@ defmodule Forecastle do
     end
   end
 
-  # The relup is produced by a separate `mix forecastle.relup` run, so nothing
+  # The relup is produced by a separate `mix castle.relup` run, so nothing
   # about being here says it belongs to the release being assembled. Packaging
   # one for another version is worse than packaging none at all: nothing checks
   # it again, and `release_handler` applies it as this version's upgrade plan.
-  # `mix forecastle.relup --outdir` makes that reachable - generation succeeds
+  # `mix castle.relup --outdir` makes that reachable - generation succeeds
   # elsewhere and an older relup is left sitting here - and so does anything that
   # left a partial one behind: the task itself publishes by renaming a staging
   # file over the relup, and so cannot, but a copy or an editor interrupted

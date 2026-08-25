@@ -1,6 +1,6 @@
 defmodule Forecastle.RelupTest do
   @moduledoc """
-  Drives `mix forecastle.relup` against two really-assembled releases.
+  Drives `mix castle.relup` against two really-assembled releases.
 
   Generating a relup needs two releases on disk, each with its `.rel` file and
   the `.appup` that carries the upgrade instructions, so there is no smaller
@@ -34,7 +34,7 @@ defmodule Forecastle.RelupTest do
   use Forecastle.ReleaseCase
 
   alias Forecastle.Fixture
-  alias Mix.Tasks.Forecastle.Relup
+  alias Mix.Tasks.Castle.Relup
 
   @from "0.1.0"
   @to "0.1.1"
@@ -634,7 +634,7 @@ defmodule Forecastle.RelupTest do
     end
 
     test "does not collide with another run publishing into the same directory", ctx do
-      # The staging file is named per run for this: two `mix forecastle.relup`
+      # The staging file is named per run for this: two `mix castle.relup`
       # invocations sharing an --outdir must not stage into the same file, or one
       # could publish a relup that is partly the other's. Whichever wins the
       # rename, the file is one of them whole.
@@ -850,9 +850,9 @@ defmodule Forecastle.RelupTest do
 
   defp rel(release, vsn), do: Path.join(release, "releases/#{vsn}/sample")
 
-  defp relup(args, vsn), do: mix(["forecastle.relup" | args], env(vsn))
+  defp relup(args, vsn), do: mix(["castle.relup" | args], env(vsn))
 
-  defp relup!(args, vsn), do: mix!(["forecastle.relup" | args], env(vsn))
+  defp relup!(args, vsn), do: mix!(["castle.relup" | args], env(vsn))
 
   # The task builds nothing, but Mix still loads the project around it. Pointing
   # it at the build tree the target release was assembled in keeps it from

@@ -104,7 +104,7 @@
   a launcher stub as well. A continuation that fails and rolls back on the way up
   belongs to `restart_new_emulator`, which is not supported; see *Known
   limitations*.
-- `mix forecastle.relup` now takes an upgrade strategy, because whether a
+- `mix castle.relup` now takes an upgrade strategy, because whether a
   transition can be hot is a property of the edge between two releases rather
   than of either release. `--hot` requires a genuine hot upgrade and fails,
   having written nothing, if the transition cannot be one - a missing appup
@@ -329,6 +329,19 @@
 
 ### Changed
 
+- **Breaking:** `mix forecastle.relup` is now `mix castle.relup`. The task is
+  still implemented in Forecastle and still ships with it; only the name has
+  changed. Where build-time code lives is a packaging decision and what the task
+  is called is a user-interface one, and making the two agree split the
+  vocabulary in half: an operator ran `bin/castle install` while a developer ran
+  `mix forecastle.relup`, against a package that is, by design, in nobody's
+  `mix.exs`. Both READMEs say to depend on `Castle`, so `castle.*` is the name
+  the user already thinks in. There is no compatibility alias — a shim for a
+  package documented as not taken directly is code maintained forever for a user
+  who does not exist — so rename the invocation in any build pipeline that calls
+  it. `mix compile.appup` is unaffected: it is named by its `:compilers` entry
+  rather than by a package.
+  ([forecastle#24](https://github.com/ausimian/forecastle/issues/24))
 - **Breaking:** Forecastle no longer touches configuration. It used to set
   `:runtime_config_path` to `false`, install a `Config.Reader` of its own,
   initialise every config provider itself and stash the results, and rename the
@@ -439,7 +452,7 @@
 - The Castle integration is installed by extending the release's `env.sh`
   rather than by replacing the launcher. An `env.sh` supplied through
   `rel/env.sh.eex` is preserved and runs first.
-- `mix forecastle.relup` with no strategy switch is now `auto`, which changes what
+- `mix castle.relup` with no strategy switch is now `auto`, which changes what
   an existing invocation does with some transitions. Case by case, against a task
   that simply asked `systools` for the relup:
 
@@ -476,7 +489,7 @@
   refuses an appup-supplied emulator restart that the old task packaged. What it
   is good for is a pipeline that wants the generation to fail rather than degrade.
   `--restart` is the way to get a relup out of the two changed cases.
-- A `mix forecastle.relup` run that fails now writes nothing at all. It used to
+- A `mix castle.relup` run that fails now writes nothing at all. It used to
   let `systools` write the relup and report afterwards, which was harmless while
   every refusal came from `systools` itself; the strategies add refusals that can
   only be made once a relup has been generated, so the file is now written by the
@@ -493,7 +506,7 @@
   relup empty or half a plan even though the run failed. A reader now sees the
   whole of one relup or the whole of the other, and a build that reads it while a
   generation is running cannot read a partial one.
-- `mix forecastle.relup` now requires at least one of `--fromto`, `--upfrom` or
+- `mix castle.relup` now requires at least one of `--fromto`, `--upfrom` or
   `--downto`. It used to accept none and write a relup with no transitions in it,
   which is not an upgrade plan and which `release_handler` can do nothing with.
 - Raised the minimum Elixir requirement to 1.18.
@@ -542,10 +555,10 @@
   Install's lost-connection check is isolated as a whole-line launcher
   diagnostic, so ordinary error copy cannot trigger the restart-confirmation
   path.
-- `mix forecastle.relup` failed with `:systools is not available` in projects
+- `mix castle.relup` failed with `:systools is not available` in projects
   that do not themselves depend on `:sasl`, because Elixir prunes unused OTP
   applications from the build's code path.
-- `mix forecastle.relup` exited 0 when it had generated nothing.
+- `mix castle.relup` exited 0 when it had generated nothing.
   `:systools.make_relup/4` reports ordinary failure by returning `:error`, and
   Mix does not turn what a task returns into an exit status, so a build
   pipeline could not tell that generation had failed. Nothing removes a relup
@@ -554,7 +567,7 @@
   says what `systools` could not do and fails. Warnings that `systools` used to
   print for itself - an ERTS version change among them - are passed on rather
   than swallowed.
-- `mix forecastle.relup --outdir` was accepted and then ignored, so the relup
+- `mix castle.relup --outdir` was accepted and then ignored, so the relup
   was written to the current directory regardless, overwriting any unrelated
   relup already there. The switch now decides where the file goes, and the
   directory has to exist. Post-assembly still copies the relup it finds in the
@@ -573,7 +586,7 @@
   build that was silently packaging the wrong plan will now stop instead —
   before assembly begins, so a rejected relup leaves no half-built release
   behind for a later build to stumble over.
-- `mix forecastle.relup` discarded arguments it did not recognise, so a
+- `mix castle.relup` discarded arguments it did not recognise, so a
   mistyped switch, or a path given without one, generated a relup between
   releases the caller had not named instead of reporting the mistake. Omitting
   `--target` raised a `KeyError` from the middle of the task. Both are now
