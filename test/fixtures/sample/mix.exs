@@ -32,7 +32,12 @@ defmodule Sample.MixProject do
       # apart and this suite is the only thing that exercises them together. Both
       # have merged, so it is back on the integration branch - and it had to move
       # before that issue branch was deleted, which nothing enforces.
-      {:castle, github: "ausimian/castle", branch: "release/1.0.0"},
+      #
+      # It is on `feature/upgrade-tooling` for the duration of castle#32, for the
+      # same reason: the tooling changes both halves at once, and this suite is
+      # what exercises them together. Back to `release/1.0.0` when that tree
+      # merges - the same unenforced step as last time.
+      {:castle, github: "ausimian/castle", branch: "feature/upgrade-tooling"},
       {:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), override: true},
       # An application the relup never mentions, versioned in step with this
       # one, so that "release_handler knows its version changed" is observable
