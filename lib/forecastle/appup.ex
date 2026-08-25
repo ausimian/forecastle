@@ -753,13 +753,18 @@ defmodule Forecastle.Appup do
     end
   end
 
-  defp whole_application?(instruction, app)
-       when is_tuple(instruction) and tuple_size(instruction) >= 2 do
-    elem(instruction, 0) in (@load_applications ++ @removal_applications) and
+  # One total clause rather than a guarded one and a fallback, because Elixir
+  # 1.20 proves the fallback dead and `mix compile --warnings-as-errors` then
+  # fails: both callers reach this only once `legal?/1` has said yes, and every
+  # shape `legal?/1` accepts is a tuple of at least two elements, so the
+  # set-theoretic inference can see that a non-tuple never arrives here. Writing
+  # the guard as the first conjunct keeps it honest without the dead clause -
+  # `and` short-circuits, so `elem/2` is never reached for a non-tuple.
+  defp whole_application?(instruction, app) do
+    is_tuple(instruction) and tuple_size(instruction) >= 2 and
+      elem(instruction, 0) in (@load_applications ++ @removal_applications) and
       elem(instruction, 1) == app
   end
-
-  defp whole_application?(_instruction, _app), do: false
 
   # Which module an instruction is about, and under which head. The four
   # high-level instructions carry it as the second element - `expand_script/1`
