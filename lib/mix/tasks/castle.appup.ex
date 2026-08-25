@@ -547,31 +547,46 @@ defmodule Mix.Tasks.Castle.Appup do
   # transition removed, which needs no appup and exits zero. Only `foo-bar-1.0.0`
   # is genuinely ambiguous about whose it is, because only a prefix match can
   # belong to a longer name.
-  defp ours?(dir, app) do
-    Path.basename(dir) == "#{app}" or File.regular?(Path.join([dir, "ebin", "#{app}.app"]))
-  end
+  defp ours?(dir, app), do: Path.basename(dir) == "#{app}" or "#{app}" in resources_in(dir)
 
   # Nothing that matched the name holds this application's resource. Either they
   # all belong to other applications - in which case this one really is absent -
   # or one of them is an unfinished build of this one, which is a refusal. A
-  # directory that holds some other application's `.app` is evidence of the
-  # former; one with no `ebin`, or an `ebin` with no `.app` in it at all, is
-  # evidence of the latter.
+  # directory holding some other application's resource is evidence of the
+  # former; one with no `ebin`, or an `ebin` with no usable resource in it at all,
+  # is evidence of the latter.
   defp absent_or_incomplete!(dirs, build, app) do
-    case Enum.reject(dirs, &someone_elses?/1) do
+    case Enum.reject(dirs, &(resources_in(&1) != [])) do
       [] -> nil
       [dir | _rest] -> ebin!(dir, build, app)
     end
   end
 
-  defp someone_elses?(dir) do
+  # The application resources in a candidate directory that `:systools` could
+  # actually read: a **regular file** named `<name>.app`. Both questions asked
+  # about a candidate - is it ours, is it somebody else's - are derived from this
+  # one list, because writing them separately is how they came to disagree: "ours"
+  # required a regular file while "somebody else's" only matched the extension, so
+  # an `ebin` holding nothing but a `foo.app` that was a dangling symlink or a
+  # directory answered *no* to the first and *yes* to the second. That reads as
+  # another application's directory, which makes this one absent, which makes the
+  # transition a removal needing no appup - a broken build exiting zero.
+  #
+  # One definition, two derivations, and the three states a candidate can be in
+  # stay exhaustive: ours, somebody else's, or unusable and therefore refused.
+  defp resources_in(dir) do
     ebin = Path.join(dir, "ebin")
 
-    File.dir?(ebin) and
-      case File.ls(ebin) do
-        {:ok, names} -> Enum.any?(names, &(Path.extname(&1) == ".app"))
-        {:error, _reason} -> false
-      end
+    case File.ls(ebin) do
+      {:ok, names} ->
+        for name <- names,
+            Path.extname(name) == ".app",
+            File.regular?(Path.join(ebin, name)),
+            do: Path.rootname(name)
+
+      {:error, _reason} ->
+        []
+    end
   end
 
   defp ambiguous!(dirs, build, app) do

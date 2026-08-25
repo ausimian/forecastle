@@ -1009,6 +1009,34 @@ defmodule Forecastle.AppupCheckTest do
       refute output =~ "holds no ebin directory"
     end
 
+    test "a sibling whose resource is not a usable file is refused, not read as absent", ctx do
+      # The two questions asked about a candidate - is it ours, is it somebody
+      # else's - have to share one notion of a usable resource, or they disagree.
+      # They did: "ours" required a regular file while "somebody else's" only
+      # matched the `.app` extension, so an `ebin` holding nothing but a
+      # `sample.app` that is a *directory* answered no to the first and yes to the
+      # second. That reads as another application's directory, which makes this
+      # one absent, which makes the transition a removal needing no appup - a
+      # broken build exiting zero.
+      real = Path.join(ctx.to, "lib/sample-#{@to}")
+      moved = Path.join(ctx.to, "lib/moved-aside")
+      broken = Path.join(ctx.to, "lib/sample-#{@to}")
+
+      File.rename!(real, moved)
+      File.mkdir_p!(Path.join(broken, "ebin/sample.app"))
+
+      on_exit(fn ->
+        File.rm_rf!(broken)
+        File.rename!(moved, real)
+      end)
+
+      {output, status} = appup(both(ctx))
+
+      assert status != 0, "a candidate with an unusable resource passed as absent:\n\n#{output}"
+      refute output =~ "an application removed between the two"
+      refute output =~ "every module that moved is covered"
+    end
+
     test "a hyphenated sibling application does not make the name ambiguous", ctx do
       # `sample-` cannot match `sample_dep-0.1.0`, but the prefix is not on its
       # own a version delimiter: an application name is an atom and `foo-bar` is a
