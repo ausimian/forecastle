@@ -1227,7 +1227,7 @@ the whole OS process, and `forecastle_test.exs` and `env_script_test.exs` are
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
-| `test/fixtures/sample` | A real application, assembled by the test suite into a real release |
+| `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see `test/fixtures/sample/appup.exs` |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it |
 | `test/support` | The workspace the fixture is built in, the case template for tests that build it, and the helpers that drive one once it is built |
 
@@ -1262,7 +1262,7 @@ directory to start from a clean slate.
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
 | `test/forecastle/relup_test.exs` | `mix castle.relup` as a command, against three assembled releases: argument handling, exit status, and all three upgrade strategies |
 | `test/forecastle/baseline_test.exs` | The baseline grammar and all three sources. `tar:` against a release-shaped tree built in the test; `ref:` against a throwaway git repository holding a Mix project of its own |
-| `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load, tagged `:e2e` |
+| `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 
 The `:e2e` suite is excluded by default and included by `mix precommit`. Run it
