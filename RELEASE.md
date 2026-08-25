@@ -413,6 +413,153 @@
   repository, and a checkout on a disk that is not mounted today looks exactly
   like a dead one — so only registrations inside the baseline cache are removed,
   and never a locked one.
+- `mix castle.appup`, a read-only check that compares two builds of an
+  application and reports how the committed appup covers the modules that moved.
+  It exits non-zero when one is mentioned by no instruction, which is what makes
+  it usable as a release-pipeline gate.
+
+      mix castle.appup --from <spec> [--to <spec>] [--app <app>]...
+
+  **It catches a failure nothing else can see.** The `:appup` compiler never
+  sees a second version of the application, so it cannot tell whether the
+  instructions it compiles are right. `:systools.make_relup/4` fails when an
+  appup has no *entry* for the from-version being upgraded from — but it does
+  not, and cannot, notice that an entry is *incomplete*. If two modules changed
+  and the appup mentions one of them, the relup generates, the upgrade succeeds,
+  `release_handler` swaps the code path, and the unmentioned module is still the
+  version that was loaded before, serving calls, because nothing named it and
+  nothing purged it. New code sits on disk, reachable, unused, and is loaded on
+  the next restart, underneath a system nobody was upgrading.
+
+  `--from` takes a baseline spec, the same grammar `mix castle.relup` takes on
+  its from-switches, so the baseline can be an assembled release, the artefact
+  that shipped, or a git ref. `--to` defaults to **the current build** rather
+  than to an assembled release, so the everyday question — what has changed since
+  1.0.0, and does my appup cover it? — costs a `mix compile` and nothing more.
+  Given explicitly it compiles nothing at all, so two shipped artefacts can be
+  compared without the working tree being in a state that builds. Both are
+  resolved at the compile level, so a `ref:` baseline is compiled rather than
+  assembled.
+
+  `--app` may be given more than once and defaults to the project's own
+  applications plus any umbrella children, which is the same set
+  `mix castle.relup` treats as the appups this project owns. Naming a dependency
+  explicitly is how its appup gets checked.
+
+  Each direction is reported on its own, because an appup's upgrade and
+  downgrade lists are independent and a from-version present in one need not be
+  present in the other.
+
+  **It asks whether the appup names everything that moved, and not whether the
+  resulting script is one `:systools` will accept.** Only the first question
+  needs help: `make_relup/4` already fails loudly on a malformed script, at the
+  moment a relup is generated, and what it cannot see is an entry that is
+  *incomplete*. Some invalid scripts are reported here anyway, because an
+  instruction `:systools` will not accept covers nothing and crediting one would
+  overstate coverage — but that is a side effect rather than a promise. A green
+  run means the coverage is complete, not that a relup will build.
+
+  **Coverage is judged by what an instruction does, not by which modules it
+  names.** `update`, `load_module` and `add_module` put new code into the running
+  system; `delete_module` takes code out and loads nothing. So a changed module
+  named only by a `delete_module` is not covered — it is *deleted*, out of a
+  release that still has it — and that is reported both ways round: as a module
+  nothing loads, and as an instruction deleting something the target still
+  carries. The whole-application instructions divide the same way:
+  `add_application` covers what arrives, `remove_application` what leaves, and
+  `restart_application` both.
+
+  What counts as a gap, and so as a non-zero exit: a module that changed or was
+  added and that no instruction loads; one that was removed and that no
+  instruction deletes; one a `delete_module` names that is still in the target
+  build; a module that moved but that the application's own `.app` does not name,
+  which `systools_rc` cannot resolve object code for and so no instruction can
+  carry; an instruction whose shape is not one `:systools` accepts, which
+  `systools_rc` refuses as a `bad_instruction` before it translates anything, so
+  the edge produces no relup at all and the instruction covers nothing; no entry
+  at all for the from-version; and an application whose modules moved while its
+  version did not, since `:systools` consults no appup for an application that
+  did not change and so no instruction anywhere could carry that code.
+
+  An instruction is credited only once its *whole shape* is legal rather than by
+  its leading elements, and the shapes it is checked against are deliberately no
+  wider than `:systools`': being narrower costs a report about an instruction
+  that was in fact fine, being wider would let an unusable appup be pronounced
+  complete.
+
+  Coverage is the state the script *leaves* each module in rather than membership
+  of a loaded set and a removed set, and the low-level `load` and `remove` that
+  the high-level instructions translate into count, since they can be written by
+  hand. A module the same edge both loads and removes is reported rather than
+  resolved: which one wins depends on the order `:systools` translates the
+  instructions into, and that is not the order they are written in — it hoists
+  dependency-connected instructions past independent ones.
+
+  A module defined by more than one instruction is a gap too. `:systools` refuses
+  it as `muldef_module` before producing anything, and an application-level
+  instruction counts through its expansion, so `restart_application` beside an
+  explicit `update` of one of that application's own modules is refused.
+
+  "Every module of the application" means the `.app` resource's `modules` list
+  rather than the beams on disk, because that is what `:systools` expands a
+  whole-application instruction over — so a `restart_application` does not cover
+  a changed beam the `.app` does not name, and that mismatch is reachable in an
+  ordinary build, since a project supplying its own `modules:` list keeps it.
+
+  What is reported and is deliberately *not* a gap: a module an instruction
+  mentions that did not change. It is usually a leftover naming the wrong
+  module — and where it is, the module that really did change is covered by
+  nothing and fails on its own account, so nothing is lost by not failing twice.
+  An instruction that loads a module whose code is identical is inert, and a
+  pipeline should not go red for something that cannot go wrong.
+
+  Nothing at all is said about an edge that ends by restarting the emulator:
+  module-level instructions are moot when the code is going to be loaded from
+  scratch by a new VM. Which edges those are is `systools_rc`'s answer rather
+  than a reading of the appup's own ordering, and the two differ — a
+  `restart_emulator` is moved to the end of the script wherever the appup wrote
+  it, and a `restart_new_emulator` on the way *down* is rewritten into one. That
+  exemption is per application: a restart supplied by an application `--app` did
+  not name, or inserted for an ERTS change, is not visible to a check that reads
+  no `.rel`, and coverage is then reported for an edge that would have restarted.
+  `mix castle.relup` is what decides restarts properly.
+
+  A module's fingerprint is `:beam_lib.md5/1` together with its persisted
+  attributes, and not a digest of the file bytes. A release's beams are stripped
+  and rebuilt from a subset of their chunks, so a release's copy of a module is a
+  different sequence of bytes from the `_build` copy of identical code, and a byte
+  digest would report the whole application as changed; the md5 is stable across
+  that stripping, which is what lets the baseline be a stripped release while the
+  target is an unstripped build. The md5 alone is not enough either — it covers
+  the code and, in `:beam_lib`'s own words, "compilation date and other
+  attributes are not included", so two modules differing only in an explicit
+  `@vsn` share one. Those attributes are loaded with the module and readable
+  through `module_info/1`, and an explicit `@vsn` is exactly what hot-upgrade
+  code carries. The attribute list survives stripping unchanged, so pairing the
+  two adds sensitivity without adding noise: a `@doc` change still moves nothing
+  and still needs no instruction.
+
+  A beam with no `Attr` chunk at all is compared on its md5 alone rather than
+  refused. Such a module loads and reports no attributes, so that is what it is
+  compared by — and `:beam_lib.strip/1` produces them, so refusing would have
+  left the check unable to run against a dependency somebody had stripped that
+  way.
+
+  A script element that is itself a list is spliced into the script, exactly as
+  `:systools` splices it. `appup(4)` does not document the shape, but
+  `systools_rc` accepts one level of it, so a nested instruction counts towards
+  coverage and a nested `restart_emulator` really does exempt the edge.
+
+  The check is deliberately not part of `mix precommit`: it needs a baseline,
+  and precommit has not got one.
+
+  Three things it refuses rather than reports, because absence is a meaningful
+  answer here and a spurious absence would exit zero: a library directory it
+  cannot read — a mistyped baseline, most obviously, which no earlier step
+  validates — an application directory with no `ebin` in it, and an entry named
+  for the application that is not a directory at all, where nothing else in the
+  library directory is. Each would otherwise make the application look as though
+  the transition added or removed it, which needs no appup and passes.
 
 ### Changed
 

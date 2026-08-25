@@ -11,6 +11,17 @@ defmodule Forecastle.UpgradeTest do
 
   Distribution runs without epmd (see the fixture's `rel/vm.args.eex`), so no
   daemon needs to be running on the host for this to work.
+
+  It is also where the failure the whole upgrade-tooling design rests on is
+  pinned rather than asserted as a mechanism. The fixture's appup is
+  deliberately incomplete: `Sample.Counter` and `Sample.Unmentioned` are the same
+  module twice over, both carrying a compile-time version tag, and only the first
+  is named in `appup.exs`. `:systools.make_relup/4` cannot see that - it checks
+  for an *entry* matching the from-version, never for coverage of the modules
+  that actually moved - so the relup generates, `bin/castle install` exits 0, and
+  one of the two processes goes on serving calls from the code that was loaded
+  before. `design/upgrade-tooling.md` §1.1 and §3.5 in ausimian/castle, and
+  [#25](https://github.com/ausimian/forecastle/issues/25).
   """
 
   use Forecastle.ReleaseCase
@@ -59,6 +70,7 @@ defmodule Forecastle.UpgradeTest do
       env_marker: rpc!(deploy, "IO.puts(Sample.env_marker())"),
       release_env: rpc!(deploy, "IO.puts(inspect(Sample.release_env()))"),
       counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
+      unmentioned: rpc!(deploy, "IO.puts(inspect(Sample.Unmentioned.info()))"),
       os_pid: launcher!(deploy, ["pid"]),
       releases: castle!(deploy, ["releases"]),
       releases_file?: File.exists?(Path.join(deploy, "releases/RELEASES")),
@@ -79,6 +91,13 @@ defmodule Forecastle.UpgradeTest do
     installed =
       Map.merge(installed, %{
         counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
+        unmentioned: rpc!(deploy, "IO.puts(inspect(Sample.Unmentioned.info()))"),
+        # Where the code path would find that module *now*, which is not where
+        # the process is running from. "New code sits on disk, reachable,
+        # unused" is the whole of §1.1, and this is the half of it an assertion
+        # about the running process cannot show on its own.
+        unmentioned_object:
+          rpc!(deploy, "IO.puts(elem(:code.get_object_code(Sample.Unmentioned), 2))"),
         os_pid: launcher!(deploy, ["pid"]),
         greeting: rpc!(deploy, "IO.puts(Sample.greeting())"),
         releases: castle!(deploy, ["releases"]),
@@ -151,6 +170,13 @@ defmodule Forecastle.UpgradeTest do
 
     test "starts the version that was built", %{booted: booted} do
       assert booted.counter == ~s({"#{@from}", 0})
+
+      # The other half of the pair, so that the stale-code test below is a
+      # comparison between two versions of this module rather than an assertion
+      # that it once said something. Both answers are the from-version at boot:
+      # the state the process was initialised with, and the code serving the
+      # call.
+      assert booted.unmentioned == ~s({"#{@from}", "#{@from}"})
     end
   end
 
@@ -221,6 +247,49 @@ defmodule Forecastle.UpgradeTest do
 
     test "preserves the state of the running process", %{installed: installed} do
       assert installed.counter == ~s({"#{@to}", 3})
+    end
+
+    test "leaves a changed module the appup does not mention running the old code",
+         %{booted: booted, installed: installed} do
+      # The failure the whole of the upgrade tooling exists to catch, demonstrated
+      # rather than described. `Sample.Counter` and `Sample.Unmentioned` are the
+      # same module twice: both are supervised GenServers, both carry a
+      # compile-time version tag, both differ between the two builds, and both
+      # export a `code_change/3` that sets the tag to whatever the *new* code
+      # says. The only difference between them is that `appup.exs` names the
+      # first and says nothing about the second.
+      #
+      # `:systools.make_relup/4` checks for an entry matching the from-version,
+      # never for coverage of the modules that moved, so it generated this relup
+      # without complaint. Everything downstream then reported success: `unpack`,
+      # `install` and `commit` all exited 0, which is what `castle!/3` raising
+      # otherwise would have said, and the install announced the version change.
+      assert installed.output =~ "Now running #{@to} (previously #{@from})."
+
+      # And yet one of the two processes moved and the other did not.
+      assert booted.counter =~ ~s("#{@from}")
+      assert booted.unmentioned == ~s({"#{@from}", "#{@from}"})
+
+      assert installed.counter =~ ~s("#{@to}")
+
+      # Both halves of the answer, because they say different things and only
+      # the second is the §1.1 claim. The state's tag being unmoved says
+      # `code_change/3` was never called, which is what "no instruction reached
+      # this module" looks like; the *code's* tag being unmoved says this
+      # process is executing the old copy of the module, which is what "still
+      # the version that was loaded before, serving calls" means. A version that
+      # loaded the new code without a `code_change` would satisfy the first and
+      # fail the second.
+      assert installed.unmentioned == ~s({"#{@from}", "#{@from}"}),
+             "the unmentioned module was upgraded, so this fixture no longer demonstrates " <>
+               "the incomplete-appup failure - check that appup.exs still names only " <>
+               "Sample.Counter"
+
+      # And the other half of "new code sits on disk, reachable, unused": the
+      # code path the running system resolves this module through is already the
+      # new release's, so the next restart loads it underneath a system nobody
+      # was upgrading.
+      assert installed.unmentioned_object =~ "sample-#{@to}"
     end
 
     test "does not restart the VM", %{booted: booted, installed: installed} do

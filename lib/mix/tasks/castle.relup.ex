@@ -208,7 +208,7 @@ defmodule Mix.Tasks.Castle.Relup do
 
   @impl Mix.Task
   def run(command_line_args) do
-    ensure_systools!()
+    Forecastle.Appup.ensure_systools!()
 
     args = parse!(command_line_args)
 
@@ -256,7 +256,7 @@ defmodule Mix.Tasks.Castle.Relup do
   @spec plan_transitions!(binary(), [binary()], [binary()], [binary()], [binary()]) ::
           {charlist(), list(), list()}
   def plan_transitions!(target_path, hot_ups, hot_downs, restart_ups, restart_downs) do
-    ensure_systools!()
+    Forecastle.Appup.ensure_systools!()
 
     target = read_rel!(target_path)
     froms = read_froms!(hot_ups ++ hot_downs ++ restart_ups ++ restart_downs, target)
@@ -265,16 +265,6 @@ defmodule Mix.Tasks.Castle.Relup do
       plan_transitions(target, froms, hot_ups, hot_downs, restart_ups, restart_downs)
 
     plan
-  end
-
-  # Elixir prunes unused OTP applications from the build's code path, which would
-  # otherwise leave :systools - and :systools_relup, which answers whether an
-  # appup covers a transition - unavailable in projects that don't already depend
-  # on :sasl.
-  defp ensure_systools! do
-    Mix.ensure_application!(:sasl)
-    {:ok, _started} = :application.ensure_all_started(:sasl)
-    :ok
   end
 
   # `parse/2` discards anything it does not recognise, which for a task whose
@@ -749,31 +739,24 @@ defmodule Mix.Tasks.Castle.Relup do
   ## Whether an appup covers a transition
 
   # Answered the way `systools_relup` answers it, so that `auto`'s judgement and
-  # the relup `:systools` would then generate cannot disagree. What its
-  # `get_script_from_appup/5` does, in OTP 28.3's `sasl-4.3`:
+  # the relup `:systools` would then generate cannot disagree. `Forecastle.Appup`
+  # is where the reading and the matching live, and where the account of what
+  # `get_script_from_appup/5` does is kept - it is shared with
+  # `mix castle.appup`, which has to ask about the same file, keyed by the same
+  # from-version, and reach the same answer.
   #
-  #   - it reads `<app_dir>/<app>.appup`, where `app_dir` holds the *target*
-  #     release's copy of the application. So the appup that decides an edge is
-  #     the new version's, and its entries are keyed by the version being
-  #     upgraded from - see `appup_file/2`.
-  #   - it takes the `up` list for an upgrade and the `dn` list for a downgrade.
-  #     Hence the direction: the two lists are independent, and a from-version in
-  #     one need not be in the other.
-  #   - it selects the entry with `appup_search_for_version/2`, *not* by string
-  #     equality. A from-version given as a charlist matches by term equality;
-  #     one given as a **binary** is a regular expression, run against the
-  #     from-version with `re:run/3` and accepted only when the whole match is
-  #     the from-version itself. That function is exported for reuse ("Used by
-  #     release_handler:find_script/4. Also used by kernel, stdlib and sasl
-  #     tests"), so it is called here rather than reimplemented, and a regex
-  #     from-version resolves exactly as the upgrade will resolve it.
+  # What is decided here rather than there is the *file*: `<app_dir>/<app>.appup`
+  # where `app_dir` holds the **target** release's copy of the application, which
+  # is the directory `:systools` resolves it to for this transition. So the appup
+  # that decides an edge is the new version's, keyed by the version being
+  # upgraded from.
   #
   # `nil` means covered. Anything else is the phrase that says what was missing.
   defp appup_gap(direction, app, target, from_vsn) do
     file = appup_file(app, target)
 
-    case appup_entries(file, direction) do
-      {:ok, entries} -> entry_gap(entries, from_vsn, direction, file)
+    case Forecastle.Appup.read(file) do
+      {:ok, appup} -> entry_gap(appup, from_vsn, direction, file)
       {:error, gap} -> gap
     end
   end
@@ -785,29 +768,10 @@ defmodule Mix.Tasks.Castle.Relup do
     Path.join([lib_dir(target.path), "#{app}-#{target.apps[app]}", "ebin", "#{app}.appup"])
   end
 
-  defp appup_entries(file, direction) do
-    case :file.consult(to_charlist(file)) do
-      {:ok, [{_appup_vsn, up, down}]} when is_list(up) and is_list(down) ->
-        {:ok, if(direction == :up, do: up, else: down)}
+  defp entry_gap(appup, from_vsn, direction, file) do
+    entries = Forecastle.Appup.entries(appup, direction)
 
-      {:ok, _terms} ->
-        {:error, "#{shorten(file)} cannot be read as an appup"}
-
-      {:error, :enoent} ->
-        {:error, "there is no appup at #{shorten(file)}"}
-
-      {:error, reason} ->
-        {:error, "#{shorten(file)} could not be read: #{inspect(reason)}"}
-    end
-  end
-
-  defp entry_gap(entries, from_vsn, direction, file) do
-    # Through `apply/3`, as `:systools.make_relup/4` is, and for the same reason:
-    # `:sasl` is not a dependency, so neither module is on the code path this is
-    # compiled against.
-    args = [to_charlist(from_vsn), entries]
-
-    case apply(:systools_relup, :appup_search_for_version, args) do
+    case Forecastle.Appup.script(entries, from_vsn) do
       {:ok, _script} -> nil
       :error -> missing_entry(direction, file, from_vsn)
     end
@@ -823,19 +787,11 @@ defmodule Mix.Tasks.Castle.Relup do
 
   defp shorten(path), do: Path.relative_to_cwd(path)
 
-  # The applications the project is taken to own the appups for: its own, plus
-  # every child of an umbrella. Everything else in the release is something
-  # whose upgrade instructions, if it has any, were written for somebody else's
-  # transitions.
-  defp project_apps do
-    umbrella =
-      case Mix.Project.apps_paths() do
-        nil -> []
-        paths -> Map.keys(paths)
-      end
-
-    Enum.reject([Mix.Project.config()[:app] | umbrella], &is_nil/1)
-  end
+  # The applications the project is taken to own the appups for. In
+  # `Forecastle.Appup` because `mix castle.appup` defaults to the same set, and
+  # two answers to "which appups are ours" that could drift apart is one more
+  # than this pair of tasks can have.
+  defp project_apps, do: Forecastle.Appup.project_apps()
 
   # For the message only - the decision above rests on ownership alone. That is
   # why `Mix.Project.deps_apps/0`, which loads and caches the whole dependency

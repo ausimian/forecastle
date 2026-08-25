@@ -1211,9 +1211,13 @@ defmodule Forecastle.Baseline do
   # the answer is 32 bytes. The digest is not a security claim - it identifies a
   # tarball, and nothing here defends against one crafted to collide with
   # another.
+  #
+  # `File.stream!/2` with the byte count and no modes: the three-argument form
+  # taking modes *before* the byte count is deprecated as of Elixir 1.20, and the
+  # two-argument form has meant this since 1.16 - well under the `~> 1.18` floor.
   defp digest(path) do
     path
-    |> File.stream!([], 1_048_576)
+    |> File.stream!(1_048_576)
     |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
     |> :crypto.hash_final()
     |> Base.encode16(case: :lower)

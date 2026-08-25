@@ -10,14 +10,17 @@ upgrades. This includes:
   - Adding a `bin/castle` command for unpacking and installing releases, alongside
     the standard Mix launcher.
 
-Additionally, `Forecastle` ships with an appup compiler and a mix task for relup
-generation. The task is `mix castle.relup`, named for `Castle` rather than for
-the package that implements it, because where the build-time code lives is a
-packaging decision and what a developer types is not.
+Additionally, `Forecastle` ships with an appup compiler and two mix tasks:
+`mix castle.relup`, which generates a relup, and `mix castle.appup`, which
+checks that an appup actually covers the modules that changed. Both are named
+for `Castle` rather than for the package that implements them, because where the
+build-time code lives is a packaging decision and what a developer types is not.
 
 The compiler is named for neither package. It is `mix compile.appup`, reached
-through the project's `:compilers` list rather than invoked by name, so there is
-no `mix castle.appup`.
+through the project's `:compilers` list rather than invoked by name. So the two
+similar names are two different jobs: `mix compile.appup` *writes* the appup into
+`ebin` from the source you committed, and `mix castle.appup` *reads* it back and
+says whether it covers the modules that moved.
 
 ## Installation
 
@@ -281,6 +284,103 @@ off for some environments, leave `:appup` in `:compilers` and let the `:appup` k
 be `nil` - the output is removed and nothing further is reported. Taking the
 compiler out of `:compilers` instead stops it running, and an output an earlier
 build wrote stays where it is.
+
+## Checking the Appup
+
+The compiler cannot tell you whether your appup is *right*, because it only ever
+sees one version of your code. Nothing else will tell you either:
+`:systools.make_relup/4` fails when an appup has no **entry** for the version
+being upgraded from, but it does not - and cannot - notice that an entry is
+**incomplete**.
+
+That matters more than it sounds. If `MyApp.A` and `MyApp.B` both changed and
+your appup mentions only `A`, the relup generates, the upgrade succeeds,
+`release_handler` swaps the code path, and `B` is still running the code that was
+loaded before. The new code is on disk, on the code path, and unused - until the
+next restart loads it underneath a system nobody was upgrading.
+
+`mix castle.appup` is the check for that:
+
+```shell
+> mix castle.appup --from tar:artifacts/myapp-1.0.0.tar.gz
+myapp 1.0.0 -> 1.1.0
+  upgrade from 1.0.0
+    MyApp.B changed, and no instruction loads it
+  downgrade to 1.0.0
+    MyApp.B changed, and no instruction loads it
+```
+
+It exits non-zero when it finds a gap, so it can be a pipeline gate. It writes
+nothing at all.
+
+**What it does not do** is tell you the appup is *valid*. It asks whether the
+appup names everything that moved; it does not ask whether the resulting script
+is one `:systools` will accept. Those are different questions, and only the first
+needs help - `make_relup/4` already fails loudly on a malformed script, at the
+moment a relup is generated. What it cannot see is an entry that is
+*incomplete*, which is the whole of what this is for. Some invalid scripts are
+reported here anyway, because an instruction `:systools` will not accept covers
+nothing and crediting one would overstate coverage, but that is a side effect
+rather than a promise: a green run means your coverage is complete, not that a
+relup will build.
+
+`--from` takes a [baseline spec](#naming-the-baseline), the same grammar
+`mix castle.relup` takes, so the baseline can be an assembled release, the
+artefact that shipped or a git ref. `--to` defaults to **the current build**, so
+the everyday question - *what has changed since 1.0.0, and does my appup cover
+it?* - needs only `mix compile`; give it a spec to compare two things that
+already exist, and then nothing is compiled at all, so comparing two shipped
+artefacts does not need your working tree to build. `--app` may be repeated and
+defaults to your own applications plus any umbrella children, so naming a
+dependency is how you check its appup.
+
+Each direction is reported on its own, because an appup's upgrade and downgrade
+lists are independent. What makes the run fail:
+
+- a module that changed or was added and that no instruction *loads*, or was
+  removed and that no instruction *deletes*. What an instruction does matters
+  rather than which module it names: `update`, `load_module` and `add_module`
+  load, while `delete_module` removes and loads nothing;
+- a module a `delete_module` names that is still in the target build, which
+  would take working code out of the running release;
+- a module the same edge both loads and removes. Which one wins depends on the
+  order `:systools` translates the instructions into, and that is not the order
+  you wrote them in — it hoists dependency-connected instructions past
+  independent ones — so this is reported rather than guessed at;
+- a module defined by more than one instruction, which `:systools` refuses
+  outright as `muldef_module`. An application-level instruction counts, so a
+  `restart_application` beside an explicit `update` of one of that application's
+  own modules is refused;
+- a module that moved but that the application's own `.app` does not list, which
+  `:systools` cannot resolve object code for, so no instruction could carry it;
+- an instruction whose shape is not one `:systools` accepts. It is refused as a
+  `bad_instruction` before anything is translated, so the edge produces no relup
+  at all - and it covers nothing here, whatever module it appears to name;
+- no entry at all for the from-version;
+- an application whose modules moved while its version did not, since
+  `release_handler` compares versions and no appup is consulted for an
+  application that did not change.
+
+A module an instruction names that *did not* change is reported and does not fail
+the run. It is usually a leftover naming the wrong module - and then the module
+that really changed is covered by nothing and fails on its own account - while an
+instruction that loads identical code is simply inert.
+
+Nothing is reported about an edge that ends by restarting the emulator:
+module-level instructions are moot when a new VM is going to load the code from
+scratch. That exemption is per application, so a restart supplied by an
+application `--app` did not name, or inserted for an ERTS change, is not visible
+here; `mix castle.relup` is what decides restarts, having both releases to do it
+with.
+
+Modules are compared by `:beam_lib.md5/1` together with their persisted
+attributes, not by a digest of the file bytes - so a stripped release compares
+correctly against an unstripped build, a change to a `@doc` is not mistaken for a
+change to the code, and a change to an explicit `@vsn`, which the md5 does not
+cover, is not missed.
+
+The check is deliberately not part of `mix precommit`: it needs a baseline, and
+`precommit` has not got one.
 
 ## Relup Generation
 
