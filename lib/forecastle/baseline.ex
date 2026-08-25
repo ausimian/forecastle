@@ -605,7 +605,7 @@ defmodule Forecastle.Baseline do
   defp project_prefix!(git, spec) do
     case out(git, ["rev-parse", "--show-prefix"], File.cwd!()) do
       {output, 0} ->
-        String.trim(output)
+        trim_eol(output)
 
       {_output, status} ->
         Mix.raise(
@@ -838,7 +838,7 @@ defmodule Forecastle.Baseline do
     case out(git, ["rev-parse", "--git-common-dir"], File.cwd!()) do
       {output, 0} ->
         output
-        |> String.trim()
+        |> trim_eol()
         |> Path.expand(File.cwd!())
         |> Path.join("worktrees/*")
         |> Path.wildcard()
@@ -1227,6 +1227,18 @@ defmodule Forecastle.Baseline do
   defp out(executable, args, cd) do
     System.cmd(executable, args, cd: cd, env: [])
   end
+
+  # Git terminates its output with a newline; the newline is the terminator and
+  # everything before it is the value. `String.trim/1` does not know the
+  # difference, and where the value is a *path* that matters: a directory whose
+  # name begins with a space is legal, so a prefix of ` odd/` would come back as
+  # `odd/` - and the resolver would then look for the project somewhere else, or
+  # find a genuinely different sibling and build that instead. Since the prefix is
+  # in the cache key, two different projects would also key the same.
+  #
+  # A sha or a `true`/`false` can go through `String.trim/1` safely and does,
+  # because neither can contain whitespace and the sha is pattern-checked besides.
+  defp trim_eol(output), do: String.trim_trailing(output, "\n")
 
   # For a command whose output is only ever quoted in a diagnostic, where the two
   # streams together are what explains the failure.

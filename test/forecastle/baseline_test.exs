@@ -466,6 +466,19 @@ defmodule Forecastle.BaselineTest do
                "project=apps/a/"
     end
 
+    test "builds a project whose directory name begins with a space", ctx do
+      # Legal, and git reports it verbatim in `--show-prefix`. Trimming that
+      # prefix rather than its terminator loses the space, and the resolver then
+      # looks for the project at `spaced/` - somewhere it is not, or, in a
+      # repository that also has a `spaced/`, somewhere it is but should not be.
+      output = resolve!(ctx.spaced_project, "ref:#{ctx.tag}", :compile)
+
+      assert File.dir?(Path.join(field(output, "lib_dir"), "baseline_fixture/ebin"))
+
+      assert File.read!(Path.join(entry_of(field(output, "lib_dir")), "context.txt")) =~
+               "project= spaced/"
+    end
+
     test "finds the modules whatever Mix called the build directory", ctx do
       # The nested project sets `build_per_environment: false`, so Mix writes to
       # `shared` rather than to the environment's name. That is the *baseline
@@ -740,6 +753,12 @@ defmodule Forecastle.BaselineTest do
     # therefore one baseline cache.
     for app <- ~w(a b), do: write_project!(Path.join(nested, "apps/" <> app))
 
+    # And one whose directory name begins with a space, which is legal and which
+    # git reports verbatim in `--show-prefix`. Trimming that prefix rather than
+    # its terminator loses the space, and the resolver then looks for the project
+    # somewhere it is not - or finds a different one and builds that.
+    write_project!(Path.join(nested, " spaced"))
+
     git!(nested, ["init", "--quiet"])
     git!(nested, ["add", "."])
     git!(nested, ["commit", "--quiet", "-m", "the baseline, one level down"])
@@ -753,6 +772,7 @@ defmodule Forecastle.BaselineTest do
      shallow: shallow,
      nested_project: nested_project,
      siblings: %{a: Path.join(nested, "apps/a"), b: Path.join(nested, "apps/b")},
+     spaced_project: Path.join(nested, " spaced"),
      shared_build: Path.join(dir, "shared-build"),
      tag: "baseline",
      sha: sha,
@@ -787,7 +807,7 @@ defmodule Forecastle.BaselineTest do
   # test order, so a test that assumed a warm or cold cache left by another would
   # be a test that passes on some seeds.
   defp cold_cache(ctx) do
-    for repo <- [ctx.repo, ctx.shallow, ctx.nested_project] do
+    for repo <- [ctx.repo, ctx.shallow, ctx.nested_project, ctx.spaced_project] do
       File.rm_rf!(Path.join(repo, "_build/castle"))
     end
 
