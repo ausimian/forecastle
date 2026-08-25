@@ -764,6 +764,35 @@ defmodule Forecastle.AppupCheckTest do
     end
   end
 
+  describe "a .app whose modules list systools will not accept" do
+    test "is reported even on an edge that restarts the emulator", ctx do
+      # A fact about the resource file rather than about an edge, so it has to be
+      # said independently of the restart exemption. It used to be left implicit -
+      # a malformed value reads as an empty inventory, an empty inventory resolves
+      # nothing, so every module that moved was reported and the run could not
+      # exit zero - but that reasoning is emergent, and it leaked twice: once
+      # through a partially malformed list whose surviving atoms could still be
+      # covered, and once here, where `unresolvable/2` never runs at all.
+      #
+      # `systools_make:check_item/2` refuses the whole value as a `bad_param`
+      # before it builds anything, so the edge is dead whichever direction is
+      # asked about.
+      malform_inventory!(ctx.to, @to)
+      restart = [:restart_emulator]
+      set_appup!(ctx.to, @to, restart, restart)
+
+      {output, status} = appup(both(ctx))
+
+      assert status != 0, "a malformed modules list passed on a restart edge:\n\n#{output}"
+      assert output =~ "has no modules list that :systools will accept"
+      assert output =~ "bad_param"
+
+      # The restart is still reported for what it is, rather than the resource
+      # finding swallowing it.
+      assert output =~ "the emulator restarts on this edge"
+    end
+  end
+
   describe "an application whose version did not move" do
     test "is reported, because :systools would consult no appup for it", ctx do
       # Made by rewriting the target's `.app`, which is where the version an
@@ -923,6 +952,38 @@ defmodule Forecastle.AppupCheckTest do
       assert status != 0, "a baseline under a glob-metacharacter path passed:\n\n#{output}"
       assert output =~ "Sample.Unmentioned changed, and no instruction loads it"
       refute output =~ "an application added between the two"
+    end
+
+    test "a build holding only a hyphenated sibling reports the application absent", ctx do
+      # The application is gone from the target and the only thing left matching
+      # the `sample-` prefix belongs to something else. Treating that as the match
+      # meant refusing over a missing `sample.app` in somebody else's directory,
+      # which names the wrong problem: `sample` is simply not in this build, and
+      # `:systools` covers that with `remove_application` without an appup.
+      #
+      # The `.app` resource settles identity, and a directory holding *another*
+      # application's resource is the evidence that this one is absent rather than
+      # unfinished - which is the distinction that keeps the incomplete-build
+      # refusal alive beside this.
+      real = Path.join(ctx.to, "lib/sample-#{@to}")
+      moved = Path.join(ctx.to, "lib/moved-aside")
+      decoy = Path.join(ctx.to, "lib/sample-decoy-9.9.9")
+
+      File.rename!(real, moved)
+      File.mkdir_p!(Path.join(decoy, "ebin"))
+      File.write!(Path.join(decoy, "ebin/something_else.app"), "")
+
+      on_exit(fn ->
+        File.rm_rf!(decoy)
+        File.rename!(moved, real)
+      end)
+
+      {output, status} = appup(both(ctx))
+
+      assert status == 0, "an absent application was not read as absent:\n\n#{output}"
+      assert output =~ "an application removed between the two"
+      refute output =~ "could not be read as an application resource"
+      refute output =~ "holds no ebin directory"
     end
 
     test "a hyphenated sibling application does not make the name ambiguous", ctx do
@@ -1126,6 +1187,19 @@ defmodule Forecastle.AppupCheckTest do
     assert module in modules, "#{module} was not in the .app modules list to begin with"
 
     write_term!(file, {:application, app, Keyword.put(opts, :modules, modules -- [module])})
+  end
+
+  # A `modules` list with a non-atom in it, which `systools_make:a_list_p/1`
+  # refuses whole rather than filtering. One bad element is all it takes, and the
+  # rest of the list staying valid is the point: a surviving subset is what used
+  # to be covered.
+  defp malform_inventory!(release, vsn) do
+    file = Path.join(ebin(release, vsn), "sample.app")
+    {:ok, [{:application, app, opts}]} = consult_and_restore!(file)
+
+    modules = Keyword.fetch!(opts, :modules)
+
+    write_term!(file, {:application, app, Keyword.put(opts, :modules, modules ++ [~c"bad"])})
   end
 
   defp remove_appup!(release, vsn, app) do

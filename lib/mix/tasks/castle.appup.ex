@@ -486,43 +486,76 @@ defmodule Mix.Tasks.Castle.Appup do
       {[], others} ->
         not_directories!(others, build, app)
 
-      {[dir], _others} ->
-        ebin!(dir, build, app)
-
-      {many, _others} ->
-        one_of!(many, build, app)
+      {dirs, _others} ->
+        which!(dirs, build, app)
     end
   end
 
-  # More than one directory matched the name, which is usually two copies of the
-  # application and sometimes not one at all. The `.app` resource settles it:
-  # `<dir>/ebin/<app>.app` is named for the application rather than for the
-  # directory, so of `foo-1.0.0` and `foo-bar-1.0.0` only the first holds a
-  # `foo.app`. Used to *disambiguate* rather than to discover, because discovery
-  # by resource would make an application directory with no `ebin` in it look
-  # absent again, which is the refusal `ebin!/3` exists for.
-  defp one_of!(dirs, build, app) do
-    case Enum.filter(dirs, &File.regular?(Path.join([&1, "ebin", "#{app}.app"]))) do
-      [dir] ->
-        ebin!(dir, build, app)
-
-      _none_or_several ->
-        Mix.raise(
-          "#{app} is in #{build.describe} more than once: " <>
-            Enum.map_join(dirs, ", ", &inspect(Path.relative_to_cwd(&1))) <>
-            ", and no one of them holds an ebin/#{app}.app that would settle which. Which " <>
-            "the upgrade would use depends on the code path, so this refuses rather than " <>
-            "choosing."
-        )
+  # **The name says which directories to look at; the `.app` resource says which
+  # of them is this application.** `<dir>/ebin/<app>.app` is named for the
+  # application rather than for the directory, so it is the only exact answer -
+  # the prefix is not one, because a version may itself contain a hyphen
+  # (`sample-1.0.0-rc.1`) and so may an application name. Two things fall out of
+  # asking it rather than trusting the name:
+  #
+  #   * `foo-1.0.0` beside `foo-bar-1.0.0`, checking `foo`, is no longer
+  #     ambiguous. Only the first holds a `foo.app`.
+  #   * a build holding *only* `foo-bar-1.0.0`, checking `foo`, is `foo` being
+  #     **absent** rather than a broken build. Reading it as a match meant
+  #     refusing over a missing `foo.app` in somebody else's directory, which
+  #     names the wrong problem.
+  #
+  # The incomplete-build refusal survives that, and it has to - it is what stops
+  # a half-written build reading as an application this transition removed, which
+  # needs no appup and exits zero. So a candidate that holds no `.app` **at all**
+  # is still an incomplete build and still refused; only one holding somebody
+  # else's is passed over. That is the difference between "this directory is not
+  # ours" and "this directory is ours and unfinished", and it is decidable.
+  defp which!(dirs, build, app) do
+    case Enum.split_with(dirs, &ours?(&1, app)) do
+      {[dir], _theirs} -> Path.join(dir, "ebin")
+      {[_ | _] = ours, _theirs} -> ambiguous!(ours, build, app)
+      {[], theirs} -> absent_or_incomplete!(theirs, build, app)
     end
+  end
+
+  defp ours?(dir, app), do: File.regular?(Path.join([dir, "ebin", "#{app}.app"]))
+
+  # Nothing that matched the name holds this application's resource. Either they
+  # all belong to other applications - in which case this one really is absent -
+  # or one of them is an unfinished build of this one, which is a refusal. A
+  # directory that holds some other application's `.app` is evidence of the
+  # former; one with no `ebin`, or an `ebin` with no `.app` in it at all, is
+  # evidence of the latter.
+  defp absent_or_incomplete!(dirs, build, app) do
+    case Enum.reject(dirs, &someone_elses?/1) do
+      [] -> nil
+      [dir | _rest] -> ebin!(dir, build, app)
+    end
+  end
+
+  defp someone_elses?(dir) do
+    ebin = Path.join(dir, "ebin")
+
+    File.dir?(ebin) and
+      case File.ls(ebin) do
+        {:ok, names} -> Enum.any?(names, &(Path.extname(&1) == ".app"))
+        {:error, _reason} -> false
+      end
+  end
+
+  defp ambiguous!(dirs, build, app) do
+    Mix.raise(
+      "#{app} is in #{build.describe} more than once: " <>
+        Enum.map_join(dirs, ", ", &inspect(Path.relative_to_cwd(&1))) <>
+        ", each holding an ebin/#{app}.app. Which of them the upgrade would use depends on " <>
+        "the code path, so this refuses rather than choosing."
+    )
   end
 
   # Matched exactly rather than by prefix alone: `sample-` cannot match
-  # `sample_dep-0.1.0`. The prefix is not on its own a version delimiter,
-  # though - an application name is an atom and `foo-bar` is a legal one, even
-  # though no generator produces it - so where the prefix catches more than one
-  # directory, `one_of!/3` narrows by the `.app` resource rather than refusing a
-  # build that is perfectly clear about which is which.
+  # `sample_dep-0.1.0`. The prefix is only ever a *candidate* filter, though -
+  # see `which!/3` for what settles it, and why the prefix cannot.
   #
   # The two halves are kept apart rather than filtered down to one, because
   # *whether anything matched at all* is a different question from *whether what
@@ -582,9 +615,16 @@ defmodule Mix.Tasks.Castle.Appup do
   # inventory is what `:systools` can *resolve*. See `read_inventory!/2`.
   defp side!(ebin, app) do
     resource = Path.join(ebin, "#{app}.app")
-    {vsn, inventory} = app_resource!(resource, app)
+    {vsn, inventory, listed?} = app_resource!(resource, app)
 
-    %{vsn: vsn, inventory: inventory, modules: modules!(ebin), ebin: ebin, resource: resource}
+    %{
+      vsn: vsn,
+      inventory: inventory,
+      listed?: listed?,
+      modules: modules!(ebin),
+      ebin: ebin,
+      resource: resource
+    }
   end
 
   defp compare(app, from_ebin, to_ebin) do
@@ -593,11 +633,47 @@ defmodule Mix.Tasks.Castle.Appup do
 
     heading = "#{app} #{from.vsn} -> #{to.vsn}"
 
-    if from.vsn == to.vsn do
-      %{heading: heading, sections: [unmoved(from.vsn, from.modules, to.modules)]}
-    else
-      %{heading: heading, sections: edges(app, from, to)}
-    end
+    sections =
+      if from.vsn == to.vsn do
+        [unmoved(from.vsn, from.modules, to.modules)]
+      else
+        edges(app, from, to)
+      end
+
+    %{heading: heading, sections: [resources(from, to) | sections]}
+  end
+
+  # **A `.app` whose `modules` value `:systools` will not accept, said once about
+  # the build rather than left to emerge from the coverage question.** It is a
+  # fact about the resource file and not about an edge, so it is reported here -
+  # per side, before any direction is considered - and that is what makes it
+  # independent of the restart exemption.
+  #
+  # It used to be left implicit: a malformed value reads as an empty inventory,
+  # an empty inventory resolves nothing, so every module that moved was reported
+  # by `unresolvable/2` and the run could not exit zero. That reasoning was
+  # sound but *emergent*, and it leaked twice - once through a partially
+  # malformed list whose surviving atoms could still be covered, and once through
+  # a direction whose script restarts the emulator, where `unresolvable/2` never
+  # runs at all. Two leaks in one property is the property being the wrong place
+  # to put the guarantee, so the guarantee is stated directly instead.
+  #
+  # `systools_make:check_item/2` is still not reimplemented here. This is the one
+  # key this task actually reads, and it is reported rather than validated in
+  # general: the version is already refused if it is not a string, and nothing
+  # else in the resource is consulted.
+  defp resources(from, to) do
+    findings =
+      for side <- [from, to], not side.listed? do
+        {:gap,
+         "#{Path.relative_to_cwd(side.resource)} has no modules list that :systools will " <>
+           "accept - it is missing, or it is not a list of atoms. systools_make refuses that " <>
+           "as a missing_param or a bad_param before it builds anything, and it is what an " <>
+           "application-level instruction expands over, so nothing here can be judged " <>
+           "against it."}
+      end
+
+    %{label: nil, findings: findings}
   end
 
   # An application whose version did not move is one `:systools` will not
@@ -1097,7 +1173,9 @@ defmodule Mix.Tasks.Castle.Appup do
   defp app_resource!(file, app) do
     case :file.consult(to_charlist(file)) do
       {:ok, [{:application, ^app, opts}]} when is_list(opts) ->
-        {fetch_vsn!(opts, file), inventory(opts)}
+        {inventory, listed?} = inventory(opts)
+
+        {fetch_vsn!(opts, file), inventory, listed?}
 
       {:ok, terms} ->
         Mix.raise(
@@ -1123,13 +1201,19 @@ defmodule Mix.Tasks.Castle.Appup do
   # is supposed to rule out: it errs toward *more* findings precisely so a
   # malformed resource cannot buy a clean bill of health, and a surviving subset
   # broke that.
+  #
+  # The second element says whether `:systools` would accept the value at all, so
+  # that `resources/2` can report it as the fact about the build that it is,
+  # rather than leaving it to be inferred from an empty inventory downstream.
   defp inventory(opts) do
     case List.keyfind(opts, :modules, 0) do
       {:modules, modules} when is_list(modules) ->
-        if Enum.all?(modules, &is_atom/1), do: MapSet.new(modules), else: MapSet.new()
+        if Enum.all?(modules, &is_atom/1),
+          do: {MapSet.new(modules), true},
+          else: {MapSet.new(), false}
 
       _absent_or_malformed ->
-        MapSet.new()
+        {MapSet.new(), false}
     end
   end
 
