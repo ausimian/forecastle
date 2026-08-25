@@ -1394,6 +1394,49 @@ ordering: a module appearing only in somebody else's `DepMods` is never loaded,
 and counting it would turn an exact question into a substring search. Same for
 `{apply, {M, F, A}}`.
 
+### Open: the task reimplements `systools_rc`'s acceptance, piecemeal
+
+**Everything below this heading is one recurring class, and the next instance of
+it should be met with the structural fix rather than a seventh patch.** The
+pattern is always the same: `systools_rc` enforces a rule about the *script* that
+this task's per-instruction model does not know about, so a script `:systools`
+refuses outright can be pronounced covered — a false pass, which is the one
+answer a gate must never give. Six instances so far, every one found by review
+rather than by the suite:
+
+| Refused by | Where `:systools` decides it |
+| --- | --- |
+| `bad_instruction` (shape) | `check_syntax/1` → `check_op/1` |
+| `bad_instruction` (a leftover nested list) | same, after `expand_script/1` splices one level |
+| `muldef_module` | `translate_dependent_instrs/4`'s digraph |
+| `removed_application_present` | `translate_application_instrs/3` |
+| `bad_op_before_point_of_no_return` | `split_script/1` + `check_script/2` |
+| a `modules` value that is not a list of atoms | `systools_make:check_item/2` |
+
+Each is now checked, each check is measured against OTP 28.3, and each was
+individually small. But the list is not closed by construction — `sync_nodes`
+shapes, `mnesia_backup`, and purge validation on the low-level forms are all
+still unmodelled — so the honest reading is that *enumerating* what `:systools`
+refuses is the wrong approach.
+
+**The structural answer is to ask `systools_rc` instead of modelling it**, which
+is the doctrine `Forecastle.Appup` already follows for
+`appup_search_for_version/2` and states in its own moduledoc: call the function
+`systools` uses rather than reimplement it. Concretely, call
+`systools_rc:translate_scripts/4` with the two sides' real inventories and report
+any `{error, systools_rc, Reason}` as a gap. That is exact by construction and
+cannot drift.
+
+**What makes it a decision rather than an obvious win** is that
+`translate_scripts/4` needs `#application` records, and `systools.hrl` is
+internal — not under `include/`, and not reachable from Elixir. Building the
+record positionally coupled this task to an internal 16-field layout, which would
+break loudly on an OTP that changes it. Loudly is better than silently, but
+"loudly" here means the *gate* stops working for whoever upgrades OTP first.
+Weigh that against six known holes and an open tail before choosing. Do not
+half-do it: a fallback that tries `translate_scripts/4` and silently drops back
+to the enumeration on error would combine the coupling with the holes.
+
 **An instruction is credited only once its whole shape is one `:systools`
 accepts, and that is the structural answer to a class of finding that came back
 twice.** Reading an instruction by its head and the position of its module was
