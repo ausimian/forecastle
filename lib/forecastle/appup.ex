@@ -539,6 +539,35 @@ defmodule Forecastle.Appup do
     end
   end
 
+  @doc """
+  The `remove_application` instructions naming the application whose appup this
+  is, which `:systools` refuses as `removed_application_present`.
+
+  **In the situation this module is asked about, such an instruction is *always*
+  refused, which is what makes reporting it exact rather than a guess.**
+  `translate_application_instrs/3` throws `removed_application_present` when the
+  application named is still in the release being moved *to* - and an appup is
+  only consulted for an application present in both builds, since one missing from
+  either is an `add_application` or a `remove_application` that `:systools`
+  supplies itself and that no appup covers. Measured in both directions on OTP
+  28.3: refused when the application is present in the target, accepted only when
+  it is absent, which is the case this never sees.
+
+  So it covers nothing - `effects/4` credits it with no removal at all - and it is
+  handed back here for a caller to report. Crediting it was a false pass with a
+  sharp edge: an application whose last module was removed has an empty target
+  inventory, so this one instruction appeared to cover the only removal there was,
+  raised no deleted-but-present finding, and let the run exit zero on an edge
+  `make_relup` cannot build.
+  """
+  @spec self_removals([term()], atom()) :: [term()]
+  def self_removals(script, app) do
+    for instruction <- script, self_removal?(instruction, app), do: instruction
+  end
+
+  defp self_removal?({:remove_application, app}, app), do: true
+  defp self_removal?(_instruction, _app), do: false
+
   # `systools_rc:expand_script/1`, in the two things it does and in the order it
   # does them - which is the part that matters, because a flatten followed by a
   # rewrite is not the same function and the difference is a false pass.
@@ -723,6 +752,9 @@ defmodule Forecastle.Appup do
   defp touches(instruction, app, load_inventory, removal_inventory) do
     cond do
       not legal?(instruction) ->
+        []
+
+      self_removal?(instruction, app) ->
         []
 
       whole_application?(instruction, app) ->

@@ -363,6 +363,31 @@ defmodule Forecastle.AppupCheckTest do
       assert output =~ "Sample.Unmentioned is both loaded and removed by this edge"
     end
 
+    test "a remove_application of this application is refused by systools, and said to be", ctx do
+      # `translate_application_instrs/3` throws `removed_application_present` when
+      # the application named is still in the release being moved to - and it
+      # always is here, since an appup is only consulted for an application in
+      # both builds. Measured in both directions on OTP 28.3: refused when the
+      # application is present in the target, accepted only when it is absent,
+      # which is the case this never sees.
+      #
+      # Crediting it covered nothing visible in the ordinary case, but had a sharp
+      # edge: an application whose last module was removed has an empty target
+      # inventory, so this one instruction appeared to cover the only removal
+      # there was and the run exited zero on an edge make_relup cannot build.
+      self_removal = [{:remove_application, :sample}]
+      set_appup!(ctx.to, @to, self_removal, self_removal)
+
+      {output, status} = appup(both(ctx))
+
+      assert status != 0, "a self-removing appup passed the check:\n\n#{output}"
+      assert output =~ "removes the application this appup belongs to"
+      assert output =~ "removed_application_present"
+
+      # And it is credited with nothing, so what it appeared to cover is reported.
+      assert output =~ "Sample.Unmentioned changed, and no instruction loads it"
+    end
+
     test "a module defined by two instructions is refused by systools, and said to be", ctx do
       # `systools_rc` builds a dependency graph of the instructions carrying
       # `DepMods` and throws `{muldef_module, Mod}` for a module with more than
@@ -898,6 +923,28 @@ defmodule Forecastle.AppupCheckTest do
       assert status != 0, "a baseline under a glob-metacharacter path passed:\n\n#{output}"
       assert output =~ "Sample.Unmentioned changed, and no instruction loads it"
       refute output =~ "an application added between the two"
+    end
+
+    test "a hyphenated sibling application does not make the name ambiguous", ctx do
+      # `sample-` cannot match `sample_dep-0.1.0`, but the prefix is not on its
+      # own a version delimiter: an application name is an atom and `foo-bar` is a
+      # legal one, so a build holding both `foo` and `foo-bar` matched twice and
+      # the ambiguity refusal fired on a build that is perfectly clear.
+      #
+      # The `.app` resource settles it, since it is named for the application
+      # rather than for the directory - `sample-other-9.9.9/ebin` holds no
+      # `sample.app`. Built as a directory rather than by assembling a second
+      # release, since only the naming has to be odd.
+      other = Path.join(ctx.from, "lib/sample-other-9.9.9")
+      File.mkdir_p!(Path.join(other, "ebin"))
+      File.write!(Path.join(other, "ebin/sample_other.app"), "")
+      on_exit(fn -> File.rm_rf!(other) end)
+
+      {output, status} = appup(both(ctx))
+
+      assert status != 0, "an incomplete appup passed the check:\n\n#{output}"
+      assert output =~ "sample #{@from} -> #{@to}"
+      refute output =~ "more than once"
     end
 
     test "an application directory with no ebin is refused, not read as absent", ctx do

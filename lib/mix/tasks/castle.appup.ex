@@ -490,17 +490,39 @@ defmodule Mix.Tasks.Castle.Appup do
         ebin!(dir, build, app)
 
       {many, _others} ->
+        one_of!(many, build, app)
+    end
+  end
+
+  # More than one directory matched the name, which is usually two copies of the
+  # application and sometimes not one at all. The `.app` resource settles it:
+  # `<dir>/ebin/<app>.app` is named for the application rather than for the
+  # directory, so of `foo-1.0.0` and `foo-bar-1.0.0` only the first holds a
+  # `foo.app`. Used to *disambiguate* rather than to discover, because discovery
+  # by resource would make an application directory with no `ebin` in it look
+  # absent again, which is the refusal `ebin!/3` exists for.
+  defp one_of!(dirs, build, app) do
+    case Enum.filter(dirs, &File.regular?(Path.join([&1, "ebin", "#{app}.app"]))) do
+      [dir] ->
+        ebin!(dir, build, app)
+
+      _none_or_several ->
         Mix.raise(
           "#{app} is in #{build.describe} more than once: " <>
-            Enum.map_join(many, ", ", &inspect(Path.relative_to_cwd(&1))) <>
-            ". Which of them the upgrade would use depends on the code path, so this " <>
-            "refuses rather than choosing."
+            Enum.map_join(dirs, ", ", &inspect(Path.relative_to_cwd(&1))) <>
+            ", and no one of them holds an ebin/#{app}.app that would settle which. Which " <>
+            "the upgrade would use depends on the code path, so this refuses rather than " <>
+            "choosing."
         )
     end
   end
 
   # Matched exactly rather than by prefix alone: `sample-` cannot match
-  # `sample_dep-0.1.0`, because an application name cannot contain a hyphen.
+  # `sample_dep-0.1.0`. The prefix is not on its own a version delimiter,
+  # though - an application name is an atom and `foo-bar` is a legal one, even
+  # though no generator produces it - so where the prefix catches more than one
+  # directory, `one_of!/3` narrows by the `.app` resource rather than refusing a
+  # build that is perfectly clear about which is which.
   #
   # The two halves are kept apart rather than filtered down to one, because
   # *whether anything matched at all* is a different question from *whether what
@@ -710,12 +732,15 @@ defmodule Mix.Tasks.Castle.Appup do
   #     28.3: a script of `[restart_emulator, {update, M, …}, {load_module, M,
   #     …}]` still fails with `{muldef_module, M}`, while `restart_emulator`
   #     with a single instruction is fine.
+  #   * a `removed_application_present`, from `translate_application_instrs/3`
+  #     under `translate_independent_instrs/4`.
   #
   # Coverage is the thing a restart really does excuse, and it stays inside the
   # branch.
   defp findings(script, direction, app, old, new) do
     refusals(script) ++
       multiply_defined(script, app, new.inventory) ++
+      self_removals(script, app) ++
       if Appup.restarts_emulator?(script, direction) do
         [
           {:note,
@@ -839,6 +864,22 @@ defmodule Mix.Tasks.Castle.Appup do
   # write - `{restart_application, App}` beside an explicit `{update, M, …}` for
   # one of that application's own modules is refused, measured - and because the
   # coverage question alone would call such a module covered and exit zero.
+  # A `remove_application` naming the application whose appup this is.
+  # `:systools` refuses it as `removed_application_present` whenever the
+  # application is still in the release being moved to - and it always is here,
+  # since an appup is only consulted for an application present in both builds.
+  # See `Forecastle.Appup.self_removals/2` for why crediting it was a false pass
+  # rather than merely generous.
+  defp self_removals(script, app) do
+    for instruction <- Appup.self_removals(script, app) do
+      {:gap,
+       "#{inspect(instruction)} removes the application this appup belongs to, which is " <>
+         "still in the other build. systools_rc refuses that as " <>
+         "removed_application_present, so no relup is produced for this edge, and it " <>
+         "covers nothing here."}
+    end
+  end
+
   defp multiply_defined(script, app, inventory) do
     for module <- Appup.multiply_defined(script, app, inventory) do
       {:gap,
