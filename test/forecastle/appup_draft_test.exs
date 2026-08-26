@@ -209,6 +209,24 @@ defmodule Forecastle.AppupDraftTest do
       assert text =~ "declares more than one behaviour that migrates state"
     end
 
+    test "asks for the arity the running process will call, not just the new one's" do
+      # Raised in review. `sys:change_code` is handled by the behaviour the
+      # process was *started* under, so a process still running as a
+      # `gen_server` asks for `code_change/3` - of the module that was just
+      # loaded, which now declares `:gen_statem` and may export only
+      # `code_change/4`. Asking the destination's arity alone let that through.
+      only_four = %{Mod => MapSet.new([{:code_change, 4}])}
+      old = side(%{Mod => {"a", [behaviour: [GenServer]]}}, nil, only_four)
+      new = side(%{Mod => {"b", [behaviour: [:gen_statem]]}}, nil, only_four)
+
+      assert [{{:update, Mod, {:advanced, []}}, comments}] = instructions({old, new})
+
+      text = Enum.join(comments, " ")
+
+      assert text =~ "exports NO code_change/3"
+      refute text =~ "exports NO code_change/4"
+    end
+
     test "does not ask a supervisor for one at all" do
       # `supervisor:system_code_change/4` re-reads `init/1` and calls no
       # `code_change`, so the export says nothing about a supervisor update.
@@ -315,6 +333,24 @@ defmodule Forecastle.AppupDraftTest do
       assert Enum.join(up, " ") =~ "was: a process with migratable state"
       assert Enum.join(down, " ") =~ "now: a process with migratable state"
       assert Enum.join(up, " ") =~ "yours to decide"
+    end
+
+    test "a change of callback contract within the advanced row is a role change" do
+      # `GenServer` and `:gen_statem` are the same row of the table but not the
+      # same contract: one calls `code_change/3` and the other `code_change/4`.
+      # Comparing the row alone collapsed that into silence, which is the case a
+      # reviewer found - and it is the one where the running process and the
+      # newly loaded module disagree about what will be called.
+      old = side(%{Mod => {"a", [behaviour: [GenServer]]}})
+      new = side(%{Mod => {"b", [behaviour: [:gen_statem]]}})
+
+      assert [{{:update, Mod, {:advanced, []}}, comments}] = instructions({old, new})
+
+      text = Enum.join(comments, " ")
+
+      assert text =~ "changed behaviour role between the two builds"
+      assert text =~ "was: a process with migratable state, through code_change/3"
+      assert text =~ "now: a process with migratable state, through code_change/4"
     end
 
     test "says nothing when only the spelling of the behaviour changed" do

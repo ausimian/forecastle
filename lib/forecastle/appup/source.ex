@@ -164,8 +164,18 @@ defmodule Forecastle.Appup.Source do
   # once the AST has read as a literal, so nothing arbitrary is ever run - and
   # comparing the two answers means a disagreement between them is a refusal
   # rather than a rewrite of a file one of them misread.
+  #
+  # **The bytes evaluated are the bytes that were checked, not the path.**
+  # Raised in review. `Code.eval_file/1` opens the file again, so a source
+  # replaced between the read and this call would have the literal check applied
+  # to the old bytes and arbitrary code run from the new ones - and the term
+  # mismatch below would refuse *after* those side effects, which is not the
+  # promise this module makes. `Code.eval_file/1` is defined as
+  # `eval_string(File.read!(file), [], file: file, line: 1)`, so passing the
+  # captured source with the path as metadata is the same evaluation with the
+  # second read taken out; measured, including the file and line a raise reports.
   defp confirm(path, source, ast, term) do
-    case Code.eval_file(path) do
+    case Code.eval_string(source, [], file: path, line: 1) do
       {^term, []} ->
         {:literal, %{path: path, source: source, ast: ast, term: term}}
 

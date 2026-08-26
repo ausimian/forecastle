@@ -192,6 +192,39 @@ defmodule Forecastle.AppupSourceTest do
     end
   end
 
+  describe "what gets evaluated" do
+    test "a source that computes is never evaluated", ctx do
+      # The promise the module makes: evaluation happens only after the AST has
+      # read as a literal, so nothing arbitrary is run on a file it refused. The
+      # marker is the discriminator - a refusal that had evaluated first would
+      # still return `{:computed, _}`, so asserting the return value alone would
+      # assert nothing about this.
+      marker = Path.join(ctx.tmp_dir, "side-effect")
+      path = write!(ctx, ~s|File.write!("#{marker}", "ran")\n{~c"1.0.0", [], []}\n|)
+
+      assert {:computed, _phrase} = Source.read(path)
+      refute File.exists?(marker), "a computed appup was evaluated while being classified"
+    end
+
+    test "a literal is evaluated as the bytes that were parsed", ctx do
+      # `Code.eval_file/1` would open the path a second time, so the literal
+      # check would apply to one set of bytes and the evaluation to another -
+      # and a replacement that computes would run before the term comparison
+      # could refuse it. Raised in review. The evaluation now takes the captured
+      # source with the path as metadata, which `Code.eval_file/1` is defined as
+      # doing anyway, so there is no second read left to race.
+      #
+      # What is asserted here is the observable half: the term handed back is
+      # the term the captured bytes denote.
+      source = ~s|{~c"1.0.0", [{~c"0.9", [{:load_module, Sample}]}], []}\n|
+      path = write!(ctx, source)
+
+      assert {:literal, literal} = Source.read(path)
+      assert literal.source == source
+      assert {literal.term, []} == Code.eval_string(source, [], file: path, line: 1)
+    end
+  end
+
   describe "rendering a first appup" do
     test "reads back as the term it drafted" do
       assert {:ok, text} = Source.render("0.1.1", @up, @down)

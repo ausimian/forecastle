@@ -2041,6 +2041,16 @@ module and is not visible in a beam — so a module declaring `:gen_statem` and
 `GenServer` and exporting only `code_change/4` passed silently while a
 `gen_server` process using it would fail. The ambiguity itself is now said too.
 
+**The arity is the *old* side's and the export is the *new* side's**, which a
+later round found. `sys:change_code` is handled by the behaviour the process was
+*started* under, so the old code decides whether `code_change/3` or
+`code_change/4` is called and the newly loaded module is what it is called on. A
+module going from `GenServer` to `:gen_statem` is therefore asked for both, and
+the role comparison distinguishes them: within the advanced row, roles are
+compared by which arity the behaviour calls, so `GenServer` for `:gen_server` is
+the same role spelled two ways and says nothing while `GenServer` for
+`:gen_statem` is a different callback contract and does.
+
 **The `Attr`-to-`Draft` boundary is pinned against real beams**, in
 `appup_draft_test.exs`'s "against real beams read through Forecastle.Build". Every
 other case in that suite hands `Draft` a side built by hand, so none of them
@@ -2121,8 +2131,17 @@ to a `<<>>` as well; and an integer outside `0..255` falls through rather than
 having Elixir's truncation rule reproduced by hand. Both are narrower than
 `Macro.quoted_literal?/1`, which is the direction this is allowed to be wrong in.
 
-The term that is merged into comes from `Code.eval_file/1` — the same call the
-`:appup` compiler makes, so it is what the build will produce — and it is
+**The bytes evaluated are the bytes that were checked**, which a later round
+found: `Code.eval_file/1` opens the path a second time, so a source replaced in
+between would have the literal check applied to the old bytes and arbitrary code
+run from the new ones — and the term comparison would refuse only *after* those
+side effects, which is not the promise this module makes. That function is
+defined as `eval_string(File.read!(file), [], file: file, line: 1)`, so passing
+the captured source with the path as metadata is the same evaluation with the
+second read taken out. Measured, including the file and line a raise reports.
+
+The term that is merged into is therefore the evaluated term — what the `:appup`
+compiler will produce from the same bytes — and it is
 compared against what `to_term/1` read. A disagreement is a refusal rather than a
 rewrite. The evaluation happens only after the AST has read as a literal, so
 nothing arbitrary is ever run.

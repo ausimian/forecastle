@@ -166,22 +166,23 @@ defmodule Forecastle.Appup.Draft do
   end
 
   defp changed(module, old, new) do
-    behaviours = Build.behaviours(new, module)
+    was = Build.behaviours(old, module)
+    now = Build.behaviours(new, module)
 
     {instruction, comments} =
-      case classify(behaviours) do
+      case classify(now) do
         {:supervisor, match} ->
-          {{:update, module, :supervisor}, supervisor_comment(module, match, behaviours)}
+          {{:update, module, :supervisor}, supervisor_comment(module, match, now)}
 
         {:advanced, matches} ->
           {{:update, module, {:advanced, []}},
-           advanced_comment(module, matches, behaviours) ++ callback(module, matches, new)}
+           advanced_comment(module, matches, now) ++ callback(module, matches, was, new)}
 
         :plain ->
-          {{:load_module, module}, plain_comment(module, behaviours)}
+          {{:load_module, module}, plain_comment(module, now)}
       end
 
-    annotate(instruction, comments ++ role_change(module, old, new), module, new)
+    annotate(instruction, comments ++ role_change(module, was, now), module, new)
   end
 
   # The decision table, as one function, so that the two questions asked of it -
@@ -245,19 +246,32 @@ defmodule Forecastle.Appup.Draft do
   # the running process asks for is decided at run time - so exporting one of the
   # two is not enough, and checking only the first was a silent pass. Raised in
   # review.
-  defp callback(module, matches, new) do
-    case Enum.reject(arities(matches), &Build.exports?(new, module, :code_change, &1)) do
+  #
+  # **The arity is the *running* process's and the export is the *new* module's,
+  # which are two different sides.** Raised in a later round. `sys:change_code`
+  # is handled by the behaviour the process was started under - the old code's -
+  # and that is what decides whether `code_change/3` or `code_change/4` is
+  # called; the module it is called *on* is the one just loaded. So a module
+  # going from `GenServer` to `:gen_statem` is asked for both, because a process
+  # still running as a `gen_server` will ask for `code_change/3` of a module that
+  # may only export the `gen_statem` one. Asking only the destination's arity let
+  # that through.
+  defp callback(module, matches, was, new) do
+    behaviours = Enum.uniq(matches ++ (present(was, @advanced) || []))
+
+    case Enum.reject(arities(behaviours), &Build.exports?(new, module, :code_change, &1)) do
       [] -> []
-      missing -> missing_callback(module, matches, missing)
+      missing -> missing_callback(module, behaviours, missing)
     end
   end
 
-  defp missing_callback(module, matches, missing) do
+  defp missing_callback(module, behaviours, missing) do
     [
       "",
-      "#{inspect(module)} exports NO #{callbacks(missing)}, which #{list(matches)} needs and",
-      "makes optional. release_handler calls sys:change_code, which calls it, so this",
-      "instruction fails the install with undef until one is written. Elixir's `use",
+      "#{inspect(module)} exports NO #{callbacks(missing)}, which #{list(behaviours)} needs",
+      "and makes optional. release_handler calls sys:change_code, which the *running*",
+      "process's behaviour handles - so the arity is the old code's and the module it is",
+      "called on is the new one. Without it the install fails with undef. Elixir's `use",
       "GenServer` injects one; @behaviour alone and Erlang callback modules do not."
     ]
   end
@@ -285,12 +299,14 @@ defmodule Forecastle.Appup.Draft do
   # Refusing the whole entry over one such module would take the other twenty
   # with it.
   defp role_change(module, old, new) do
-    was = role(Build.behaviours(old, module))
-    now = role(Build.behaviours(new, module))
+    was = role(old)
+    now = role(new)
 
-    # Compared by row of the table rather than by behaviour, so a module that
-    # swaps `GenServer` for `:gen_server` - the same role spelled the other way -
-    # says nothing.
+    # Compared by row of the table *and*, within the advanced row, by which
+    # `code_change` arity the behaviour calls - so `GenServer` for `:gen_server`
+    # is the same role spelled the other way and says nothing, while `GenServer`
+    # for `:gen_statem` is a different callback contract and does. Comparing the
+    # row alone collapsed the second into silence; raised in review.
     if was == now do
       []
     else
@@ -308,14 +324,18 @@ defmodule Forecastle.Appup.Draft do
 
   defp role(behaviours) do
     case classify(behaviours) do
-      {kind, _match} -> kind
+      {:supervisor, _match} -> :supervisor
+      {:advanced, matches} -> {:advanced, arities(matches)}
       :plain -> :plain
     end
   end
 
   defp phrase(:supervisor), do: "a supervisor"
-  defp phrase(:advanced), do: "a process with migratable state"
   defp phrase(:plain), do: "neither a supervisor nor a process with migratable state"
+
+  defp phrase({:advanced, arities}) do
+    "a process with migratable state, through #{callbacks(arities)}"
+  end
 
   # **An instruction that loads a module the new side's `.app` does not name
   # cannot work, and the draft has to say so rather than leave it to be met
