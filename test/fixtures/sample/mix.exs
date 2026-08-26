@@ -46,14 +46,50 @@ defmodule Sample.MixProject do
     ]
   end
 
+  # A `fn -> ... end` thunk, which is the shape Castle's own documentation
+  # prescribes and which this fixture needs for a concrete reason: Mix loads
+  # `mix.exs` to get the project configuration, and it does that *before* the
+  # path dependency on Forecastle has been compiled. Capturing
+  # `&Forecastle.pre_assemble/1` is fine at that point - a remote capture does
+  # not load the module - but *calling* `Forecastle.steps/1`, which the `custom`
+  # steps mode does, raises `UndefinedFunctionError`. Mix evaluates the thunk
+  # later, when the release is being built and the dependency is there.
   defp releases do
     [
-      sample:
+      sample: fn ->
         [
           include_executables_for: executables(),
           steps: steps()
-        ] ++ configuration()
+        ] ++ configuration() ++ upgrade_from()
+      end
     ]
+  end
+
+  # Switched by the test suite so that the fixture can be assembled with the
+  # relup generated during the build. The option is set directly rather than
+  # through `Castle.customize/2` on purpose: Forecastle reads it out of the
+  # release options itself, and this half has to be testable without Castle's
+  # API - the same reason `steps/0` below names the two step functions rather
+  # than calling `Castle.customize/1`.
+  #
+  # Four shapes, because what the option does when it names nothing is as much
+  # part of the contract as what it does when it names something:
+  #
+  #   - unset: the key is absent altogether, which is the documented no-op
+  #   - "empty": `upgrade_from: []`, a request naming nothing, which is refused
+  #   - "bare:<spec>": one spec as a string rather than a list, also refused
+  #   - anything else: a `|`-separated list of specs
+  #
+  # `|` rather than a comma because a spec is a path and a comma is a legal
+  # character in one; `System.cmd/3` cannot pass an empty value, which is why
+  # the empty list has a word of its own.
+  defp upgrade_from do
+    case System.get_env("SAMPLE_UPGRADE_FROM") do
+      nil -> []
+      "empty" -> [upgrade_from: []]
+      "bare:" <> spec -> [upgrade_from: spec]
+      specs -> [upgrade_from: String.split(specs, "|", trim: true)]
+    end
   end
 
   # Switched by the test suite so that the fixture can be assembled as a project
@@ -99,13 +135,61 @@ defmodule Sample.MixProject do
     end
   end
 
-  # Switched by the test suite so that the same fixture can be assembled both
-  # with and without Forecastle, and the two launchers compared.
+  # Switched by the test suite: the same fixture is assembled with Forecastle,
+  # without it so the two launchers can be compared, and with a caller-supplied
+  # step of its own between `:assemble` and `:tar`.
+  #
+  # The default spells the step functions out rather than taking them from
+  # `Forecastle.steps/1`, and the list is what that function builds: this is the
+  # arrangement a project ends up with, written by hand, so a splice that put a
+  # step on the wrong side of `:assemble` could not hide behind the same function
+  # producing both sides of the comparison.
   defp steps do
-    if System.get_env("SAMPLE_STEPS") == "mix" do
-      [:assemble, :tar]
-    else
-      [&Forecastle.pre_assemble/1, :assemble, &Forecastle.post_assemble/1, :tar]
+    case System.get_env("SAMPLE_STEPS") do
+      "mix" ->
+        [:assemble, :tar]
+
+      # The one mode that goes through `Forecastle.steps/1` deliberately, because
+      # where the splice puts relup generation is exactly what it is for. Every
+      # other mode spells the list out so that a splice bug cannot produce both
+      # sides of the comparison.
+      "custom" ->
+        Forecastle.steps([:assemble, &Sample.MixProject.remove_dep_appup/1, :tar])
+
+      _default ->
+        [
+          &Forecastle.pre_assemble/1,
+          :assemble,
+          &Forecastle.post_assemble/1,
+          &Forecastle.generate_relup/1,
+          :tar
+        ]
     end
+  end
+
+  @doc """
+  A caller-supplied step of the kind `mix release` documents: one that changes
+  the assembled tree between `:assemble` and `:tar`.
+
+  It removes the dependency's appup from the assembled release, which is what
+  `auto` consults to decide whether that application's version change can be
+  hot. So a relup generated *before* this step runs says the transition is a hot
+  upgrade, and one generated *after* it says `restart_emulator` - which is what
+  makes the placement observable in the packaged relup rather than only in the
+  steps list.
+  """
+  def remove_dep_appup(%Mix.Release{path: path} = release) do
+    appups = Path.wildcard(Path.join(path, "lib/sample_dep-*/ebin/sample_dep.appup"))
+
+    # Loudly, so that a fixture which stopped removing anything - a renamed
+    # dependency, a changed layout - fails the test that rests on it rather than
+    # quietly making its assertion about nothing.
+    if appups == [] do
+      raise "no sample_dep appup to remove under #{path}"
+    end
+
+    Enum.each(appups, &File.rm!/1)
+
+    release
   end
 end

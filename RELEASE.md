@@ -560,6 +560,64 @@
   for the application that is not a directory at all, where nothing else in the
   library directory is. Each would otherwise make the application look as though
   the transition added or removed it, which needs no appup and passes.
+- A release may now name the versions it can be upgraded from, with an
+  `upgrade_from:` release option, and a single `mix release` then produces a
+  tarball with the relup already in it. The value is a list of the same baseline
+  specs `mix castle.relup` takes — `rel:`, `tar:` or `ref:` — and each of them
+  gets both directions of the transition, generated under `auto`.
+
+  This removes a double build that was mandatory and undocumented. Generating a
+  relup needs the target release's `<name>.rel` and its populated `lib/`, and
+  those exist only after `:assemble` — so a relup destined for a release meant
+  building it, running `mix castle.relup` against what came out, and building it
+  again to package the result, with a mutable file in the project root as the
+  hand-off between the two. `Forecastle.generate_relup/1` runs between
+  post-assembly and `:tar`, where everything it needs exists, and writes the
+  relup straight into the version path.
+
+  `Castle.customize/1` places that step for you, immediately before `:tar` and
+  after any function step of the project's own — `mix release` documents such a
+  step as the way to customise an assembled release, so generating before it
+  would describe a tree that `:tar` then packaged differently. Where a release
+  has no `:tar` step, generation is appended last. A project spelling its steps
+  out by hand needs `&Forecastle.generate_relup/1` immediately before `:tar`.
+
+  What it does when it is given nothing, or something malformed, is part of the
+  contract rather than an accident. Omitting `upgrade_from:` is a no-op and
+  assembles exactly as before. An `upgrade_from: []` is refused — it is a build
+  asking for an upgrade plan and naming nothing to generate one against, and
+  assembling that in silence would produce a release with no relup and no
+  complaint. A malformed spec, and a repeated `upgrade_from:`, are both refused
+  before `:assemble` runs, and so is a baseline that cannot be resolved at all —
+  a `tar:` that is not there, a `ref:` that does not build — so a corrected retry
+  has no half-built release in its way. A baseline that resolves to no release,
+  or to a directory holding none of the applications it names, fails the build
+  naming what could not be read, rather than reading as a transition in which
+  everything was removed.
+
+  What is left that can only fail *after* assembly is reading the target's `.rel`
+  and asking `:systools` for a script, both of which need the assembled release.
+  Such a failure leaves the release on disk without a relup, and the build is
+  retried with `--overwrite`: `mix release` decides whether to run its steps
+  before any step is reached, so a plain retry into a directory that already
+  holds a release assembles nothing, whatever a step would prefer.
+
+  A hand-written `relup` in the project root and `upgrade_from:` together are
+  refused, naming both. They are two upgrade plans for one release and only one
+  can be packaged, so which of them was discarded would be invisible in the
+  assembled release. Hand-written relups are otherwise unchanged, and
+  `mix castle.relup` still covers what this cannot: a target release that already
+  exists rather than one this build is producing, and the `--hot` and `--restart`
+  strategies. Whether anything is rebuilt is a property of the baseline spec in
+  either case — `rel:` and `tar:` name something already built, `ref:` runs that
+  commit's build.
+
+  One tension, accepted: with `ref:`, an ordinary `mix release` triggers a build
+  of a previous version as a side effect. It is opt-in and `tar:` is both fast
+  and the recommended source. Building that commit runs its own `mix.exs`, so a
+  baseline would ask for a baseline of its own — that is refused rather than
+  recursed, and a `mix.exs` naming a `ref:` baseline should leave the option out
+  when `CASTLE_BASELINE` is set in the environment.
 
 ### Changed
 
@@ -780,6 +838,21 @@
 
 ### Fixed
 
+- `mix castle.relup` now refuses a baseline whose version is the version being
+  generated for, naming the file. `:systools` accepts such a pair and generates
+  an entry from the version to itself, and since `release_handler` selects an
+  entry by the version it is upgrading *from* — and will not unpack a version a
+  deployment already has — that entry could never be used, while the run
+  packaged it as the release's upgrade plan without a word. The easiest way to
+  reach it is a release assembled twice into one path with `upgrade_from:`
+  naming that path.
+- `mix castle.relup` no longer announces its upgrade strategy before the relup
+  has been written. The `auto` and `--restart` verdicts are claims about a file,
+  and encoding, opening, writing, closing or renaming can each fail — leaving
+  either no relup or, as the publication contract promises, the previous one. A
+  failed run could therefore report that every transition was a hot upgrade and
+  produce no such relup. The verdict is now printed only once publication has
+  succeeded.
 - Argumentless `bin/castle commit` now uses a dedicated machine result instead
   of matching human-facing text in command output. Its diagnostic can change
   without changing the exit status, and launcher output around the result is

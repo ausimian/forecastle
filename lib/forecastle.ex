@@ -9,11 +9,46 @@ defmodule Forecastle do
   def steps(tasks \\ [:assemble, :tar]) when is_list(tasks) do
     if idx = Enum.find_index(tasks, &match?(:assemble, &1)) do
       {pre, [:assemble | post]} = Enum.split(tasks, idx)
-      pre ++ [&__MODULE__.pre_assemble/1, :assemble, (&__MODULE__.post_assemble/1) | post]
+
+      pre ++
+        [&__MODULE__.pre_assemble/1, :assemble, &__MODULE__.post_assemble/1] ++
+        before_tar(post, &__MODULE__.generate_relup/1)
     else
       tasks
     end
   end
+
+  # Relup generation goes as late as it can while still preceding the packaging,
+  # which is immediately before `:tar` rather than immediately after
+  # post-assembly - and the difference is not cosmetic.
+  #
+  # `mix release` documents a function step between `:assemble` and `:tar` as the
+  # way to customise an assembled release, and such a step can change exactly
+  # what a relup would be generated from: an appup rewritten, a module replaced,
+  # something copied into `lib/`. Generating before it means the relup describes
+  # the tree as it was while `:tar` packages the tree as it became - an upgrade
+  # plan for contents that did not ship, which is the failure this feature exists
+  # to remove rather than to introduce. So every caller step keeps its place and
+  # generation happens after all of them.
+  #
+  # Mix's own `validate_steps!/1` is what makes "before `:tar`" unambiguous: it
+  # allows at most one `:tar` and requires it to come after `:assemble`.
+  # Searching only the steps *after* `:assemble` keeps that true even for a list
+  # Mix is about to refuse.
+  #
+  # With no `:tar` there is no packaging step to precede, so generation is
+  # appended and the relup describes the finished tree. A project that packs its
+  # own archive in a function step - which `Castle.customize/1` warns about
+  # rather than refuses - has to place `generate_relup/1` itself, because nothing
+  # here can tell which of its steps does the packing.
+  #
+  # Written by hand rather than through `Enum`/`List` so that an improper tail
+  # survives: `steps/1` hands a malformed list back for `Mix.Release` to refuse
+  # by name, and an `Enum` error raised out of here instead would name a module
+  # the project never mentioned.
+  defp before_tar([:tar | _rest] = post, step), do: [step | post]
+  defp before_tar([other | post], step), do: [other | before_tar(post, step)]
+  defp before_tar(tail, step), do: [step | tail]
 
   # Nothing here touches configuration. Mix decides which file configures a
   # release at runtime, initialises the providers a project declares, and writes
@@ -30,6 +65,7 @@ defmodule Forecastle do
   # would leave the standard launcher with no configuration to boot from.
   def pre_assemble(%Mix.Release{} = release) do
     release
+    |> stage_baselines()
     |> stage_relup()
     |> create_preboot_scripts()
   end
@@ -42,6 +78,242 @@ defmodule Forecastle do
     |> tap(&copy_relfile/1)
     |> tap(&copy_relup/1)
     |> tap(&warn_unsupported_executables/1)
+  end
+
+  @doc """
+  Generates this release's relup, from the `:upgrade_from` release option.
+
+  Runs after `post_assemble/1` and immediately before `:tar`, which is the one
+  point in a build where everything `:systools` needs exists: `version_path` is
+  there, `<name>.rel` has been written, and `lib/` is populated. So the relup is
+  generated for the release being assembled and written straight into its version
+  path, and the build-generate-rebuild cycle `mix castle.relup` used to require
+  disappears.
+
+  `steps/1` places it *last* of the steps that shape the release - after any
+  function step of the project's own - so that the relup describes the tree that
+  is packaged rather than the tree as it was partway through building it.
+
+  `:upgrade_from` is a list of baseline specs - `rel:`, `tar:` or `ref:`, the
+  grammar `Forecastle.Baseline` documents - naming the releases this one can be
+  upgraded from. Every one of them gets both directions, which is what
+  `mix castle.relup --fromto` does: a relup that cannot be rolled back is not
+  much of an upgrade plan. The strategy is `auto`, which is the task's default
+  too; `mix castle.relup` is still where a build that has to insist on `--hot`
+  or `--restart` goes.
+
+  **Without the option this step does nothing at all**, deliberately and
+  documentedly: a release that says nothing about upgrading is assembled exactly
+  as it was before this existed. An `upgrade_from: []` is not that case - it is a
+  build asking for an upgrade plan and naming nothing to generate one against -
+  and it is refused rather than folded into the same silence.
+
+  A hand-written `relup` in the project root and `:upgrade_from` together are
+  refused rather than ordered by precedence, in `pre_assemble/1` where the
+  refusal costs no build, and here as well so that this step is right on its own.
+  """
+  @spec generate_relup(Mix.Release.t()) :: Mix.Release.t()
+  def generate_relup(%Mix.Release{} = release) do
+    case upgrade_from!(release) do
+      :none ->
+        release
+
+      {:baselines, specs} ->
+        refuse_hand_written_relup!()
+        write_generated_relup!(release, specs)
+        release
+    end
+  end
+
+  # `version_path` is where `release_handler` looks for a relup, and it is what
+  # `:tar` packs, so a relup written here needs no copying afterwards - which is
+  # the whole difference between this and the staged project-root one.
+  #
+  # The target is named the way `:systools` names a release: the `.rel` file
+  # without its extension. It is Mix's own output at this point in the steps
+  # list, so there is nothing here to check that `:assemble` has not already
+  # guaranteed - and a steps list that put this step somewhere else meets
+  # `read_rel!/1` refusing the file it could not read, by name.
+  #
+  # The baselines were resolved in `pre_assemble/1` and are read back from the
+  # options here. Falling back to resolving them now is what keeps this step
+  # right when it is reached without its neighbour; it is not the ordinary path,
+  # and `stage_baselines/1` says why the ordinary path resolves early.
+  defp write_generated_relup!(%Mix.Release{name: name, version_path: vp} = release, specs) do
+    target = Path.join(vp, to_string(name))
+    resolved = staged_baselines(release.options[:forecastle_baselines], specs)
+
+    Forecastle.Relup.generate!(target, specs, specs, resolved, :auto, vp)
+  end
+
+  # The stash is used only where it answers for every spec this step is about to
+  # generate from, and `nil` - resolve now - is the answer everywhere else.
+  #
+  # Two steps and a caller's own function steps run between the resolution and
+  # the use, and a `Mix.Release` is theirs to rewrite: a step that added a
+  # baseline to `upgrade_from:` would leave the map missing it. `generate!/6`
+  # looks specs up with `Map.fetch!/2`, so that arrives as a `KeyError` naming a
+  # map rather than as anything an author could act on - and re-resolving is not
+  # merely the safer branch but the *correct* one, since what the option says now
+  # is what the relup should be generated from.
+  #
+  # It is also the guard for a stash that is not a map at all, which
+  # `stage_baselines/1` cannot leave behind but a caller's step could.
+  defp staged_baselines(resolved, specs) when is_map(resolved) do
+    if Enum.all?(specs, &Map.has_key?(resolved, &1)), do: resolved
+  end
+
+  defp staged_baselines(_resolved, _specs), do: nil
+
+  # Resolving a baseline is the largest thing this feature can fail at, and
+  # `pre_assemble/1` is the last moment at which failing is free.
+  #
+  # A `tar:` that is not there, a `ref:` that does not exist or does not build:
+  # each of those raises, and raising *after* `:assemble` leaves the version
+  # directory behind, because Mix does not tidy up after a step of its own that
+  # raised. The corrected retry then finds that directory, declines to overwrite
+  # it without `--overwrite`, and exits 0 having assembled nothing - a green
+  # pipeline holding the previous artefact. `stage_relup/1` makes the same
+  # argument about the project-root relup, and it is why that check is here too.
+  #
+  # So the whole of resolution happens before `:assemble` and the result is
+  # carried forward. What is left in the late half genuinely has nowhere earlier
+  # to go: reading the target's `.rel` and asking `:systools` for a script both
+  # need the assembled release.
+  #
+  # The key is dropped unconditionally first, for the reason `stage_relup/1`
+  # drops its own: Mix keeps release options it does not recognise, so a project
+  # that had set this one - for whatever reason - would otherwise have its value
+  # used as the resolved baselines.
+  defp stage_baselines(%Mix.Release{options: options} = release) do
+    options = Keyword.delete(options, :forecastle_baselines)
+
+    case upgrade_from!(release) do
+      :none ->
+        %Mix.Release{release | options: options}
+
+      {:baselines, specs} ->
+        # Before resolution rather than after: a build that names two upgrade
+        # plans is refused without paying for a baseline it will not use.
+        refuse_hand_written_relup!()
+
+        resolved = Forecastle.Relup.resolve_baselines!(specs)
+        %Mix.Release{release | options: Keyword.put(options, :forecastle_baselines, resolved)}
+    end
+  end
+
+  # `:none` or a non-empty list, and deliberately no third answer.
+  #
+  # `upgrade_from: []` is a project asking for an upgrade plan and naming nothing
+  # to generate one against - a list read out of the environment, or filtered
+  # down to nothing by a `mix.exs` that computes it. Answering `[]` for that and
+  # for the absent option alike is how such a release would be assembled with no
+  # relup in it and nothing said, which is the one outcome a build asking for an
+  # upgrade plan must not get. So the empty list is a refusal and absence is a
+  # documented no-op, and the two are told apart here rather than anywhere that
+  # would have to remember to.
+  #
+  # `Keyword.get_values/2` rather than `fetch/2`, and more than one occurrence is
+  # a refusal. `Mix.Release` keeps the options it does not recognise in the
+  # keyword list it was given, and `Keyword.merge/2` preserves duplicate keys
+  # *within* the list being merged in - so a release definition assembled by
+  # concatenating lists, which is how the option is most naturally added
+  # alongside others, really can carry two. `fetch/2` would take the first and
+  # discard the rest, which is a build generating an upgrade plan against
+  # baselines the project did not settle on and no word said about the ones
+  # dropped. Repeated switches are refused rather than resolved by precedence in
+  # `mix castle.relup` for the same reason.
+  @spec upgrade_from!(Mix.Release.t()) :: :none | {:baselines, [binary(), ...]}
+  defp upgrade_from!(%Mix.Release{options: options}) do
+    case Keyword.get_values(options, :upgrade_from) do
+      [] ->
+        :none
+
+      [specs] ->
+        baselines!(specs)
+
+      many ->
+        Mix.raise(
+          "the release option upgrade_from: was given #{length(many)} times (" <>
+            Enum.map_join(many, ", ", &inspect/1) <>
+            "), and only one of them would be used. Mix keeps every occurrence of a " <>
+            "release option it does not recognise, so a definition built by joining lists " <>
+            "can carry more than one. Name all the baselines in a single upgrade_from:."
+        )
+    end
+  end
+
+  defp baselines!([]) do
+    Mix.raise(
+      "the release option upgrade_from: names no baselines. It is the list of releases " <>
+        "this one can be upgraded from, and a relup with no transitions in it is not an " <>
+        "upgrade plan. Name at least one baseline, or leave the option out to assemble " <>
+        "without a relup."
+    )
+  end
+
+  defp baselines!(specs) when is_list(specs) do
+    case Enum.reject(specs, &is_binary/1) do
+      [] ->
+        # Parsed rather than merely type-checked, and parsed *here*.
+        # `Forecastle.Baseline.parse!/1` is the grammar and it touches no
+        # filesystem, so an empty spec, a prefix naming no source, and a prefix
+        # with nothing after it are all settleable before `:assemble` has created
+        # anything - which is the whole point of reading the option in
+        # `pre_assemble/1`. Left to `resolve!/2`, they would each fail *after*
+        # assembly, and Mix does not tidy up after a step of its own that raised:
+        # the corrected retry then finds the version directory, declines to
+        # overwrite it, and exits 0 having assembled nothing.
+        #
+        # Resolution deliberately stays where it is. That is the half that
+        # unpacks tarballs and builds commits, and it belongs beside the
+        # generation that needs the target.
+        Enum.each(specs, &Forecastle.Baseline.parse!/1)
+
+        {:baselines, specs}
+
+      not_specs ->
+        Mix.raise(
+          "the release option upgrade_from: takes baseline specs as strings, but " <>
+            Enum.map_join(not_specs, ", ", &inspect/1) <>
+            " is not one. A spec names where a previous release comes from: `rel:` an " <>
+            "assembled release, `tar:` a shipped artefact, `ref:` a git ref, or a bare " <>
+            "path to an assembled release."
+        )
+    end
+  end
+
+  defp baselines!(other) do
+    Mix.raise(
+      "the release option upgrade_from: takes a list of baseline specs, but got " <>
+        "#{inspect(other)}. One baseline is a list of one: upgrade_from: " <>
+        "[\"tar:artifacts/my_app-1.0.0.tar.gz\"]."
+    )
+  end
+
+  # Two upgrade plans for one release, arrived at two ways, and no reason to
+  # prefer either: a hand-written `relup` in the project root is a plan somebody
+  # wrote, `upgrade_from:` is a plan this build would generate, and only one file
+  # can be in the version path. Picking one silently discards the other, and
+  # which one got discarded is invisible in the assembled release - so this
+  # refuses and names both.
+  #
+  # Called from `stage_baselines/1`, where it costs neither a build nor a
+  # baseline, *and* from `generate_relup/1`, so that the step cannot generate
+  # over a hand-written plan if it is ever reached without its neighbour.
+  defp refuse_hand_written_relup! do
+    relup = project_relup()
+
+    if File.exists?(relup) do
+      Mix.raise(
+        "#{relup} and the release option upgrade_from: are both upgrade plans for this " <>
+          "release, and only one of them can be packaged. Remove the relup to generate " <>
+          "one from the baselines, or drop upgrade_from: to package the one that is " <>
+          "already written."
+      )
+    end
+
+    :ok
   end
 
   # Before `:assemble`, deliberately. Checking the relup afterwards meant a

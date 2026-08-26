@@ -71,18 +71,42 @@ both from the same release series.
 
 `Forecastle` integrates into the steps of the release assembly process. It requires
 that the `Forecastle.pre_assemble/1` and `Forecastle.post_assemble/1` functions are
-placed around the `:assemble` step, e.g.:
+placed around the `:assemble` step, with `Forecastle.generate_relup/1` immediately
+before `:tar`, e.g.:
 
 ```elixir
 defp releases do
   [
     myapp: [
       include_executables_for: [:unix],
-      steps: [&Forecastle.pre_assemble/1, :assemble, &Forecastle.post_assemble/1, :tar]
+      steps: [
+        &Forecastle.pre_assemble/1,
+        :assemble,
+        &Forecastle.post_assemble/1,
+        &Forecastle.generate_relup/1,
+        :tar
+      ]
     ]
   ]
 end
 ```
+
+`Castle.customize/1` builds that list for you, through `Forecastle.steps/1`;
+spelling the steps out by hand is only needed where a project wants its own steps
+interleaved with them.
+
+**A step of your own between `:assemble` and `:tar` keeps its place, and relup
+generation happens after it.** `mix release` documents such a step as the way to
+customise an assembled release, so it can change what a relup would be generated
+from — an appup rewritten, something copied into `lib/`. Generating first would
+describe the tree as it was while `:tar` packaged the tree as it became. Where
+there is no `:tar` step, generation is appended last; if you pack your own
+archive in a step of your own, place `&Forecastle.generate_relup/1` before it
+yourself, because nothing here can tell which of your steps does the packing.
+
+`generate_relup/1` does nothing at all unless the release sets `:upgrade_from`,
+so adding it to a release that generates no relup changes nothing and costs
+nothing.
 
 ## Build Time Support
 
@@ -95,6 +119,11 @@ In the pre-assembly step:
   - Any `relup` in the project root is read and checked against the version being
     assembled, so that a stale upgrade plan fails the build rather than being
     packaged as this version's.
+  - A `relup` in the project root **and** an `:upgrade_from` option together are
+    refused, naming both. They are two upgrade plans for one release and only one
+    file can be packaged, so this is a refusal rather than a rule about which
+    wins. A malformed `:upgrade_from` is refused here too — before `:assemble`
+    has created anything, so a corrected retry has nothing in its way.
   - A 'preboot' boot script is created that starts `:sasl`, `:compiler`,
     `:elixir` and `:castle`, and none of the release's own applications. Castle
     boots a temporary VM on this script to work out the configuration of the
@@ -161,6 +190,15 @@ In the post-assembly step:
   - The generated _name.rel_ is copied into the `releases` folder as _name-vsn.rel_,
     which is where `release_handler` looks for it when unpacking a tarball.
   - Any checked `relup` is written into the version path of the release.
+
+### Relup generation
+
+Between post-assembly and `:tar`, `Forecastle.generate_relup/1` generates this
+release's relup from its `:upgrade_from` option and writes it into the version
+path — see *Relup Generation* below. It is the only point in a build where
+everything `:systools` needs exists at once, and `:tar` packs the version
+directory afterwards, so a single `mix release` produces a tarball with its own
+upgrade plan in it.
 
 ## Managing Releases
 
@@ -384,13 +422,102 @@ The check is deliberately not part of `mix precommit`: it needs a baseline, and
 
 ## Relup Generation
 
-`Forecastle` provides the mix task `castle.relup`, which simplifies the generation
-of the relup file. Assuming you have two _unpacked_ releases e.g. `0.1.0` and
-`0.1.1` and you wish to generate a relup between them:
+### During the build, with `upgrade_from:`
+
+Name the releases this one can be upgraded from, and a single `mix release`
+produces a tarball with the relup already in it:
+
+```elixir
+defp releases do
+  [
+    myapp: fn ->
+      [
+        include_executables_for: [:unix],
+        upgrade_from: ["tar:artifacts/myapp-1.0.0.tar.gz"]
+      ]
+      |> Castle.customize()
+    end
+  ]
+end
+```
+
+`:upgrade_from` is an ordinary release option, which `Forecastle` reads out of
+the assembled release — Mix carries options it does not recognise through
+untouched, and `Castle.customize/1` leaves everything but `:steps` alone.
+
+The value is a list of *baseline specs* — the grammar described below — and each
+one gets both directions, which is what `--fromto` gives a transition: a plan
+that cannot be rolled back is not much of an upgrade plan. The strategy is
+`auto`.
+
+`Forecastle.generate_relup/1` does this after post-assembly and immediately
+before `:tar` — after any step of your own, so the relup describes the tree that
+is actually packaged. That interval is the only point in a build where the
+target's `<name>.rel` and its populated `lib/` both exist. Before this,
+generating a relup for a release meant building it, running `mix castle.relup`
+against what came out, and building it again to package the result — a mandatory
+double build, with a mutable file in the project root as the hand-off between
+the two.
+
+How it behaves when it is given nothing, or something malformed, is a set of
+decisions rather than an accident:
+
+  - **No `upgrade_from:` at all** is a no-op. The release assembles exactly as it
+    would without the step.
+  - **`upgrade_from: []`** is refused. It is a build asking for an upgrade plan
+    and naming nothing to generate one against — a list read from the environment,
+    or computed down to nothing — and assembling it in silence would hand you a
+    release with no relup and no complaint.
+  - **A malformed spec** — `""`, `"tar:"`, a prefix naming no source — is refused
+    before `:assemble` runs, so nothing is left half-built for the corrected retry
+    to trip over.
+  - **A repeated `upgrade_from:`** is refused rather than resolved by taking the
+    first. Mix keeps every occurrence of a release option it does not recognise,
+    so a definition built by joining lists can carry two.
+  - **A baseline that cannot be resolved** — a `tar:` that is not there, a `ref:`
+    that does not build — is refused before `:assemble` too. Resolution is the
+    largest thing this can fail at, so it happens while failing is still free.
+  - **A baseline that resolves to nothing** — a spec pointing at no release, or at
+    a directory with no applications in it — fails the build, naming what could
+    not be read. It is never treated as "nothing changed".
+
+A hand-written `relup` in the project root and `upgrade_from:` together are
+refused, naming both, rather than one taking precedence over the other.
+
+**What is left that can only fail after assembly** is reading the target's
+`.rel` and asking `:systools` for a script, both of which need the assembled
+release. If one of those fails, the release stays on disk without a relup and the
+build has to be retried with `--overwrite`: `mix release` decides whether to run
+its steps at all before any step is reached, so a plain retry into a directory
+that already holds a release assembles nothing.
+
+**`ref:` has one sharp edge here that the other two sources do not.** Resolving
+one checks the commit out and builds it, so an ordinary `mix release` waits for a
+build of a previous version as a side effect — `tar:` is both the fast source and
+the recommended one. And building that commit runs *its* `mix.exs`, which sets
+this option again, so a baseline would want a baseline: `Forecastle.Baseline`
+refuses that outright rather than recursing, and the environment variable it
+refuses on is `CASTLE_BASELINE`. A `mix.exs` that names a `ref:` baseline should
+leave the option out when that variable is set.
+
+### Against a target that already exists, with `mix castle.relup`
+
+`Forecastle` provides the mix task `castle.relup`, which generates a relup for a
+target release that has already been built — it does not have to be a release
+this build is producing. Assuming you have two _unpacked_ releases e.g. `0.1.0`
+and `0.1.1` and you wish to generate a relup between them:
 
 ```shell
 > mix castle.relup --target myapp/releases/0.1.1/myapp --fromto myapp/releases/0.1.0/myapp
 ```
+
+The baseline takes the same three specs as `upgrade_from:`, and only two of them
+are read rather than made: `rel:` and `tar:` name something already built, while
+`ref:` checks the commit out and runs its build. So whether anything is rebuilt
+is a property of the spec you write, not of the task.
+
+It is also where a build insists on a strategy: `--hot` and `--restart` are the
+task's, and `upgrade_from:` always generates under `auto`.
 
 If the generated file is in the project root, it will be copied during
 post-assembly to the release. That is where the task writes it by default;
@@ -404,8 +531,9 @@ no transitions in it is not an upgrade plan.
 
 ### Naming the baseline
 
-The value those three switches take is a *baseline spec* - one grammar for the
-three places the release being upgraded from can come from:
+The value those three switches take, and the value `upgrade_from:` takes, is a
+*baseline spec* - one grammar for the three places the release being upgraded
+from can come from:
 
 ```shell
 # an assembled release, named by its .rel file without the extension
