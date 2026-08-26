@@ -2453,11 +2453,34 @@ not necessarily a second read of what was checked.
 a release upgradeable from more than one baseline needs an entry per baseline and
 a release has one appup per application to hold them. That order is stated rather
 than incidental, because `appup_search_for_version/2` takes the *first* entry
-that matches. Two entries keyed by the same from-version are refused — that is
-where the order decides the answer. Two *regular expression* keys that overlap
-are **not** refused, and that is a boundary rather than a gap: whether two
-regexes can match the same version is not decidable here, and answering it
-approximately is the shape of guess this tree does not make.
+that matches.
+
+**Two entries that can both be *selected* for one version are refused, and
+asking that as "two equal keys" was a false pass found in review.** A binary key
+is a **regular expression** to `appup_search_for_version/2`, so a broad regex in
+an earlier-sorting source and a literal in a later one both answer for the same
+version without being equal terms — and the filename sort would have decided
+which instructions ran. So the question is asked with the function that selects,
+one entry at a time, at the versions the sources themselves name: the
+from-version in each file name, and every entry key that is a concrete version.
+That is decidable. Two regexes overlapping *only* at a version no source names is
+what is left, and it stays stated rather than modelled — "can these two regexes
+match one string" is not decidable here, and a guess is worse than a named edge.
+
+**An appup the application ships for itself is merged into, not written over,
+and that too was a review finding.** A dependency carrying an appup for its own
+1.9 → 2.0 lost it the moment a project supplied one for 1.0 → 2.0, because the
+file was written whole — so a transition the dependency *did* support silently
+became a restart, which is this tree's own failure mode arriving through the
+feature built to remove it. It is read from the build directory Mix copies the
+application's `ebin` from, so an unreadable one is still refused before
+`:assemble`. The project's entries go first and are therefore the ones selected;
+every shipped entry that shadows is *named* rather than dropped, because
+supplying an appup for a transition a dependency already covers is how a project
+corrects one that is wrong — the only remedy short of forking it — and the whole
+requirement is that it not be silent. Everything the dependency shipped is still
+in the placed file, behind the project's entries: one rule, with no second rule
+about which shipped entries survive.
 
 **A file covering only one direction is deliberately not refused.** An appup with
 an upgrade entry and no downgrade is a legitimate thing to write, `auto`

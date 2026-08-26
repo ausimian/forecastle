@@ -74,7 +74,9 @@ defmodule Forecastle.Appup.Dep do
       bindings, that holds something which is not a `{from_version, script}`
       entry, or whose version tag is not the version the release carries.
     * a file whose own appup has no entry for the from-version its name claims.
-    * two entries for one application keyed by the same from-version.
+    * two entries for one application that can both be selected for one version.
+    * an appup the application itself ships that cannot be read, since this is
+      about to place one over it.
 
   The one thing that is *not* refused is a file covering only one direction. An
   appup with an upgrade entry and no downgrade is a legitimate thing to write,
@@ -96,12 +98,32 @@ defmodule Forecastle.Appup.Dep do
   names sort. That order is stated rather than incidental:
   `appup_search_for_version/2` takes the **first** entry that matches.
 
-  Two entries keyed by the same from-version are refused, because that is the
-  case where the order decides the answer and nothing here can decide it. Two
-  *regular expression* keys that overlap are not refused: whether two regexes can
-  match the same version is not a question this can answer exactly, and answering
-  it approximately is the shape of guess this tree does not make. They resolve
-  the way `release_handler` resolves them - first match wins, in name order.
+  **Two entries that can both be selected for one version are refused**, which is
+  where that order would decide the answer. "Can both be selected" is asked with
+  the function that selects rather than by comparing keys - a binary key is a
+  regular expression, so two entries collide without being equal terms - and it
+  is asked at the versions the sources themselves name. What is left is two
+  regular expressions overlapping at a version no source names, and that stays
+  stated rather than modelled: whether two regexes can match one string is not
+  decidable here, and a guess is worse than a documented edge.
+
+  ## An appup the application shipped is merged into, not written over
+
+  A dependency may carry an appup of its own, and a release built from a project
+  that supplies one for a *different* baseline must not lose it: writing the file
+  whole would turn a transition the dependency did support into a restart, with
+  nothing said. So what is placed is the project's entries followed by the
+  application's own, read from the build directory Mix copies its `ebin` from -
+  before `:assemble`, so an unreadable one is still refused for free.
+
+  **Where both describe one transition, the project's entry is the one selected,
+  and every shipped entry it shadows is named.** Supplying an appup for a
+  transition a dependency already covers is how a project corrects one that is
+  wrong or incomplete - which is what `mix castle.appup` reports, and the only
+  remedy short of forking the dependency. The placed file is tagged with the
+  version the release carries, which is also the tag `systools` wants; a shipped
+  appup whose own tag disagreed with its application was a `bad_vsn` warning
+  before this and is not one afterwards.
   """
 
   alias Forecastle.Appup
@@ -114,14 +136,18 @@ defmodule Forecastle.Appup.Dep do
           app: atom(),
           vsn: binary(),
           bytes: binary(),
-          sources: [binary()]
+          sources: [binary()],
+          notes: [binary()]
         }
 
   @doc """
   The directory project-supplied appups are read from and written to.
 
-  Resolved against the project file, so a run from anywhere reads and writes the
-  same directory the assembly step will.
+  Resolved against the **project file** rather than the working directory, which
+  is what `Mix.Tasks.Compile.Appup` does with the `:appup` key and for the same
+  reason: nothing guarantees the working directory of a `mix release` invoked
+  from elsewhere. It is therefore the project Mix has loaded that decides, which
+  for an umbrella is the root a release is assembled from.
   """
   @spec dir() :: binary()
   def dir do
@@ -154,7 +180,7 @@ defmodule Forecastle.Appup.Dep do
 
         sources
         |> Enum.map(&read!(&1, versions))
-        |> group!()
+        |> group!(app_dirs(release))
     end
   end
 
@@ -212,6 +238,15 @@ defmodule Forecastle.Appup.Dep do
   # what an application resource says.
   defp versions(%Mix.Release{applications: applications}) do
     for {app, properties} <- applications, do: {app, to_string(Keyword.fetch!(properties, :vsn))}
+  end
+
+  # Where Mix copies each application's `ebin` from, which is where an appup the
+  # application shipped for itself is read from - before `:assemble`, so that
+  # refusing one costs no build. `copy_app/2` reads the same key.
+  defp app_dirs(%Mix.Release{applications: applications}) do
+    for {app, properties} <- applications,
+        into: %{},
+        do: {app, Keyword.fetch!(properties, :path)}
   end
 
   ## Reading one source
@@ -387,52 +422,161 @@ defmodule Forecastle.Appup.Dep do
 
   ## One appup per application
 
-  defp group!(reads) do
+  defp group!(reads, app_dirs) do
     reads
     |> Enum.group_by(& &1.app)
     |> Enum.sort()
-    |> Enum.map(fn {app, group} -> merge!(app, group) end)
+    |> Enum.map(fn {app, group} -> merge!(app, group, app_dirs) end)
   end
 
-  defp merge!(app, [%{vsn: vsn} | _rest] = group) do
+  defp merge!(app, [%{vsn: vsn} | _rest] = group, app_dirs) do
     up = Enum.flat_map(group, &Appup.entries(&1.appup, :up))
     dn = Enum.flat_map(group, &Appup.entries(&1.appup, :down))
-    sources = Enum.map(group, & &1.path)
+    paths = Enum.map(group, & &1.path)
+    probes = probes(group, up ++ dn)
 
-    refuse_collision!(app, :up, up, sources)
-    refuse_collision!(app, :down, dn, sources)
+    refuse_collision!(app, :up, up, probes, paths)
+    refuse_collision!(app, :down, dn, probes, paths)
+
+    shipped = shipped!(app, Map.fetch!(app_dirs, app))
 
     %{
       app: app,
       vsn: vsn,
-      bytes: encode!(app, {to_charlist(vsn), up, dn}, sources),
-      sources: sources
+      bytes:
+        encode!(
+          app,
+          {to_charlist(vsn), up ++ kept(shipped, :up), dn ++ kept(shipped, :down)},
+          paths
+        ),
+      sources: paths,
+      notes: shipped_notes(app, shipped, %{up: up, down: dn})
     }
   end
 
-  defp refuse_collision!(app, direction, entries, sources) do
-    duplicates =
-      entries
-      |> Enum.map(&elem(&1, 0))
-      |> Enum.frequencies()
-      |> Enum.filter(fn {_vsn, count} -> count > 1 end)
-
-    case duplicates do
-      [] ->
+  # **Two entries that can both be selected for one version is where the merge
+  # order decides the answer, and the order is a filename sort.** Equality is not
+  # the question, and asking it that way was a false pass found in review:
+  # `release_handler` selects with `appup_search_for_version/2`, which matches a
+  # **binary** key as a regular expression, so a broad regex in an earlier-sorting
+  # source and a literal in a later one both answer for the same version without
+  # being equal terms.
+  #
+  # So it is asked with the function that selects, at the versions the sources
+  # themselves name: the from-version in each file name, and every entry key that
+  # is a concrete version rather than a pattern. That is decidable, where "can
+  # these two regular expressions match one string" is not - and it covers every
+  # shape that has a version anybody wrote down behind it: literal against
+  # literal, literal against regex, and two regexes overlapping at a version one
+  # of the files is named for. Two regexes overlapping *only* at a version no
+  # source names is what is left, and it stays stated rather than modelled.
+  defp refuse_collision!(app, direction, entries, probes, paths) do
+    case Enum.find(probes, &(selectable(entries, &1) > 1)) do
+      nil ->
         :ok
 
-      [{vsn, _count} | _rest] ->
+      probe ->
         Mix.raise(
-          "#{Enum.map_join(sources, " and ", &shorten/1)} give #{app} two #{word(direction)} " <>
-            "entries for #{inspect(vsn)}. appup_search_for_version/2 takes the first entry " <>
-            "that matches, so which of them ran would be decided by the order the file names " <>
-            "sort in - which is not something to decide an upgrade with. Keep one."
+          "#{Enum.map_join(paths, " and ", &shorten/1)} give #{app} two #{word(direction)} " <>
+            "entries that can both be selected for #{probe}. appup_search_for_version/2 takes " <>
+            "the first entry that matches - and a binary key is a regular expression, so this " <>
+            "is not only two identical keys - which makes the order the file names sort in " <>
+            "decide which instructions run. That is not something to decide an upgrade with. " <>
+            "Keep one."
         )
     end
   end
 
+  # Asked one entry at a time, because the function answers with the first match
+  # rather than with a count, and one entry is the smallest thing it can be asked
+  # about.
+  defp selectable(entries, probe) do
+    Enum.count(entries, &match?({:ok, _script}, Appup.script([&1], probe)))
+  end
+
+  defp probes(group, entries) do
+    Enum.uniq(
+      Enum.map(group, & &1.from) ++
+        for({vsn, _script} <- entries, is_list(vsn), do: to_string(vsn))
+    )
+  end
+
   defp word(:up), do: "upgrade"
   defp word(:down), do: "downgrade"
+
+  ## The appup the application shipped for itself
+
+  # **What is placed is a merge with what the application already has, not a
+  # replacement of it, and that was a review finding.** A dependency that ships
+  # an appup covering its own 1.9 to 2.0 loses that entry the moment a project
+  # supplies one for 1.0 to 2.0 - the file is written whole - and the transition
+  # the dependency *did* support silently becomes a restart. Which is this tree's
+  # own failure mode arriving through the feature built to remove it.
+  #
+  # It is read here rather than out of the assembled release, from the build
+  # directory Mix copies the application's `ebin` from, so a refusal is still made
+  # before `:assemble`. An appup that is there and cannot be read is refused: this
+  # is about to write over it, and discarding something unreadable is no better
+  # than discarding something readable.
+  defp shipped!(app, app_dir) do
+    file = Path.join([app_dir, "ebin", "#{app}.appup"])
+
+    if File.exists?(file) do
+      case Appup.read(file) do
+        {:ok, appup} ->
+          {file, appup}
+
+        {:error, phrase} ->
+          Mix.raise(
+            "#{phrase}, and this build is about to place a project-supplied appup over it. " <>
+              "What it holds cannot be carried across, and writing over it would take " <>
+              "whatever #{app} shipped away without a word."
+          )
+      end
+    end
+  end
+
+  defp kept(nil, _direction), do: []
+  defp kept({_file, appup}, direction), do: Appup.entries(appup, direction)
+
+  # **The project's entries go first, so where both describe one transition the
+  # project's is the one selected - deliberately, and said rather than left to be
+  # noticed.** Supplying an appup for a transition a dependency already covers is
+  # how a project corrects one that is wrong or incomplete, which is exactly what
+  # `mix castle.appup` reports and the only remedy short of forking the
+  # dependency. What must not happen is it being *silent*, so every shipped entry
+  # this shadows is named.
+  #
+  # Shadowing is asked only of a shipped key that is a concrete version. Whether a
+  # project entry can select a shipped *pattern* is the undecidable half again,
+  # and an unanswerable question is not worth a wrong answer: the entry is kept
+  # either way, after the project's.
+  defp shipped_notes(_app, nil, _project), do: []
+
+  defp shipped_notes(app, {file, appup}, project) do
+    counts =
+      for direction <- [:up, :down] do
+        {direction, Appup.entries(appup, direction)}
+      end
+
+    total = Enum.map_join(counts, " and ", fn {d, e} -> "#{length(e)} #{word(d)}" end)
+
+    [
+      "#{app} ships an appup of its own at #{shorten(file)}: its #{total} entries are kept, " <>
+        "after the ones above."
+      | overridden(counts, project)
+    ]
+  end
+
+  defp overridden(counts, project) do
+    for {direction, entries} <- counts,
+        {vsn, _script} <- entries,
+        is_list(vsn),
+        selectable(project[direction], to_string(vsn)) > 0 do
+      "the #{word(direction)} entry it holds for #{vsn} is overridden by the one above, which " <>
+        "is what supplying an appup for a transition means."
+    end
+  end
 
   # The encoding the `:appup` compiler writes, so a project-supplied appup and a
   # compiled one are the same kind of file. Measured on OTP 28.3: `file:consult/1`
@@ -460,7 +604,7 @@ defmodule Forecastle.Appup.Dep do
     file = Path.join(ebin, "#{app}.appup")
 
     if File.dir?(ebin) do
-      announce(placement, file, File.exists?(file))
+      announce(placement, file)
       File.write!(file, placement.bytes)
     else
       Mix.raise(
@@ -474,15 +618,13 @@ defmodule Forecastle.Appup.Dep do
     end
   end
 
-  defp announce(placement, file, replacing?) do
+  defp announce(placement, file) do
     Mix.shell().info(
-      "* placing #{Enum.map_join(placement.sources, ", ", &shorten/1)} into " <>
-        "#{shorten(file)}#{replaced(replacing?, placement.app)}"
+      "* placing #{Enum.map_join(placement.sources, ", ", &shorten/1)} into #{shorten(file)}"
     )
-  end
 
-  defp replaced(false, _app), do: ""
-  defp replaced(true, app), do: ", replacing the appup #{app} shipped"
+    Enum.each(placement.notes, &Mix.shell().info("  " <> &1))
+  end
 
   defp shorten(path), do: Path.relative_to_cwd(path)
 end

@@ -500,17 +500,31 @@ before `:assemble`, so a corrected retry has no half-built release in its way:
   version the release carries, or that holds something which is not a
   `{from_version, instructions}` entry;
 - a file whose own appup has no entry for the from-version its name claims;
-- two entries for one application keyed by the same from-version. Several files
-  for one application are merged, in the order the names sort, because a release
-  upgradeable from several baselines needs an entry per baseline — but
-  `appup_search_for_version/2` takes the *first* entry that matches, so two
-  entries competing for one from-version would be settled by a filename sort;
+- two entries for one application that can both be *selected* for one version.
+  Several files for one application are merged, in the order the names sort,
+  because a release upgradeable from several baselines needs an entry per
+  baseline — but `appup_search_for_version/2` takes the *first* entry that
+  matches, so two entries competing for one version would be settled by a
+  filename sort. A binary key is a regular expression to that function, so this
+  is not only two identical keys: the question is asked with the function that
+  selects, at the versions your file names and your entries name;
+- an appup the application ships for itself that cannot be read, since a
+  project-supplied one is about to be placed alongside it;
 - anything in `rel/appups` that is not a `.exs` file. Dotfiles are the exception,
   so `.gitkeep` and `.DS_Store` are ignored.
 
 A file covering only one direction is *not* refused: an appup with an upgrade
 entry and no downgrade is a legitimate thing to write, and `auto` classifies each
 direction on its own and announces the restart it makes of the other.
+
+### If the dependency ships an appup of its own
+
+It is merged into, not written over. Your entries go first — so where both
+describe the same transition, yours is the one `release_handler` selects, which
+is how you correct an appup that is wrong or incomplete — and everything the
+dependency shipped is still in the placed file behind them. The build names the
+shipped file, says how many of its entries were kept, and names every one your
+entries override.
 
 One boundary worth knowing: `mix castle.appup --app <dep>` reads the appup out of
 the build you point `--to` at, and a project-supplied one is only ever in an

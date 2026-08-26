@@ -702,15 +702,26 @@
   evaluate to an appup, or whose version tag is not the version the release
   carries, or that holds something which is not a `{from_version, instructions}`
   entry; a file whose own appup has no entry for the from-version its name
-  claims; two entries for one application keyed by the same from-version; and
+  claims; two entries for one application that can both be *selected* for one
+  version; an appup the application ships for itself that cannot be read; and
   anything in the directory that is not a `.exs` file, dotfiles excepted. Every
   one of those fails before `:assemble`, so a corrected retry has no half-built
   release in its way.
 
   Several files for one application are merged, in the order the names sort,
   because a release upgradeable from several baselines needs an entry per
-  baseline. A file covering only one direction is not refused: `auto` classifies
-  each direction on its own and announces the restart it makes of the other.
+  baseline — and since `appup_search_for_version/2` takes the first entry that
+  matches, and matches a binary key as a *regular expression*, "can both be
+  selected" is asked with that function rather than by comparing keys. A file
+  covering only one direction is not refused: `auto` classifies each direction on
+  its own and announces the restart it makes of the other.
+
+  **An appup a dependency ships for itself is merged into, not written over.**
+  Your entries go first, so where both describe one transition yours is the one
+  selected — which is how you correct an appup that is wrong or incomplete — and
+  everything the dependency shipped is still in the placed file behind them. The
+  build names the shipped file, says how many of its entries were kept, and names
+  every one your entries override.
 
   One boundary worth knowing: `mix castle.appup --app <dep>` reads the appup out
   of the build `--to` names, and a project-supplied one is only ever in an

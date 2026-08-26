@@ -139,6 +139,28 @@ defmodule Forecastle.DepAppupTest do
       assert output =~ "sample_dep"
     end
 
+    test "is in place before the relup this build generates, which is what reads it", ctx do
+      # `steps/1` runs `post_assemble/1` before `generate_relup/1`, so a release
+      # that names its own baselines has the appup by the time `auto` classifies
+      # the transition. The ordering is the whole claim: generated first, this
+      # same edge is a restart, and the two suites above only exercise the relup
+      # a *separate* `mix castle.relup` produces from an already-assembled tree.
+      write_source!("sample_dep-#{@from}-#{@to}.exs", source(@from, @to))
+
+      {path, output, status} =
+        assemble("dep-appup-upgrade-from", @to, [
+          {"SAMPLE_UPGRADE_FROM", "rel:" <> rel(ctx.from, @from)}
+        ])
+
+      assert status == 0, "the assembly failed:\n\n#{output}"
+      assert output =~ "auto: every transition in this relup is a hot upgrade."
+
+      relup = Path.join([path, "releases", @to, "relup"])
+
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], up}], _down}]} = :file.consult(to_charlist(relup))
+      assert {:load_object_code, {:sample_dep, @to_vsn, [SampleDep]}} in up
+    end
+
     test "says what it placed" do
       # A release quietly acquiring upgrade instructions is the shape of thing
       # `design/upgrade-tooling.md` D2 exists to prevent, so a placement is
@@ -231,6 +253,22 @@ defmodule Forecastle.DepAppupTest do
                :file.consult(to_charlist(placed))
     end
 
+    test "refuses a regular-expression key that competes with a literal one" do
+      # Raised in review, and the case a comparison of key *terms* passes: a
+      # binary key is a regular expression to `appup_search_for_version/2`, so
+      # these two entries both answer for 0.1.0 without being equal terms - and
+      # the earlier-sorting file would have decided which instructions ran.
+      write_source!("sample_dep-#{@from}-#{@to}.exs", source(@from, @to))
+      write_source!("sample_dep-0.1.9-#{@to}.exs", regex_source(~S(0\\.1\\..*), @to))
+
+      {path, output, status} = assemble("dep-appup-regex-collision")
+
+      assert status != 0, "a regex entry competing with a literal was packaged:\n\n#{output}"
+      assert output =~ "two upgrade entries that can both be selected for #{@from}"
+      assert output =~ "a binary key is a regular expression"
+      refute File.exists?(path)
+    end
+
     test "refuses two entries for one from-version, which is where the order decides" do
       # `appup_search_for_version/2` takes the first entry that matches, so which
       # of two entries keyed by the same from-version ran would be settled by the
@@ -245,6 +283,52 @@ defmodule Forecastle.DepAppupTest do
       assert status != 0, "two entries for one from-version were packaged:\n\n#{output}"
       assert output =~ "give sample_dep two upgrade entries"
       refute File.exists?(path)
+    end
+  end
+
+  describe "an appup the application ships for itself" do
+    test "is kept beside the project's rather than written over" do
+      # Raised in review, and the fixture had been hiding it: the dependency's
+      # own appup covers 0.1.0, the project supplies one for 0.0.9, and writing
+      # the file whole would turn the transition the dependency *did* support
+      # into a restart with nothing said about it.
+      write_source!("sample_dep-0.0.9-#{@to}.exs", source("0.0.9", @to))
+
+      {path, output, status} = assemble("dep-appup-shipping", @to, shipping_dep())
+
+      assert status == 0, "the assembly failed:\n\n#{output}"
+      assert output =~ "sample_dep ships an appup of its own at"
+      assert output =~ "its 1 upgrade and 1 downgrade entries are kept"
+
+      placed = Path.join(path, "lib/sample_dep-#{@to}/ebin/sample_dep.appup")
+
+      assert {:ok,
+              [
+                {@to_vsn, [{~c"0.0.9", [{:load_module, SampleDep}]}, {@from_vsn, []}],
+                 [{~c"0.0.9", [{:load_module, SampleDep}]}, {@from_vsn, []}]}
+              ]} = :file.consult(to_charlist(placed))
+    end
+
+    test "is overridden where the project supplies one for the same transition, and says so" do
+      # The other half, and it is deliberate rather than tolerated: supplying an
+      # appup for a transition a dependency already covers is how a project
+      # corrects one that is wrong or incomplete. What must not happen is it
+      # being silent.
+      write_source!("sample_dep-#{@from}-#{@to}.exs", source(@from, @to))
+
+      {path, output, status} = assemble("dep-appup-override", @to, shipping_dep())
+
+      assert status == 0, "the assembly failed:\n\n#{output}"
+      assert output =~ "the upgrade entry it holds for #{@from} is overridden"
+      assert output =~ "the downgrade entry it holds for #{@from} is overridden"
+
+      placed = Path.join(path, "lib/sample_dep-#{@to}/ebin/sample_dep.appup")
+
+      # The project's entry first, so it is the one `appup_search_for_version/2`
+      # selects; the dependency's is still behind it rather than discarded.
+      assert {:ok,
+              [{@to_vsn, [{@from_vsn, [{:load_module, SampleDep}]}, {@from_vsn, []}], _down}]} =
+               :file.consult(to_charlist(placed))
     end
   end
 
@@ -264,6 +348,17 @@ defmodule Forecastle.DepAppupTest do
   end
 
   defp entry(from), do: ~s|{~c"#{from}", [{:load_module, SampleDep}]}|
+
+  # A source whose entry key is a **binary**, which `appup_search_for_version/2`
+  # matches as a regular expression rather than by equality. `pattern` is the text
+  # as it appears between the quotes in the generated file.
+  defp regex_source(pattern, to) do
+    """
+    # Written by Forecastle.DepAppupTest.
+    {~c"#{to}", [{"#{pattern}", [{:load_module, SampleDep}]}],
+     [{"#{pattern}", [{:load_module, SampleDep}]}]}
+    """
+  end
 
   defp write_source!(name, contents) do
     dir = appups_dir()
@@ -285,12 +380,17 @@ defmodule Forecastle.DepAppupTest do
   # block is a build that has to fail, and a helper which raises on a non-zero
   # exit cannot say what the build printed. It is also what keeps every build
   # this suite makes inside `@build_root`.
-  defp assemble(into, vsn \\ @to) do
+  defp assemble(into, vsn \\ @to, extra \\ []) do
     path = Path.join(Fixture.workspace(), into)
 
     File.rm_rf!(path)
 
-    {output, status} = Fixture.mix(["release", "sample", "--overwrite", "--path", path], env(vsn))
+    # `extra` first and then uniqued by name, so a case that needs a different
+    # value for one of the defaults gets it rather than relying on which of two
+    # entries with the same name `System.cmd/3` happens to keep.
+    env = Enum.uniq_by(extra ++ env(vsn), &elem(&1, 0))
+
+    {output, status} = Fixture.mix(["release", "sample", "--overwrite", "--path", path], env)
 
     {path, output, status}
   end
@@ -324,5 +424,16 @@ defmodule Forecastle.DepAppupTest do
       {"SAMPLE_VSN", vsn},
       {"MIX_BUILD_ROOT", Path.join(Fixture.workspace(), "#{@build_root}-#{vsn}")}
     ] ++ @bare_dep
+  end
+
+  # The dependency shipping its own appup again, in a build root of its own. Not
+  # `@build_root`: the `:appup` compiler writes `sample_dep.appup` into whichever
+  # build tree it runs in, and leaving one there would make the assertion that
+  # nothing was written into the shared build depend on the order the cases ran.
+  defp shipping_dep do
+    [
+      {"SAMPLE_DEP_APPUP", "appup.exs"},
+      {"MIX_BUILD_ROOT", Path.join(Fixture.workspace(), "#{@build_root}-shipping-#{@to}")}
+    ]
   end
 end
