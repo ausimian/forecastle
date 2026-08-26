@@ -391,6 +391,24 @@ defmodule Forecastle.DepAppupTest do
       assert output =~ "the downgrade entry it holds for #{@from} is overridden"
     end
 
+    test "is overridden where the project's key is the pattern, at a version nothing names" do
+      # Raised in review, and the mirror of the case above: a project source may
+      # hold entries beyond the version its name claims, so a broad key of its own
+      # can select a shipped literal for some *other* version - one that never
+      # became a probe, so nothing said it had been overridden while
+      # release_handler ran the generic script instead of the specific one. The
+      # shipped appup's own concrete versions are probes now.
+      write_dep_appup!("wide_appup.exs", source("0.1.5", @to))
+      write_source!("sample_dep-#{@from}-#{@to}.exs", regex_source(~S(0\\.1\\..*), @to))
+
+      {_path, output, status} =
+        assemble("dep-appup-wide-project", @to, shipping_dep("wide_appup.exs"))
+
+      assert status == 0, "the assembly failed:\n\n#{output}"
+      assert output =~ "the upgrade entry it holds for 0.1.5 is overridden"
+      assert output =~ "the downgrade entry it holds for 0.1.5 is overridden"
+    end
+
     test "is overridden where the project supplies one for the same transition, and says so" do
       # The other half, and it is deliberate rather than tolerated: supplying an
       # appup for a transition a dependency already covers is how a project

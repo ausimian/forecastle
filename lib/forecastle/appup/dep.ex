@@ -516,7 +516,7 @@ defmodule Forecastle.Appup.Dep do
         ),
       sources: paths,
       staged: staged(shipped),
-      notes: shipped_notes(app, shipped, %{up: up, down: dn}, probes)
+      notes: shipped_notes(app, shipped, %{up: up, down: dn}, probes ++ shipped_probes(shipped))
     }
   end
 
@@ -561,10 +561,32 @@ defmodule Forecastle.Appup.Dep do
   end
 
   defp probes(group, entries) do
-    Enum.uniq(
-      Enum.map(group, & &1.from) ++
-        for({vsn, _script} <- entries, is_list(vsn), do: to_string(vsn))
-    )
+    Enum.uniq(Enum.map(group, & &1.from) ++ concrete_keys(entries))
+  end
+
+  # **The versions the *shipped* appup names, which belong to the override notes
+  # and to nothing else.** A later round found the gap: the probes above are the
+  # project's own, so a project entry keyed on a broad regular expression - one
+  # source may hold entries beyond the version its name claims - shadowed a
+  # shipped literal for some other version without that version ever becoming a
+  # probe, and the run said nothing while `release_handler` ran the generic script
+  # instead of the specific one.
+  #
+  # They are deliberately *not* added to what `refuse_collision!/5` is asked with:
+  # that refusal is about two project entries competing, and a project entry
+  # winning over a shipped one is allowed - announced, which is what these are
+  # for.
+  defp shipped_probes(nil), do: []
+
+  defp shipped_probes({_file, _bytes, appup}) do
+    concrete_keys(Appup.entries(appup, :up) ++ Appup.entries(appup, :down))
+  end
+
+  # A key that is a charlist is a version compared for equality; one that is a
+  # binary is a regular expression, and is a pattern rather than a version to
+  # probe with.
+  defp concrete_keys(entries) do
+    for {vsn, _script} <- entries, is_list(vsn), do: to_string(vsn)
   end
 
   defp word(:up), do: "upgrade"
@@ -659,7 +681,7 @@ defmodule Forecastle.Appup.Dep do
 
   defp overridden(counts, project, probes) do
     for {direction, entries} <- counts,
-        probe <- probes,
+        probe <- Enum.uniq(probes),
         selectable(project[direction], probe) > 0,
         selectable(entries, probe) > 0 do
       "the #{word(direction)} entry it holds for #{probe} is overridden by the one above, " <>

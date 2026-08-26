@@ -2503,6 +2503,17 @@ version skipped a shipped *regular expression* — so a project source named for
 0.1.0 placed in front of a shipped `0\.1\..*` overrode it in silence. That is a
 concrete collision at a version a source names, not the undecidable case.
 
+**The probe set for those notes includes the shipped appup's own concrete
+versions, and a round after that found why.** The project's probes are the
+from-versions its file names claim plus its own concrete keys — so a project
+entry keyed on a broad regular expression (a source may hold entries beyond the
+version its name claims) shadowed a shipped literal for some *other* version,
+which never became a probe. Both halves are covered now, whichever side is the
+pattern. Those versions are deliberately **not** added to what
+`refuse_collision!/5` is asked with: that refusal is about two project entries
+competing, and a project entry winning over a shipped one is allowed — announced,
+which is what these probes are for.
+
 **What is at the destination has to be the copy Mix made of what was merged, and
 anything else is a refusal.** `:assemble` copies the applications and *then*
 copies the release's overlays over them, so a
