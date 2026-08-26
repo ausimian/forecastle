@@ -137,6 +137,20 @@ defmodule Forecastle.Appup.Dep do
   version the release carries, which is also the tag `systools` wants; a shipped
   appup whose own tag disagreed with its application was a `bad_vsn` warning
   before this and is not one afterwards.
+
+  **Two entries *within* the shipped appup that can both be selected for one
+  version are not refused, and that is a decision rather than the collision rule
+  stopping short.** Raised on the PR. The refusal above is about the order the
+  **project's** sources are concatenated in - decided by a filename sort, which is
+  this module's doing and not something an author wrote down - so it refuses
+  rather than choose. Inside one file the order is the order that file's author
+  wrote, `appup_search_for_version/2` resolves it by first match, and that is what
+  every release carrying that dependency has already been doing: nothing here
+  creates the ambiguity, and the project's entries going first cannot change how
+  the rest of the list resolves. Refusing it would fail a build over a file the
+  project does not own, which built yesterday, because the project supplied an
+  appup for some *other* transition. `mix castle.appup --app <dep>` is what
+  reports on what an appup holds.
   """
 
   alias Forecastle.Appup

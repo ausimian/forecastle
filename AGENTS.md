@@ -2503,6 +2503,17 @@ version skipped a shipped *regular expression* — so a project source named for
 0.1.0 placed in front of a shipped `0\.1\..*` overrode it in silence. That is a
 concrete collision at a version a source names, not the undecidable case.
 
+**Two entries *within* the shipped appup that can both be selected for one
+version are deliberately not refused.** The collision refusal is about the order
+the *project's* sources are concatenated in — decided by a filename sort, which is
+this module's doing rather than something an author wrote — so it refuses rather
+than choose. Inside one file the order is that file's author's,
+`appup_search_for_version/2` resolves it by first match, and that is what every
+release carrying that dependency already does; the project's entries going first
+cannot change how the rest of the list resolves. Refusing would fail a build over
+a file the project does not own, which built yesterday, because the project
+supplied an appup for some other transition.
+
 **The probe set for those notes includes the shipped appup's own concrete
 versions, and a round after that found why.** The project's probes are the
 from-versions its file names claim plus its own concrete keys — so a project
