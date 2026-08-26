@@ -407,6 +407,32 @@ defmodule Forecastle.AppupGenTest do
       assert output =~ "both answer for #{@from} in the upgrade direction"
     end
 
+    test "refuses a source tagged for a version this transition does not go to", ctx do
+      # Raised in review. `Forecastle.Appup.Dep` refuses a tag that is not the
+      # version the release carries, so a file tagged 0.9.9 makes every build
+      # fail - while reading its entries called the transition covered and exited
+      # zero, which is the writer and the reader disagreeing again.
+      write_dep_source!("sample_dep-#{@from}-#{@to}.exs", tagged_appup("0.9.9", @from))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a mistagged source was drafted against:\n\n#{output}"
+      assert output =~ ~s|is tagged ~c"0.9.9", but this transition goes to #{@to}|
+    end
+
+    test "refuses a mistagged sibling rather than passing over it", ctx do
+      # Ignoring it would be worse than either answer: this run would draft an
+      # entry beside it, and fixing the tag afterwards would produce exactly the
+      # collision the set-wide rule exists to refuse.
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", tagged_appup("0.9.9", "0.1.9"))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a mistagged sibling was passed over:\n\n#{output}"
+      assert output =~ "sample_dep-0.1.9-#{@to}.exs is tagged"
+      refute File.exists?(dep_source())
+    end
+
     test "does not take a name the release refuses for one of this application's", ctx do
       # `sample_dep--0.1.1.exs` has the application at the front and the version
       # at the back and *nothing* between them, so `Forecastle.Appup.Dep` refuses
@@ -621,6 +647,14 @@ defmodule Forecastle.AppupGenTest do
   # And the same shape keyed on a version rather than a pattern.
   defp literal_appup(from, directions) do
     dep_appup(~s|~c"#{from}"|, directions)
+  end
+
+  # A source whose version tag is not the one the transition goes to, which the
+  # release refuses: the tag is the version an appup belongs to.
+  defp tagged_appup(tag, from) do
+    entry = ~s|[{~c"#{from}", [{:load_module, SampleDep}]}]|
+
+    ~s|{~c"#{tag}", #{entry}, #{entry}}\n|
   end
 
   # One file holding two upgrade entries that can both be selected for `from` -

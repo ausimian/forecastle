@@ -345,8 +345,8 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
     # case is chosen: the collision question below is about what this file holds,
     # and a second read is not necessarily a second read of the same bytes.
     read = Source.read(path)
-    mine = destination_matches(read, path, from.vsn)
-    theirs = siblings(kind, path, from.vsn)
+    mine = destination_matches(read, path, from.vsn, to.vsn)
+    theirs = siblings(kind, path, from.vsn, to.vsn)
 
     refuse_collision!(mine ++ theirs, from.vsn)
 
@@ -379,24 +379,24 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # the function the assembly step asks with, so the two cannot disagree about
   # coverage. There is no such set for an owned application: the `:appup` key
   # names one file, and the destination's own entries are asked about below.
-  defp siblings(kind, path, from_vsn)
+  defp siblings(kind, path, from_vsn, to_vsn)
 
-  defp siblings(:project, _path, _from_vsn), do: []
+  defp siblings(:project, _path, _from_vsn, _to_vsn), do: []
 
-  defp siblings({:dependency, app, to_vsn}, path, from_vsn) do
+  defp siblings({:dependency, app, _vsn}, path, from_vsn, to_vsn) do
     app
     |> sibling_files(to_vsn, path)
-    |> Enum.flat_map(&matches!(&1, from_vsn))
+    |> Enum.flat_map(&matches!(&1, from_vsn, to_vsn))
   end
 
   # The file this would write is part of the same set, so its own entries count
   # towards both coverage and multiplicity. A destination that computes is refused
   # by `write_plan/2` whatever this answers, so it contributes nothing here.
-  defp destination_matches({:literal, literal}, path, from_vsn) do
-    selecting(literal.term, path, from_vsn)
+  defp destination_matches({:literal, literal}, path, from_vsn, to_vsn) do
+    selecting(tagged!(literal, path, to_vsn), path, from_vsn)
   end
 
-  defp destination_matches(_read, _path, _from_vsn), do: []
+  defp destination_matches(_read, _path, _from_vsn, _to_vsn), do: []
 
   # **Which names are this application's is asked of `Forecastle.Appup.Dep`, not
   # re-derived here, and re-deriving it was a review finding.** The rule is
@@ -435,10 +435,10 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # knowable from here. Assembly *does* evaluate it, and is where the collision
   # would land, so guessing that it covers nothing is the one answer that could
   # leave a tree that no longer builds.
-  defp matches!(file, from_vsn) do
+  defp matches!(file, from_vsn, to_vsn) do
     case Source.read(file) do
       {:literal, literal} ->
-        selecting(literal.term, file, from_vsn)
+        selecting(tagged!(literal, file, to_vsn), file, from_vsn)
 
       :absent ->
         []
@@ -449,6 +449,37 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
             "version as the file this would write. Whether it already answers for " <>
             "#{from_vsn} cannot be read from here, and if it does then the release refuses " <>
             "both of them. Nothing was written."
+        )
+    end
+  end
+
+  # **A source in this set has to be tagged with the version the transition goes
+  # to, and reading its entries without asking was a writer/reader disagreement
+  # raised on the PR.** `Forecastle.Appup.Dep` refuses a tag that is not the
+  # version the release carries - the tag is the version the appup belongs to -
+  # so a `dep-1.0.0-2.0.0.exs` tagged 1.9.0 makes every build fail, while this
+  # task read its entries, called the transition covered and exited zero.
+  #
+  # It is refused for a sibling as much as for the destination, and *ignoring* a
+  # mistagged sibling would be worse than either: this run would draft an entry
+  # beside it, and fixing the tag afterwards would then produce the collision the
+  # rule above exists to refuse. A file misnamed altogether is a different case
+  # and is left to the build - it names no transition, so it is not in this
+  # application's set at all.
+  defp tagged!(literal, file, to_vsn) do
+    wanted = to_charlist(to_vsn)
+
+    case literal.term do
+      {^wanted, _up, _dn} ->
+        literal.term
+
+      {other, _up, _dn} ->
+        Mix.raise(
+          "#{Path.relative_to_cwd(file)} is tagged #{inspect(other)}, but this transition " <>
+            "goes to #{to_vsn} - which is what the file name says and what the application " <>
+            "is in the build --to names. The tag is the version an appup belongs to, and " <>
+            "mix release refuses one that is not the version the release carries, so nothing " <>
+            "here can draft against this file until it is fixed. Nothing was written."
         )
     end
   end

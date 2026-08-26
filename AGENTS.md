@@ -2591,6 +2591,18 @@ reduced to `mine ++ theirs` per direction. A merge into an existing literal need
 no refusal of its own after that: it adds exactly the directions nothing answers
 for.
 
+**A source in the set has to be tagged with the version the transition goes to,
+and reading its entries without asking was the fifth round of the same
+disagreement.** `Forecastle.Appup.Dep` refuses a tag that is not the version the
+release carries, so a `dep-1.0.0-2.0.0.exs` tagged 1.9.0 makes every build fail —
+while the generator read its entries, called the transition covered and exited
+zero. It is refused for a sibling as much as for the destination, and *ignoring*
+a mistagged sibling would be worse than either: the run would draft an entry
+beside it, and fixing the tag afterwards would produce exactly the collision the
+set-wide rule exists to refuse. A file misnamed altogether is a different case
+and is left to the build — it names no transition, so it is not in this
+application's set at all.
+
 **Which names belong to the set is asked of `Forecastle.Appup.Dep.from_version/3`
 rather than re-derived, and re-deriving it was the fourth round of the same
 disagreement.** A copy that only checked the two ends took `<app>--<vsn>.exs` for
