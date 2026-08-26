@@ -277,18 +277,6 @@ defmodule Forecastle.AppupGenTest do
       refute File.exists?(generated())
     end
 
-    test "an application whose appup source is not this project's", ctx do
-      # The fixture's dependency. Its version moves with the sample's, so there
-      # really is a transition to draft - and its appup lives in its own project,
-      # which this run has no business rewriting. The entry is printed instead.
-      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
-
-      assert status != 0, "a dependency's appup source was written:\n\n#{output}"
-      assert output =~ "neither this project nor one of its umbrella children"
-      assert output =~ "the upgrade entry:"
-      refute File.exists?(generated())
-    end
-
     test "an application in one build and not the other", ctx do
       # `:systools` covers that with add_application, which no appup entry
       # describes. `mix castle.appup` reports the same state as a note and exits
@@ -302,6 +290,238 @@ defmodule Forecastle.AppupGenTest do
       assert output =~ "which is not a transition an appup describes"
       assert output =~ "add_application"
       refute File.exists?(generated())
+    end
+  end
+
+  describe "an application this project does not own" do
+    test "writes rel/appups/<app>-<from>-<to>.exs rather than printing the entry", ctx do
+      # The fixture's dependency. Its version moves with the sample's, so there
+      # really is a transition to draft - and forecastle#30 gave the project a
+      # place to put one, which is what retired the refusal this used to be. The
+      # name carries the whole transition, because nothing else does: no `:appup`
+      # key names this file and nothing compiles it.
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      assert output =~ "1 appup written"
+      assert output =~ "wrote rel/appups/sample_dep-#{@from}-#{@to}.exs"
+
+      # `SampleDep` declares no behaviour, so the decision table's last row is the
+      # one that applies and the instruction is the common, useful case: an
+      # application whose modules are all stateless drafts to `load_module`.
+      assert {{@to_vsn, [{@from_vsn, up}], [{@from_vsn, down}]}, []} =
+               Code.eval_file(dep_source())
+
+      assert up == [{:load_module, SampleDep}]
+      assert down == [{:load_module, SampleDep}]
+    end
+
+    test "says what puts the file into a release, and what never does", ctx do
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+      source = File.read!(dep_source())
+
+      # Both the report and the file itself, because they are read at different
+      # times by different people and the second is the one that survives.
+      assert output =~ "nothing writes one into deps/"
+      assert output =~ "lib/sample_dep-#{@to}/ebin/sample_dep.appup"
+      assert output =~ "refuses it once sample_dep is no longer #{@to} there"
+
+      assert source =~ "an application this project does not own"
+      assert source =~ "nothing writes it into deps/"
+      assert source =~ "lib/sample_dep-#{@to}/ebin/sample_dep.appup"
+      assert source =~ "refuses it once"
+
+      # And nothing was written into the dependency's own checkout or its build,
+      # which is the failure the location exists to avoid rather than a detail of
+      # it: those are shared by every release built from this tree.
+      assert Path.wildcard(Path.join(Fixture.workspace(), "deps/**/*.appup")) == []
+    end
+
+    test "leaves the transition alone where a sibling source already answers for it", ctx do
+      # Raised in review. A dependency's appups are one file per transition and
+      # the release merges every file naming the application into one appup, so
+      # coverage is a question about the *set*: this sibling is keyed on a regular
+      # expression that already selects 0.1.0, and writing a second entry for it
+      # would leave a tree the next build refuses. Reported success on a tree that
+      # no longer assembles is the shape of failure this whole tooling is for.
+      sibling = write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*)))
+
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      assert output =~ "0 appups written"
+      assert output =~ "already answers for #{@from} in both directions"
+      assert output =~ Path.relative_to(sibling, Fixture.workspace())
+      refute File.exists?(dep_source())
+
+      # And the tree it left still assembles, which is the half an announcement
+      # cannot be trusted for. The project's own appup is the checked-in one
+      # here, since this case wrote none.
+      into = Path.join(Fixture.workspace(), "gen-sibling-rel")
+      on_exit(fn -> File.rm_rf!(into) end)
+
+      {assembled, status} =
+        Fixture.mix(["release", "sample", "--overwrite", "--path", into], env("appup.exs"))
+
+      assert status == 0, "the tree the generator left does not assemble:\n\n#{assembled}"
+    end
+
+    test "refuses where a sibling answers for one direction only", ctx do
+      # Half-covered is a refusal rather than a no-op: the file this would write
+      # is one the next build refuses, because that direction would have two
+      # entries that can both be selected for 0.1.0.
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :up))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a colliding entry was written:\n\n#{output}"
+      assert output =~ "already answers for #{@from} in the upgrade direction"
+      assert output =~ "the upgrade entry:"
+      refute File.exists?(dep_source())
+    end
+
+    test "counts the destination's own coverage as part of the set", ctx do
+      # Raised in review. The file this would write covers the upgrade and a
+      # sibling covers the downgrade, so between them the set covers both and
+      # there is nothing to add - and nothing about that release fails to
+      # assemble. Asking the siblings without asking the destination refused it.
+      write_dep_source!("sample_dep-#{@from}-#{@to}.exs", literal_appup(@from, :up))
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :down))
+
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      assert output =~ "0 appups written"
+      assert output =~ "answer for #{@from} between them, in both directions"
+    end
+
+    test "refuses where the file itself and a sibling answer for one direction", ctx do
+      # The same multiplicity one file further in: the destination holds an
+      # upgrade entry for 0.1.0 and a sibling's pattern selects it too, which the
+      # next `mix release` refuses. Counting only the siblings reduced the pair to
+      # one covered direction and merged the missing one into a tree that does not
+      # assemble.
+      write_dep_source!("sample_dep-#{@from}-#{@to}.exs", literal_appup(@from, :up))
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :up))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a colliding destination and sibling were merged into:\n\n#{output}"
+      assert output =~ "both answer for #{@from} in the upgrade direction"
+    end
+
+    test "refuses a source tagged for a version this transition does not go to", ctx do
+      # Raised in review. `Forecastle.Appup.Dep` refuses a tag that is not the
+      # version the release carries, so a file tagged 0.9.9 makes every build
+      # fail - while reading its entries called the transition covered and exited
+      # zero, which is the writer and the reader disagreeing again.
+      write_dep_source!("sample_dep-#{@from}-#{@to}.exs", tagged_appup("0.9.9", @from))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a mistagged source was drafted against:\n\n#{output}"
+      assert output =~ ~s|is tagged ~c"0.9.9", but this transition goes to #{@to}|
+    end
+
+    test "refuses a source keyed on a pattern re cannot compile, by name", ctx do
+      # Raised in review. `appup_search_for_version/2` raises rather than answers
+      # on a pattern it cannot compile, and every question asked of an entry goes
+      # through it - so this came back as a bare ArgumentError out of the middle
+      # of a run, naming nothing, while assembly refuses the same file by name.
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\.[)))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "an uncompilable pattern reached the search:\n\n#{output}"
+      assert output =~ "sample_dep-0.1.9-#{@to}.exs keys an entry on"
+      assert output =~ "not a regular expression re can compile"
+      refute output =~ "ArgumentError"
+    end
+
+    test "refuses a mistagged sibling rather than passing over it", ctx do
+      # Ignoring it would be worse than either answer: this run would draft an
+      # entry beside it, and fixing the tag afterwards would produce exactly the
+      # collision the set-wide rule exists to refuse.
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", tagged_appup("0.9.9", "0.1.9"))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a mistagged sibling was passed over:\n\n#{output}"
+      assert output =~ "sample_dep-0.1.9-#{@to}.exs is tagged"
+      refute File.exists?(dep_source())
+    end
+
+    test "does not take a name the release refuses for one of this application's", ctx do
+      # `sample_dep--0.1.1.exs` has the application at the front and the version
+      # at the back and *nothing* between them, so `Forecastle.Appup.Dep` refuses
+      # it by name - while a looser reading here took it for a source and counted
+      # its broad entry as coverage, leaving this task and the build disagreeing
+      # about what is in the directory. The name rule is now asked of the module
+      # that owns it.
+      write_dep_source!("sample_dep--#{@to}.exs", regex_appup(~S(0\\.1\\..*)))
+
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      assert output =~ "1 appup written"
+      assert File.exists?(dep_source())
+    end
+
+    test "refuses a file holding two entries that can both be selected", ctx do
+      # And the same question inside one file, which the release asks too.
+      write_dep_source!("sample_dep-#{@from}-#{@to}.exs", twice_appup(@from, ~S(0\\.1\\..*)))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a file with two selectable entries was merged into:\n\n#{output}"
+      assert output =~ "holds more than one upgrade entry that can be selected for #{@from}"
+    end
+
+    test "refuses two siblings that answer for one direction between them", ctx do
+      # A tree the release already refuses, so reporting a successful no-op over
+      # it would be this task saying a release is fine about one that does not
+      # assemble. Collapsing the directions to a set before noticing was the false
+      # pass.
+      write_dep_source!("sample_dep-0.1.8-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :up))
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :up))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "two colliding siblings were reported as covered:\n\n#{output}"
+      assert output =~ "both answer for #{@from} in the upgrade direction"
+      refute File.exists?(dep_source())
+    end
+
+    test "refuses a version that would put the file somewhere other than rel/appups", ctx do
+      # Raised in review. The name is built out of two version strings, and
+      # `Forecastle.Build` refuses a version that is not valid UTF-8 or that
+      # carries control characters but says nothing about path separators -
+      # which reach nothing anywhere else and reach the filesystem here. A `.app`
+      # naming its version this way would have had the task create and write
+      # `config/runtime.exs`.
+      root = dep_copy!(ctx.to, "gen-escaping-vsn")
+      set_dep_vsn!(root, "2.0/x/../../../../config/runtime")
+      escaping!(ctx, root)
+    end
+
+    test "refuses a version that walks out of rel/appups and back into it", ctx do
+      # Raised in review, and the half asking the *expanded* parent missed: this
+      # normalises back to a path directly under the directory, so the check
+      # passed - while getting there created `sample_dep-x` inside it and left the
+      # file under a basename naming no application. Both are refused by the next
+      # build, written by a run that reported success.
+      root = dep_copy!(ctx.to, "gen-normalising-vsn")
+      set_dep_vsn!(root, "x/../2.0")
+      escaping!(ctx, root)
+
+      refute File.exists?(Path.join(Fixture.workspace(), "rel/appups/sample_dep-x"))
+    end
+
+    test "never rewrites an entry it already has, the same as for an owned application", ctx do
+      gen!(both(ctx, "sample_dep"), "generated.exs")
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      # The file this writes is named for one transition, so a second run of the
+      # same one meets its own output - which is the merge case, answering that
+      # both directions are already covered.
+      assert output =~ "0 appups written"
+      assert output =~ "already has an upgrade and a downgrade entry for #{@from}"
     end
   end
 
@@ -412,6 +632,82 @@ defmodule Forecastle.AppupGenTest do
 
   defp write_generated!(source), do: File.write!(generated(), source)
 
+  # Where a dependency's entry goes. Named for the transition rather than by a
+  # project key, which is the whole of how the assembly step knows which release
+  # it belongs to.
+  defp dep_source do
+    Path.join(dep_sources(), "sample_dep-#{@from}-#{@to}.exs")
+  end
+
+  defp dep_sources, do: Path.join(Fixture.workspace(), "rel/appups")
+
+  defp write_dep_source!(name, contents) do
+    File.mkdir_p!(dep_sources())
+
+    path = Path.join(dep_sources(), name)
+    File.write!(path, contents)
+
+    path
+  end
+
+  # An appup whose from-version is a **binary**, which is a regular expression to
+  # `appup_search_for_version/2` rather than a version compared for equality - so
+  # it answers for 0.1.0 without being named for it.
+  defp regex_appup(pattern, directions \\ :both) do
+    dep_appup(~s|"#{pattern}"|, directions)
+  end
+
+  # And the same shape keyed on a version rather than a pattern.
+  defp literal_appup(from, directions) do
+    dep_appup(~s|~c"#{from}"|, directions)
+  end
+
+  # Drafts for a dependency whose `.app` names a version that is a path rather
+  # than a version, and asserts nothing was written where it points. The fixture
+  # has a `config/runtime.exs`, which is the point rather than an inconvenience:
+  # the path these escape to is a file the project already owns.
+  defp escaping!(ctx, root) do
+    runtime = Path.join(Fixture.workspace(), "config/runtime.exs")
+    before = File.read!(runtime)
+
+    {output, status} =
+      gen(
+        ["--from", "rel:" <> rel(ctx.from, @from), "--to", "rel:" <> rel(root, @to)] ++
+          ["--app", "sample_dep"],
+        "generated.exs"
+      )
+
+    assert status != 0, "a version naming a path was written to:\n\n#{output}"
+    assert output =~ "do not make a file name in rel/appups"
+    assert File.read!(runtime) == before, "the fixture's own config/runtime.exs was rewritten"
+  end
+
+  # A source whose version tag is not the one the transition goes to, which the
+  # release refuses: the tag is the version an appup belongs to.
+  defp tagged_appup(tag, from) do
+    entry = ~s|[{~c"#{from}", [{:load_module, SampleDep}]}]|
+
+    ~s|{~c"#{tag}", #{entry}, #{entry}}\n|
+  end
+
+  # One file holding two upgrade entries that can both be selected for `from` -
+  # the literal and a pattern that matches it - which is the multiplicity question
+  # asked inside a single source rather than across two.
+  defp twice_appup(from, pattern) do
+    ~s|{~c"#{@to}", [{~c"#{from}", []}, {"#{pattern}", []}], []}\n|
+  end
+
+  # `directions` is which lists get the entry: an appup covering one direction and
+  # not the other is a legitimate thing to write, and is what the cases about
+  # coverage across a set of sources need.
+  defp dep_appup(key, directions) do
+    entry = ~s|[{#{key}, [{:load_module, SampleDep}]}]|
+    up = if directions == :down, do: "[]", else: entry
+    down = if directions == :up, do: "[]", else: entry
+
+    ~s|{~c"#{@to}", #{up}, #{down}}\n|
+  end
+
   # Put back from the checked-in fixture rather than from a copy taken at setup
   # time, so that a run killed part way through cannot leave a rewritten appup
   # behind for another suite to build against. `ReleaseCase` clears a stale
@@ -423,6 +719,12 @@ defmodule Forecastle.AppupGenTest do
     )
 
     File.rm(generated())
+
+    # A dependency's entry is written into the workspace's `rel/appups`, which
+    # every other suite assembles against: a source left there names a transition
+    # and `Forecastle.Appup.Dep` refuses one that is not the transition being
+    # built, so it would fail their assemblies rather than this one's.
+    File.rm_rf!(dep_sources())
 
     :ok
   end
@@ -454,6 +756,38 @@ defmodule Forecastle.AppupGenTest do
     on_exit(fn -> File.write!(file, original) end)
 
     File.write!(file, IO.iodata_to_binary(:io_lib.format(~c"~tp.~n", [appup])))
+  end
+
+  # The same shape as `lib_copy!/2` for the dependency instead of the project's
+  # own application, which is what the cases about a dependency's source need.
+  defp dep_copy!(release, into) do
+    root = Path.join(Fixture.workspace(), into)
+    File.rm_rf!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    File.mkdir_p!(Path.join(root, "lib"))
+
+    File.cp_r!(
+      Path.join(release, "lib/sample_dep-#{@to}"),
+      Path.join(root, "lib/sample_dep-#{@to}")
+    )
+
+    root
+  end
+
+  # The version in the `.app` resource, which is what `Forecastle.Build` reads and
+  # what the task names the file after - the directory keeps its own name, since
+  # nothing resolves an application by it.
+  defp set_dep_vsn!(root, app_vsn) do
+    file = Path.join(root, "lib/sample_dep-#{@to}/ebin/sample_dep.app")
+    {:ok, [{:application, app, opts}]} = :file.consult(to_charlist(file))
+
+    File.write!(
+      file,
+      IO.iodata_to_binary(
+        :io_lib.format(~c"~tp.~n", [{:application, app, Keyword.put(opts, :vsn, ~c"#{app_vsn}")}])
+      )
+    )
   end
 
   defp set_app_vsn!(root, vsn, app_vsn) do

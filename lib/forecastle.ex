@@ -3,6 +3,8 @@ defmodule Forecastle do
   Documentation for `Forecastle`.
   """
 
+  alias Forecastle.Appup.Dep
+
   @app Mix.Project.config()[:app]
 
   @spec steps(maybe_improper_list) :: maybe_improper_list
@@ -245,6 +247,7 @@ defmodule Forecastle do
     release
     |> stage_baselines()
     |> stage_relup()
+    |> stage_dep_appups()
     |> create_preboot_scripts()
   end
 
@@ -255,6 +258,7 @@ defmodule Forecastle do
     |> tap(&extend_env_script/1)
     |> tap(&copy_relfile/1)
     |> tap(&copy_relup/1)
+    |> tap(&place_dep_appups/1)
     |> tap(&warn_unsupported_executables/1)
   end
 
@@ -528,6 +532,29 @@ defmodule Forecastle do
     Mix.Project.project_file() |> Path.dirname() |> Path.join("relup")
   end
 
+  # The appups the project supplies for applications it does not own, read and
+  # checked here for the same reason the relup is: `rel/appups` is arbitrary
+  # Elixir evaluated for its value, its names are checked against the versions
+  # this release carries, and every way one of those checks can fail is a
+  # refusal. Before `:assemble`, all of it - a refusal after it leaves the
+  # version directory behind, and the corrected retry then declines to overwrite
+  # it and exits 0 having assembled nothing. `Forecastle.Appup.Dep` is where the
+  # reading and the refusals live.
+  defp stage_dep_appups(%Mix.Release{options: options} = release) do
+    # Dropped unconditionally first, for `stage_relup/1`'s reason: Mix keeps
+    # release options it does not recognise, so a project that had set this key
+    # would otherwise have its value written into the release as appups.
+    options = Keyword.delete(options, :forecastle_dep_appups)
+
+    case Dep.stage!(release) do
+      [] ->
+        %Mix.Release{release | options: options}
+
+      placements ->
+        %Mix.Release{release | options: Keyword.put(options, :forecastle_dep_appups, placements)}
+    end
+  end
+
   # The script `Castle.Peer` boots. It is `start_clean` plus the applications
   # needed to run a release's own `Config.Provider` pipeline - and Castle - and
   # notably *not* the release's own applications, which must not be started a
@@ -642,6 +669,19 @@ defmodule Forecastle do
   defp copy_relup(%Mix.Release{options: options, version_path: vp}) do
     case Keyword.fetch(options, :forecastle_relup) do
       {:ok, bytes} -> File.write!(Path.join(vp, "relup"), bytes)
+      :error -> :ok
+    end
+  end
+
+  # Read and checked in `pre_assemble/1`, so all that is left here is to put the
+  # bytes that were checked into the release. This is the first step at which
+  # `lib/<app>-<vsn>/ebin` exists, and it is the only place any of this writes:
+  # an appup written into `deps/` or into `_build`'s copy of a dependency would
+  # leak one project's upgrade instructions into every build sharing that
+  # checkout.
+  defp place_dep_appups(%Mix.Release{options: options} = release) do
+    case Keyword.fetch(options, :forecastle_dep_appups) do
+      {:ok, placements} -> Dep.place!(release, placements)
       :error -> :ok
     end
   end

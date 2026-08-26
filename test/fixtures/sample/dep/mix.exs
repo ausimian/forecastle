@@ -19,7 +19,7 @@ defmodule SampleDep.MixProject do
       app: :sample_dep,
       version: version(),
       elixir: "~> 1.18",
-      appup: "appup.exs",
+      appup: appup(),
       compilers: Mix.compilers() ++ [:appup],
       deps: deps()
     ]
@@ -27,6 +27,20 @@ defmodule SampleDep.MixProject do
 
   def application do
     [extra_applications: []]
+  end
+
+  # Switched by the test suite so that the fixture can present the state the
+  # project-supplied appups exist for: a dependency that ships none of its own,
+  # which is what a dependency taken from Hex almost always is. Unset, it ships
+  # the file beside this one, as it always did.
+  #
+  # "none" rather than an empty value, for the reason the sample's own
+  # `SAMPLE_APPUP` gives: `System.cmd/3` cannot pass an empty one.
+  defp appup do
+    case System.get_env("SAMPLE_DEP_APPUP", "appup.exs") do
+      "none" -> nil
+      path -> path
+    end
   end
 
   @doc """

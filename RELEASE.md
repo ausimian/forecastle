@@ -664,10 +664,82 @@
   It writes the file named by the `:appup` project key. Where there is no key it
   writes `appup.exs` beside `mix.exs` and tells you to add the key and the
   `:appup` compiler. An application that is neither this project nor an umbrella
-  child of it — a dependency — has no source here to write, so its entry is
-  printed instead.
+  child of it — a dependency — is written to
+  `rel/appups/<app>-<from>-<to>.exs` instead; see the next entry.
 
   The output is a draft. Read the comments, then run `mix castle.appup` over it.
+- Appups for dependencies, supplied by the project. Most hot upgrades die because
+  a dependency bumped a patch version and ships no appup, so `auto` degrades the
+  whole edge to a restart — correctly, since there is no hot upgrade to be had.
+  The missing piece is usually small, and the project is in a position to supply
+  it.
+
+  Put one in `rel/appups`, beside `rel/env.sh.eex`, named for the transition it
+  is for — `rel/appups/jason-1.4.0-1.4.2.exs` — holding the same kind of appup
+  source the `:appup` key names: arbitrary Elixir evaluated for its value, and
+  source you review and commit.
+  `mix castle.appup.gen --app jason --from <spec>` drafts one and writes it
+  there, asking whether the transition is already covered across *every* source
+  for that application rather than only the one it would write — so a sibling
+  whose from-version is a regular expression that already matches leaves it a
+  no-op rather than a second entry the next build would refuse.
+  `mix release` then places it into the assembled release at
+  `lib/<app>-<vsn>/ebin/<app>.appup` and names it on standard output, and `auto`
+  reads it exactly as it reads an appup a dependency shipped for itself — an
+  entry that matches this from-version *is* an instruction for this transition —
+  so the edge stays hot instead of degrading to a restart.
+
+  **Nothing is ever written into `deps/`.** That checkout, and `_build`'s copy of
+  a dependency, are shared by every release built from the tree and by other
+  projects wherever the build cache is shared, so an appup there would be one
+  project's upgrade instructions sitting in builds that never asked for them.
+
+  **A stale one fails the build rather than being packaged**, which is what the
+  version pair in the name is for. The name is read against the release rather
+  than parsed — a version may itself contain a `-`, so splitting on dashes would
+  be a guess — by anchoring the application at the front and, at the back, the
+  version that release actually carries. A file naming a transition this release
+  is not part of is refused, naming the version the release has.
+
+  So are: an application you own, whose appup comes from the `:appup` compiler
+  and would be written over after the compiler produced it; a file that does not
+  evaluate to an appup, or whose version tag is not the version the release
+  carries, or that holds something which is not a `{from_version, instructions}`
+  entry; a file whose own appup has no entry for the from-version its name
+  claims; two entries for one application that can both be *selected* for one
+  version; an appup the application ships for itself that cannot be read; and
+  anything in the directory that is not a `.exs` file, dotfiles excepted. Every
+  one of those fails before `:assemble`, so a corrected retry has no half-built
+  release in its way.
+
+  Several files for one application are merged, in the order the names sort,
+  because a release upgradeable from several baselines needs an entry per
+  baseline — and since `appup_search_for_version/2` takes the first entry that
+  matches, and matches a binary key as a *regular expression*, "can both be
+  selected" is asked with that function rather than by comparing keys. A file
+  covering only one direction is not refused: `auto` classifies each direction on
+  its own and announces the restart it makes of the other.
+
+  **An appup a dependency ships for itself is merged into, not written over.**
+  Your entries go first, so where both describe one transition yours is the one
+  selected — which is how you correct an appup that is wrong or incomplete — and
+  everything the dependency shipped is still in the placed file behind them. The
+  build names the shipped file, says how many of its entries were kept, and names
+  every one your entries override.
+
+  Two refusals come *after* assembly, because nothing before it can be sure: an
+  appup at `lib/<app>-<vsn>/ebin/<app>.appup` that is not the copy Mix made of
+  the build's own — or is not a regular file at all, since `mix release`
+  preserves an overlay's symlinks — and an application named by a source that has
+  no `lib/<app>-<vsn>/ebin` in the assembled release, which is what a release
+  built with `include_erts: false` does with OTP's own applications. Both leave
+  the release directory behind, so the corrected retry needs
+  `mix release --overwrite`; without it `mix release` assembles nothing and exits
+  zero.
+
+  One boundary worth knowing: `mix castle.appup --app <dep>` reads the appup out
+  of the build `--to` names, and a project-supplied one is only ever in an
+  assembled release — so point `--to` at a `rel:` or `tar:` baseline to check it.
 - A release may now name the versions it can be upgraded from, with an
   `upgrade_from:` release option, and a single `mix release` then produces a
   tarball with the relup already in it. The value is a list of the same baseline
