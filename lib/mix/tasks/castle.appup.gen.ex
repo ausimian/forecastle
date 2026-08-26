@@ -103,13 +103,16 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
       directions. Nothing is added and the run says so - and it says, too, that
       an entry existing is not the same as it covering everything that moved,
       because nothing here has checked that and `mix castle.appup` is what does.
-    * **another `rel/appups` source for the same dependency already answers for
-      it** in both directions. A dependency's appups are one file per transition
-      and the release merges every file naming the application into one appup, so
-      coverage is a question about the *set*: a sibling keyed on a regular
-      expression can already select this from-version. Covered in one direction
-      only, this is a **refusal** rather than a no-op, because the file it would
-      write is one the next build would refuse.
+    * **the `rel/appups` sources for the same dependency already answer for it**
+      between them. A dependency's appups are one file per transition and the
+      release merges every file naming the application into one appup, so
+      coverage is a question about the *set*, this file included: a sibling keyed
+      on a regular expression can already select this from-version. Where a
+      sibling answers for one direction and the file being written is not there
+      yet, this is a **refusal** rather than a no-op, because a new file carries
+      both directions or neither. Two siblings answering for one direction are a
+      refusal too - that is a tree the next build refuses, whatever this run
+      does.
 
   ## Where it writes
 
@@ -341,11 +344,11 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
     }
 
     {path, kind, notes} = source(app, from.vsn, to.vsn)
+    elsewhere = siblings(kind, path, from.vsn)
 
-    case siblings(kind, path, from.vsn) do
-      [] -> write_plan(heading, path, kind, notes, drafted, from.vsn, to.vsn)
-      covered -> sibling_plan(heading, covered, drafted, from.vsn)
-    end
+    refuse_sibling_collision!(elsewhere, from.vsn)
+
+    write_plan(heading, path, kind, notes, drafted, from.vsn, to.vsn, elsewhere)
   end
 
   ## The sources beside the one this would write
@@ -428,34 +431,27 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
     end
   end
 
-  defp sibling_plan(heading, covered, drafted, from_vsn) do
-    files = covered |> Enum.map(&elem(&1, 1)) |> Enum.uniq() |> Enum.join(", ")
+  # **Two siblings that both answer for one direction are a refusal, and reducing
+  # the directions to a set before noticing was a false pass raised in review.**
+  # That is a tree `Forecastle.Appup.Dep` already refuses, so reporting a
+  # successful no-op over it would be this task saying a release is fine about
+  # one that does not assemble. It is not a state this run created, and it is
+  # still this run's to report: it is the tool the author is holding.
+  defp refuse_sibling_collision!(elsewhere, from_vsn) do
+    elsewhere
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.find(fn {_direction, files} -> length(files) > 1 end)
+    |> case do
+      nil ->
+        :ok
 
-    case covered |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.sort() do
-      [:down, :up] ->
-        %{
-          heading: heading,
-          action: :covered,
-          notes: [
-            "#{files} already answers for #{from_vsn} in both directions, and the release " <>
-              "merges every source naming this application into one appup. Nothing was " <>
-              "added: a second entry there would be one appup_search_for_version/2 never " <>
-              "selects, and the build refuses rather than choosing between them.",
-            "An entry existing is not the same as it covering everything that moved, and " <>
-              "nothing here has checked that it does. mix castle.appup is what answers it."
-          ]
-        }
-
-      [direction] ->
-        refusal(
-          heading,
-          "#{files} already answers for #{from_vsn} in the #{word(direction)} direction, and " <>
-            "the release merges every source naming this application into one appup - so " <>
-            "this file would " <>
-            "give that direction two entries that can both be selected for #{from_vsn}, and " <>
-            "the next build refuses it. Nothing was written; the entry to merge into that " <>
-            "file by hand is below.",
-          printed(drafted, @directions)
+      {direction, files} ->
+        Mix.raise(
+          "#{Enum.join(files, " and ")} both answer for #{from_vsn} in the #{word(direction)} " <>
+            "direction. The release merges every source naming this application into one " <>
+            "appup and appup_search_for_version/2 takes the first entry that matches, so the " <>
+            "order the file names sort in would decide which instructions run - which the " <>
+            "next build refuses rather than allows. Nothing was drafted; keep one of them."
         )
     end
   end
@@ -463,13 +459,13 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # Which of the three writing cases this is. The appup source is read *before*
   # anything is decided about it, because "is this file one that can be rewritten"
   # is the question that gates the other two.
-  defp write_plan(heading, path, kind, notes, drafted, from_vsn, to_vsn) do
+  defp write_plan(heading, path, kind, notes, drafted, from_vsn, to_vsn, elsewhere) do
     case Source.read(path) do
       :absent ->
-        %{heading: heading, action: {:create, path, to_vsn, kind, drafted}, notes: notes}
+        create_plan(heading, path, kind, notes, drafted, from_vsn, to_vsn, elsewhere)
 
       {:literal, literal} ->
-        merge_plan(heading, literal, drafted, from_vsn)
+        merge_plan(heading, literal, drafted, from_vsn, elsewhere)
 
       {tag, phrase} when tag in [:computed, :malformed] ->
         refusal(
@@ -481,31 +477,59 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
     end
   end
 
+  # **A file that is not there is written in both directions or not at all**,
+  # which is what makes the middle case a refusal rather than a partial write:
+  # `Forecastle.Appup.Source.render/4` renders an entry per direction, and a
+  # direction a sibling already answers for is one this must not add.
+  defp create_plan(heading, path, kind, notes, drafted, from_vsn, to_vsn, elsewhere) do
+    case @directions -- directions(elsewhere) do
+      @directions ->
+        %{heading: heading, action: {:create, path, to_vsn, kind, drafted}, notes: notes}
+
+      [] ->
+        %{heading: heading, action: :covered, notes: answered(elsewhere, from_vsn)}
+
+      [direction] ->
+        refusal(
+          heading,
+          "#{files(elsewhere)} already answers for #{from_vsn} in the " <>
+            "#{word(other_direction(direction))} direction, and the release merges every " <>
+            "source naming this application into one appup - so a new file with both " <>
+            "directions in it would give that one two entries that can both be selected for " <>
+            "#{from_vsn}, which the next build refuses. Nothing was written; the entry to " <>
+            "merge into that file by hand is below.",
+          printed(drafted, @directions)
+        )
+    end
+  end
+
   # An entry is added only to a direction that has none, and "has none" is
   # `systools_relup:appup_search_for_version/2`'s answer rather than a comparison
   # of version strings - so this and `mix castle.appup` cannot disagree about
   # whether a transition is already covered, and a from-version written as a
   # regular expression is matched the way `release_handler` matches it.
-  defp merge_plan(heading, literal, drafted, from_vsn) do
-    case Enum.reject(@directions, &covered?(literal.term, &1, from_vsn)) do
+  #
+  # **It is asked of this file *and* of its siblings, because the release merges
+  # them into one appup.** A direction a sibling answers for is one nothing can
+  # be added to; a direction this file answers for is one that is never
+  # rewritten. Both leave the same thing to do, which is nothing.
+  defp merge_plan(heading, literal, drafted, from_vsn, elsewhere) do
+    mine = Enum.filter(@directions, &covered?(literal.term, &1, from_vsn))
+    theirs = directions(elsewhere)
+
+    case @directions -- (mine ++ theirs) do
       [] ->
         %{
           heading: heading,
           action: :covered,
-          notes: [
-            "#{Path.relative_to_cwd(literal.path)} already has an upgrade and a downgrade " <>
-              "entry for #{from_vsn}. Nothing was added: once a transition has instructions " <>
-              "they are the author's, and this never rewrites one.",
-            "An entry existing is not the same as it covering everything that moved, and " <>
-              "nothing here has checked that it does. mix castle.appup is what answers it."
-          ]
+          notes: nothing_to_add(literal, elsewhere, from_vsn)
         }
 
       directions ->
         %{
           heading: heading,
           action: {:merge, literal, Enum.map(directions, &{&1, drafted[&1]})},
-          notes: partial(directions, literal.path, from_vsn)
+          notes: partial(directions, literal, mine, elsewhere, from_vsn)
         }
     end
   end
@@ -514,17 +538,68 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
     match?({:ok, _script}, Appup.script(Appup.entries(term, direction), from_vsn))
   end
 
-  defp partial([_up, _down], _path, _from_vsn), do: []
+  defp directions(elsewhere), do: elsewhere |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
 
-  defp partial([direction], path, from_vsn) do
+  defp files(elsewhere), do: elsewhere |> Enum.map(&elem(&1, 1)) |> Enum.uniq() |> Enum.join(", ")
+
+  defp nothing_to_add(literal, [], from_vsn) do
     [
-      "#{Path.relative_to_cwd(path)} already had #{other(direction)} entry for #{from_vsn}, " <>
-        "which is left as it is. Only #{article(direction)} entry was added."
+      "#{Path.relative_to_cwd(literal.path)} already has an upgrade and a downgrade " <>
+        "entry for #{from_vsn}. Nothing was added: once a transition has instructions " <>
+        "they are the author's, and this never rewrites one.",
+      unchecked()
     ]
+  end
+
+  defp nothing_to_add(literal, elsewhere, from_vsn) do
+    [
+      "#{Path.relative_to_cwd(literal.path)} and #{files(elsewhere)} answer for #{from_vsn} " <>
+        "between them, in both directions. Nothing was added: the release merges every " <>
+        "source naming this application into one appup, so a second entry for a direction " <>
+        "one of them already answers for is one the next build refuses.",
+      unchecked()
+    ]
+  end
+
+  defp answered(elsewhere, from_vsn) do
+    [
+      "#{files(elsewhere)} already answers for #{from_vsn} in both directions, and the " <>
+        "release merges every source naming this application into one appup. Nothing was " <>
+        "written: a second entry would be one appup_search_for_version/2 never selects, and " <>
+        "the build refuses rather than choosing between them.",
+      unchecked()
+    ]
+  end
+
+  defp unchecked do
+    "An entry existing is not the same as it covering everything that moved, and nothing " <>
+      "here has checked that it does. mix castle.appup is what answers it."
+  end
+
+  defp partial([_up, _down], _literal, _mine, _elsewhere, _from_vsn), do: []
+
+  defp partial([direction], literal, mine, elsewhere, from_vsn) do
+    other = other_direction(direction)
+
+    if other in mine do
+      [
+        "#{Path.relative_to_cwd(literal.path)} already had #{other(direction)} entry for " <>
+          "#{from_vsn}, which is left as it is. Only #{article(direction)} entry was added."
+      ]
+    else
+      [
+        "#{elsewhere[other]} already answers for #{from_vsn} in the #{word(other)} direction, " <>
+          "and the release merges every source naming this application into one appup, so " <>
+          "nothing was added there. Only #{article(direction)} entry was added."
+      ]
+    end
   end
 
   defp other(:up), do: "a downgrade"
   defp other(:down), do: "an upgrade"
+
+  defp other_direction(:up), do: :down
+  defp other_direction(:down), do: :up
 
   defp article(:up), do: "an upgrade"
   defp article(:down), do: "a downgrade"

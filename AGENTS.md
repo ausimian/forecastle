@@ -2557,11 +2557,22 @@ would have reported success and left a tree that no longer assembles, which is
 the disagreement between what writes an appup and what reads it that this pair of
 tasks exists not to have. It asks with `appup_search_for_version/2` over each
 sibling's own term, which is what the assembly step asks with. Both directions
-covered is a named no-op; one direction is a **refusal**, because the file it
-would write is one the next build refuses. A sibling that *computes* is a refusal
-too: this task does not evaluate a source it has not read as a literal, so what
-that file covers is not knowable from here, and assembly — which does evaluate
-it — is where the collision would land.
+covered is a named no-op; one direction is a **refusal**, because a file that is
+not there is written in both directions or not at all. A sibling that *computes*
+is a refusal too: this task does not evaluate a source it has not read as a
+literal, so what that file covers is not knowable from here, and assembly — which
+does evaluate it — is where the collision would land.
+
+**The set includes the destination, and two siblings answering for one direction
+are a refusal — both were false passes found on the PR.** Asking only the
+siblings refused a case where the file being written covers one direction and a
+sibling covers the other, which is a release that assembles perfectly well; and
+reducing the covered directions to a *set* before counting them turned two
+siblings competing for one direction — a tree `Forecastle.Appup.Dep` already
+refuses — into a reported no-op. So coverage is `mine ++ theirs` per direction,
+and multiplicity is checked before the reduction. A merge into an existing
+literal needs no refusal at all: it adds exactly the directions nothing answers
+for.
 
 **The generator's file name is built out of two version strings, so it is checked
 to be a name.** `Forecastle.Build` refuses a version that is not valid UTF-8 or

@@ -378,6 +378,35 @@ defmodule Forecastle.AppupGenTest do
       refute File.exists?(dep_source())
     end
 
+    test "counts the destination's own coverage as part of the set", ctx do
+      # Raised in review. The file this would write covers the upgrade and a
+      # sibling covers the downgrade, so between them the set covers both and
+      # there is nothing to add - and nothing about that release fails to
+      # assemble. Asking the siblings without asking the destination refused it.
+      write_dep_source!("sample_dep-#{@from}-#{@to}.exs", literal_appup(@from, :up))
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :down))
+
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      assert output =~ "0 appups written"
+      assert output =~ "answer for #{@from} between them, in both directions"
+    end
+
+    test "refuses two siblings that answer for one direction between them", ctx do
+      # A tree the release already refuses, so reporting a successful no-op over
+      # it would be this task saying a release is fine about one that does not
+      # assemble. Collapsing the directions to a set before noticing was the false
+      # pass.
+      write_dep_source!("sample_dep-0.1.8-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :up))
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :up))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "two colliding siblings were reported as covered:\n\n#{output}"
+      assert output =~ "both answer for #{@from} in the upgrade direction"
+      refute File.exists?(dep_source())
+    end
+
     test "refuses a version that would put the file somewhere other than rel/appups", ctx do
       # Raised in review. The name is built out of two version strings, and
       # `Forecastle.Build` refuses a version that is not valid UTF-8 or that
@@ -546,10 +575,23 @@ defmodule Forecastle.AppupGenTest do
   # `appup_search_for_version/2` rather than a version compared for equality - so
   # it answers for 0.1.0 without being named for it.
   defp regex_appup(pattern, directions \\ :both) do
-    entry = ~s|[{"#{pattern}", [{:load_module, SampleDep}]}]|
+    dep_appup(~s|"#{pattern}"|, directions)
+  end
+
+  # And the same shape keyed on a version rather than a pattern.
+  defp literal_appup(from, directions) do
+    dep_appup(~s|~c"#{from}"|, directions)
+  end
+
+  # `directions` is which lists get the entry: an appup covering one direction and
+  # not the other is a legitimate thing to write, and is what the cases about
+  # coverage across a set of sources need.
+  defp dep_appup(key, directions) do
+    entry = ~s|[{#{key}, [{:load_module, SampleDep}]}]|
+    up = if directions == :down, do: "[]", else: entry
     down = if directions == :up, do: "[]", else: entry
 
-    ~s|{~c"#{@to}", #{entry}, #{down}}\n|
+    ~s|{~c"#{@to}", #{up}, #{down}}\n|
   end
 
   # Put back from the checked-in fixture rather than from a copy taken at setup
