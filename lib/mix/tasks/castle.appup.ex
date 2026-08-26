@@ -173,10 +173,14 @@ defmodule Mix.Tasks.Castle.Appup do
   read as an application this transition adds or removes:
 
     * a library directory that cannot be read
+    * a library directory that can be read and is not one
     * an application directory with no `ebin` in it
     * an entry that is named for the application and is not a directory - a
       regular file, or a symlink with nothing at the end of it - where nothing
       else in the library directory is
+
+  `Forecastle.Build` is where each of those lives, and where the failure each of
+  them was reached through is recorded.
 
   ## Which applications
 
@@ -188,40 +192,11 @@ defmodule Mix.Tasks.Castle.Appup do
   ## Change detection
 
   A module's fingerprint is `:beam_lib.md5/1` **and** its persisted attributes,
-  and **not** a digest of the file bytes.
-
-  A byte digest is useless here. `Mix.Release.strip_beam/2` rebuilds every beam
-  in a release from `@additional_chunks ++ :beam_lib.significant_chunks()`, so a
-  release's copy of a module is a different sequence of bytes from the `_build`
-  copy of identical code - measured on Elixir 1.19.5 / OTP 28, where the chunk
-  list goes from
-  `AtU8 Code StrT ImpT ExpT FunT LitT LocT Attr CInf Dbgi Docs ExCk Line Type`
-  to `Attr Line Type AtU8 Code StrT ImpT ExpT FunT LitT`. A byte digest reports
-  every module in a release as changed; the md5 is stable across that stripping,
-  which is what lets `--from` name a stripped release while `--to` is an
-  unstripped `_build`.
-
-  The md5 alone is not enough either, and `:beam_lib`'s own documentation says
-  why: it covers the code, and "compilation date and other attributes are not
-  included". Measured - two modules differing only in an explicit `@vsn`, or in
-  an attribute registered with `Module.register_attribute(persist: true)`, have
-  the same md5. Those attributes are loaded with the module and readable through
-  `module_info/1`, and an explicit `@vsn` is exactly the sort of thing
-  hot-upgrade code carries, so a module whose only change is one of them is a
-  module an appup has to reload. Reporting it as unchanged was a false pass.
-
-  Pairing the two costs nothing in the other direction. `Attr` is one of the
-  chunks stripping keeps, and the *decoded* attribute list is identical before
-  and after it while the bytes are not - measured, and asserted by the suite
-  rather than assumed. Documentation is not in `Attr`, so a `@moduledoc` or
-  `@doc` change still moves nothing and still needs no instruction. And a module
-  with no explicit `@vsn` is given the md5 itself as its `vsn`, so for ordinary
-  code the pair moves exactly when the code does.
-
-  A beam with no `Attr` chunk at all is compared on the md5 alone rather than
-  refused: the runtime loads such a module and reports `[]` for its attributes,
-  so `[]` is what it is fingerprinted with. `:beam_lib.strip/1` produces them,
-  which is a second reason to name it as a trap.
+  and **not** a digest of the file bytes. `Forecastle.Build` is where that is
+  read and why - a byte digest reports every module in a stripped release as
+  changed, and the md5 alone misses an explicit `@vsn`. The same module is what
+  `mix castle.appup.gen` diffs with, so the check and the generator cannot
+  disagree about which modules moved.
 
   ## Compare like with like
 
@@ -241,7 +216,7 @@ defmodule Mix.Tasks.Castle.Appup do
   use Mix.Task
 
   alias Forecastle.Appup
-  alias Forecastle.Baseline
+  alias Forecastle.Build
 
   # All `:keep`, including the switches that may appear only once, for the
   # reason `mix castle.relup` gives: `:string` silently keeps the last
@@ -297,7 +272,7 @@ defmodule Mix.Tasks.Castle.Appup do
   defp baseline!(cmdline_args) do
     case Keyword.get_values(cmdline_args, :from) do
       [spec] ->
-        resolved(spec)
+        Build.resolve!(spec, :compile)
 
       [] ->
         Mix.raise(
@@ -312,112 +287,10 @@ defmodule Mix.Tasks.Castle.Appup do
 
   defp target!(cmdline_args) do
     case Keyword.get_values(cmdline_args, :to) do
-      [] -> current_build()
-      [spec] -> resolved(spec)
+      [] -> Build.current!()
+      [spec] -> Build.resolve!(spec, :compile)
       many -> Mix.raise(repeated("--to", many))
     end
-  end
-
-  # `:compile` rather than `:release`: this reads compiled modules and the appup
-  # beside them, and never a `.rel`. For `rel:` and `tar:` the level changes
-  # nothing - they name something already built - but for `ref:` it is the
-  # difference between a `mix compile` and a `mix release` of an old commit.
-  defp resolved(spec) do
-    baseline = Baseline.resolve!(spec, :compile)
-
-    build(spec, baseline.lib_dir)
-  end
-
-  # `_build/<target_><env>/lib`, which holds `<app>/ebin` per application - the
-  # shape `Forecastle.Baseline` promises `<lib_dir>/*/ebin` matches alongside a
-  # release's `<app>-<vsn>/ebin`.
-  #
-  # **The compile happens here rather than in `@requirements`, which is to say
-  # only when the current build is the thing being read.** A check run against
-  # beams that do not reflect the source is a wrong answer rather than a stale
-  # one, so the default `--to` has to compile. But `@requirements` runs before
-  # `run/1` and therefore before anyone has looked at the arguments, which made a
-  # comparison of two artefacts - `--from tar:a --to tar:b`, both of them built
-  # elsewhere and neither of them this checkout - wait for a compile of a
-  # checkout it was not going to read, and *fail* if that checkout does not
-  # compile. A read-only comparison of two things that already exist should not
-  # need the working tree to be in a fit state.
-  defp current_build do
-    Mix.Task.run("compile", [])
-
-    build("the current build", Path.join(Mix.Project.build_path(), "lib"))
-  end
-
-  # **The library directory is established here, not assumed, and that is the
-  # difference between a gate and a decoration.** Everything downstream reads an
-  # application's *absence* from a build as a fact about the transition - one
-  # application added, or one removed, neither of which needs an appup. A library
-  # directory that is not there makes every application look absent, so a
-  # mistyped `--from` reported "an application added between the two" and exited
-  # **zero**, having compared nothing at all. Measured, before it was fixed.
-  #
-  # That is the one answer a check like this must never give, and it is worth
-  # naming why it was so easy to reach: `Forecastle.Baseline` resolves a `rel:`
-  # spec without touching the filesystem, deliberately, because the caller is
-  # what reads the release a moment later and can say what it could not read.
-  # `mix castle.relup` is that caller for a `.rel` file. This task reads no
-  # `.rel` at all, so nothing else was ever going to notice.
-  #
-  # Listing it once also settles the discovery below without a glob. Globbing
-  # `<lib_dir>/{app,app-*}/ebin` has the same failure in a narrower form: a
-  # project whose path contains a glob metacharacter - a directory named
-  # `a{b}` is enough - matches nothing and every application looks absent again.
-  # `:filelib.wildcard/1` has no way to quote the part of a pattern that is a
-  # path, so the fix is not to build a pattern out of one.
-  #
-  # **Readable is not the same as being a library directory, and the difference
-  # was a silent pass that only showed up on Linux.** `Forecastle.Baseline`
-  # derives the library directory of a `rel:` spec by climbing three levels from
-  # the `.rel` path, so a nonsense spec lands on a real path: `rel:/nope/x`
-  # resolves to `/lib`. That does not exist on macOS, so `File.ls/1` failed and
-  # the refusal below fired. On Linux `/lib` is a directory - the system one -
-  # so the listing *succeeded*, held no application being checked, and every one
-  # of them read as removed between the two builds. A removal is a legitimate hot
-  # transition that `:systools` covers with `remove_application` and that needs no
-  # appup, so the run reported "every module that moved is covered" and exited
-  # **zero** having compared nothing. The same class as the mistyped `--from`
-  # above, reached through a path that happens to exist.
-  #
-  # So a library directory has to *look* like one, which is decided structurally
-  # rather than by trusting the spec: at least one entry that is an application
-  # directory with an `ebin` in it. A build's library directory always has one -
-  # an empty one is not a build - and no directory that is merely nearby does.
-  # The one check that cannot be fooled by a path being resolvable.
-  defp build(describe, lib_dir) do
-    case File.ls(lib_dir) do
-      {:ok, entries} ->
-        if Enum.any?(entries, &application_dir?(lib_dir, &1)) do
-          %{describe: describe, lib_dir: lib_dir, entries: entries}
-        else
-          refuse_lib_dir!(
-            describe,
-            lib_dir,
-            "nothing in it is an application directory with an ebin in it"
-          )
-        end
-
-      {:error, reason} ->
-        refuse_lib_dir!(describe, lib_dir, :file.format_error(reason))
-    end
-  end
-
-  defp application_dir?(lib_dir, name), do: File.dir?(Path.join([lib_dir, name, "ebin"]))
-
-  # One phrase for both, because they are one bug with two symptoms and which of
-  # them a given machine shows depends on whether the resolved path happens to
-  # exist there.
-  defp refuse_lib_dir!(describe, lib_dir, because) do
-    Mix.raise(
-      "#{describe}: #{Path.relative_to_cwd(lib_dir)} is not a library directory of a build - " <>
-        "#{because}. Every application would look absent from it, and an absent application " <>
-        "reads as one this transition adds or removes, which needs no appup and passes. So " <>
-        "this refuses rather than reporting one."
-    )
   end
 
   # Made unique, because the same application named twice is one application:
@@ -458,7 +331,7 @@ defmodule Mix.Tasks.Castle.Appup do
   # lets the report be printed and the exit status derived from the same value,
   # rather than from a second pass that could disagree with what was printed.
   defp examine(app, from, to) do
-    case {ebin(from, app), ebin(to, app)} do
+    case {Build.ebin(from, app), Build.ebin(to, app)} do
       {nil, nil} ->
         Mix.raise(
           "#{app} is in neither #{from.describe} nor #{to.describe}. Nothing was compared."
@@ -502,7 +375,7 @@ defmodule Mix.Tasks.Castle.Appup do
   # are still `systools_make`'s business alone.
   defp whole_application(app, ebin, phrase) do
     resource = Path.join(ebin, "#{app}.app")
-    {_vsn, _inventory, listed?} = app_resource!(resource, app)
+    {_vsn, _inventory, listed?} = Build.app_resource!(resource, app)
 
     %{
       heading: to_string(app),
@@ -510,190 +383,9 @@ defmodule Mix.Tasks.Castle.Appup do
     }
   end
 
-  # `<app>` for a Mix build and `<app>-<vsn>` for a release, which is the only
-  # thing `Forecastle.Baseline` promises about the layout. `nil` means the
-  # application really is not in this build - which is a claim worth making only
-  # because `build/2` established that the library directory itself is there,
-  # and only because nothing in it claimed to be this application. See
-  # `app_dirs/2` for the second half of that.
-  defp ebin(build, app) do
-    case app_dirs(build, app) do
-      {[], []} ->
-        nil
-
-      {[], others} ->
-        not_directories!(others, build, app)
-
-      {dirs, _others} ->
-        which!(dirs, build, app)
-    end
-  end
-
-  # **The name says which directories to look at; the `.app` resource says which
-  # of them is this application.** `<dir>/ebin/<app>.app` is named for the
-  # application rather than for the directory, so it is the only exact answer -
-  # the prefix is not one, because a version may itself contain a hyphen
-  # (`sample-1.0.0-rc.1`) and so may an application name. Two things fall out of
-  # asking it rather than trusting the name:
-  #
-  #   * `foo-1.0.0` beside `foo-bar-1.0.0`, checking `foo`, is no longer
-  #     ambiguous. Only the first holds a `foo.app`.
-  #   * a build holding *only* `foo-bar-1.0.0`, checking `foo`, is `foo` being
-  #     **absent** rather than a broken build. Reading it as a match meant
-  #     refusing over a missing `foo.app` in somebody else's directory, which
-  #     names the wrong problem.
-  #
-  # The incomplete-build refusal survives that, and it has to - it is what stops
-  # a half-written build reading as an application this transition removed, which
-  # needs no appup and exits zero. So a candidate that holds no `.app` **at all**
-  # is still an incomplete build and still refused; only one holding somebody
-  # else's is passed over. That is the difference between "this directory is not
-  # ours" and "this directory is ours and unfinished", and it is decidable.
-  defp which!(dirs, build, app) do
-    case Enum.split_with(dirs, &ours?(&1, app)) do
-      {[dir], _theirs} -> Path.join(dir, "ebin")
-      {[_ | _] = ours, _theirs} -> ambiguous!(ours, build, app)
-      {[], theirs} -> absent_or_incomplete!(theirs, build, app)
-    end
-  end
-
-  # An **exact** name match is ours whatever it contains, and only a *prefix*
-  # match has to prove itself. `_build/<env>/lib/foo` is named for the
-  # application with no version after it, so it cannot be another application's
-  # directory - and a `bar.app` inside it, or no readable `foo.app`, makes it an
-  # unfinished or broken build of `foo` rather than somebody else's. Treating that
-  # as somebody else's read it as absent, and an absent application is one the
-  # transition removed, which needs no appup and exits zero. Only `foo-bar-1.0.0`
-  # is genuinely ambiguous about whose it is, because only a prefix match can
-  # belong to a longer name.
-  defp ours?(dir, app), do: Path.basename(dir) == "#{app}" or "#{app}" in resources_in(dir)
-
-  # Nothing that matched the name holds this application's resource. Either they
-  # all belong to other applications - in which case this one really is absent -
-  # or one of them is an unfinished build of this one, which is a refusal. A
-  # directory holding some other application's resource is evidence of the
-  # former; one with no `ebin`, or an `ebin` with no usable resource in it at all,
-  # is evidence of the latter.
-  defp absent_or_incomplete!(dirs, build, app) do
-    case Enum.reject(dirs, &(resources_in(&1) != [])) do
-      [] -> nil
-      [dir | _rest] -> ebin!(dir, build, app)
-    end
-  end
-
-  # The application resources in a candidate directory that `:systools` could
-  # actually read: a **regular file** named `<name>.app`. Both questions asked
-  # about a candidate - is it ours, is it somebody else's - are derived from this
-  # one list, because writing them separately is how they came to disagree: "ours"
-  # required a regular file while "somebody else's" only matched the extension, so
-  # an `ebin` holding nothing but a `foo.app` that was a dangling symlink or a
-  # directory answered *no* to the first and *yes* to the second. That reads as
-  # another application's directory, which makes this one absent, which makes the
-  # transition a removal needing no appup - a broken build exiting zero.
-  #
-  # One definition, two derivations, and the three states a candidate can be in
-  # stay exhaustive: ours, somebody else's, or unusable and therefore refused.
-  defp resources_in(dir) do
-    ebin = Path.join(dir, "ebin")
-
-    case File.ls(ebin) do
-      {:ok, names} ->
-        for name <- names,
-            Path.extname(name) == ".app",
-            File.regular?(Path.join(ebin, name)),
-            do: Path.rootname(name)
-
-      {:error, _reason} ->
-        []
-    end
-  end
-
-  defp ambiguous!(dirs, build, app) do
-    Mix.raise(
-      "#{app} is in #{build.describe} more than once: " <>
-        Enum.map_join(dirs, ", ", &inspect(Path.relative_to_cwd(&1))) <>
-        ", each holding an ebin/#{app}.app. Which of them the upgrade would use depends on " <>
-        "the code path, so this refuses rather than choosing."
-    )
-  end
-
-  # Matched exactly rather than by prefix alone: `sample-` cannot match
-  # `sample_dep-0.1.0`. The prefix is only ever a *candidate* filter, though -
-  # see `which!/3` for what settles it, and why the prefix cannot.
-  #
-  # The two halves are kept apart rather than filtered down to one, because
-  # *whether anything matched at all* is a different question from *whether what
-  # matched is usable*, and collapsing them answered the second as though it were
-  # the first. An entry that matches the name and is not a directory - a regular
-  # file, or a symlink whose target is not there - was dropped, so the
-  # application looked **absent**, which reads as one added or removed between
-  # the two builds, needs no appup, and exits **zero**. That is the same silent
-  # pass `build/2` exists to prevent, arriving one level further in, and it is the
-  # answer this task must never give.
-  #
-  # A non-directory beside a real directory is still passed over rather than
-  # refused. A legacy `sample-0.1.0.ez` archive sitting next to `sample-0.1.0`
-  # matches the prefix and is not the application the upgrade would read; the
-  # directory is. Only an application that has *nothing but* such entries is a
-  # refusal, because only then is the alternative to call it absent.
-  defp app_dirs(build, app) do
-    prefix = "#{app}-"
-
-    build.entries
-    |> Enum.filter(&(&1 == "#{app}" or String.starts_with?(&1, prefix)))
-    |> Enum.map(&Path.join(build.lib_dir, &1))
-    |> Enum.split_with(&File.dir?/1)
-  end
-
-  defp not_directories!(paths, build, app) do
-    Mix.raise(
-      "#{app} is named in #{build.describe} by " <>
-        Enum.map_join(paths, ", ", &inspect(Path.relative_to_cwd(&1))) <>
-        ", none of which is a directory - a regular file, or a symlink with nothing at the " <>
-        "end of it. That is a broken build rather than an application added or removed " <>
-        "between the two, so this refuses rather than reporting one."
-    )
-  end
-
-  # An application directory with no `ebin` in it is an incomplete build, not an
-  # application this transition adds or removes - and treating it as the latter
-  # is the same silent pass `build/2` exists to prevent, arriving one level
-  # further in.
-  defp ebin!(dir, build, app) do
-    ebin = Path.join(dir, "ebin")
-
-    if File.dir?(ebin) do
-      ebin
-    else
-      Mix.raise(
-        "#{app} is in #{build.describe} at #{Path.relative_to_cwd(dir)}, which holds no " <>
-          "ebin directory. That is an incomplete build rather than an application added or " <>
-          "removed between the two, so this refuses rather than reporting one."
-      )
-    end
-  end
-
-  # One side of the comparison: the version an appup entry is keyed by, the beams
-  # on disk, and the `.app` resource's own module list. The last two are
-  # different things and both are needed - the beams are what *moved*, and the
-  # inventory is what `:systools` can *resolve*. See `read_inventory!/2`.
-  defp side!(ebin, app) do
-    resource = Path.join(ebin, "#{app}.app")
-    {vsn, inventory, listed?} = app_resource!(resource, app)
-
-    %{
-      vsn: vsn,
-      inventory: inventory,
-      listed?: listed?,
-      modules: modules!(ebin),
-      ebin: ebin,
-      resource: resource
-    }
-  end
-
   defp compare(app, from_ebin, to_ebin) do
-    from = side!(from_ebin, app)
-    to = side!(to_ebin, app)
+    from = Build.side!(from_ebin, app)
+    to = Build.side!(to_ebin, app)
 
     heading = "#{app} #{from.vsn} -> #{to.vsn}"
 
@@ -752,7 +444,7 @@ defmodule Mix.Tasks.Castle.Appup do
   # instruction that could be added to fix it. The remedy is the version, so the
   # finding names the version rather than listing the modules.
   defp unmoved(vsn, from_modules, to_modules) do
-    {changed, added, removed} = moved(from_modules, to_modules)
+    {changed, added, removed} = Build.moved(from_modules, to_modules)
     count = length(changed) + length(added) + length(removed)
 
     findings =
@@ -952,7 +644,7 @@ defmodule Mix.Tasks.Castle.Appup do
     effects = Appup.effects(script, app, new.inventory, old.inventory)
     loads = for {module, :load} <- effects, into: MapSet.new(), do: module
     removals = for {module, :removal} <- effects, into: MapSet.new(), do: module
-    {changed, added, removed} = moved(old.modules, new.modules)
+    {changed, added, removed} = Build.moved(old.modules, new.modules)
 
     # A module the target's `.app` does not name cannot be loaded by anything, so
     # it is reported for that rather than for the appup - which is the more
@@ -1131,202 +823,6 @@ defmodule Mix.Tasks.Castle.Appup do
 
       true ->
         []
-    end
-  end
-
-  # The whole of the diff, in terms of the direction's own old and new builds.
-  # Sorted, so that a report is stable between runs and between machines -
-  # `File.ls/1` answers in whatever order the filesystem hands back, and the
-  # maps these are built from have no order of their own either.
-  defp moved(old, new) do
-    changed =
-      for {module, print} <- new, Map.has_key?(old, module), old[module] != print, do: module
-
-    added = for {module, _print} <- new, not Map.has_key?(old, module), do: module
-    removed = for {module, _print} <- old, not Map.has_key?(new, module), do: module
-
-    {Enum.sort(changed), Enum.sort(added), Enum.sort(removed)}
-  end
-
-  ## Reading a build
-
-  # The beams on disk rather than the `.app` file's `modules` list. A beam is
-  # what `release_handler` can load and what an instruction can name, and the
-  # `.app` list is derived from the same directory anyway - so this asks the
-  # question of the thing the upgrade acts on.
-  #
-  # Listed rather than globbed, for the reason `build/2` gives: a `*.beam`
-  # pattern is built out of a path, and a path that happens to contain a glob
-  # metacharacter would match nothing and report the application as empty.
-  # `File.ls!/1` rather than a message of this task's own, because the directory
-  # was established as one moments ago - a failure here is a race or a
-  # permissions change, and Elixir's own error names the path and the reason.
-  defp modules!(ebin) do
-    for name <- File.ls!(ebin), Path.extname(name) == ".beam", into: %{} do
-      fingerprint!(Path.join(ebin, name))
-    end
-  end
-
-  # `:beam_lib.md5/1` rather than a digest of the bytes: see the moduledoc. The
-  # module name comes out of the same call rather than from the filename,
-  # because the beam is what says which module it holds.
-  #
-  # **Paired with the persisted attributes, because the md5 does not cover
-  # them.** `:beam_lib`'s own documentation says so - "compilation date and other
-  # attributes are not included" - and it was measured: two modules differing
-  # only in an explicit `@vsn` have the same md5. Those attributes are loaded
-  # with the module and readable through `module_info/1`, so a module whose only
-  # change is one of them is a module whose observable content changed and which
-  # an appup has to reload. Reporting it as unchanged was a false pass.
-  #
-  # Adding them costs no accuracy in the other direction. The `Attr` chunk is one
-  # of the two `Mix.Release.strip_beam/2` keeps beyond the significant ones, and
-  # the *decoded* attribute list is identical before and after stripping while
-  # the file bytes are not - measured on the fixture's own release, and asserted
-  # by `Forecastle.AppupCheckTest`. Docs do not appear in it either, so a
-  # `@moduledoc` change still moves nothing. And an ordinary module has no
-  # explicit `@vsn`: Elixir gives it the md5 itself, so the pair moves exactly
-  # when the code does.
-  #
-  # One read of the file, both questions asked of the same bytes - the file is
-  # what could change between two reads.
-  #
-  # **`allow_missing_chunks`, because a beam without an `Attr` chunk is a beam
-  # the runtime loads.** Measured on OTP 28.3: a module rebuilt without it loads,
-  # answers calls, and reports `[]` from `module_info(attributes)` - and
-  # `:beam_lib.strip/1`, the function the design names as a trap precisely
-  # because it drops `Attr`, is one way to get one. Insisting on the chunk made
-  # this task *refuse to run* against a dependency somebody had stripped that
-  # way, which is a gate that cannot answer rather than a gate that says no.
-  #
-  # `:missing_chunk` is normalised to `[]` rather than to a sentinel of its own,
-  # because `[]` is what such a module really has: the attribute half of the
-  # fingerprint is "what `module_info/1` would report", and for these it reports
-  # nothing. Two builds of such a module then compare on the md5 alone, which is
-  # the documented weaker answer, and is the right one - there are no attributes
-  # for it to miss.
-  defp fingerprint!(beam) do
-    binary = File.read!(beam)
-    chunks = :beam_lib.chunks(binary, [:attributes], [:allow_missing_chunks])
-
-    case {:beam_lib.md5(binary), chunks} do
-      {{:ok, {module, md5}}, {:ok, {module, [attributes: attributes]}}} ->
-        {module, {md5, attributes(attributes)}}
-
-      {{:error, :beam_lib, reason}, _attributes} ->
-        Mix.raise(beam_error(beam, reason))
-
-      {_md5, {:error, :beam_lib, reason}} ->
-        Mix.raise(beam_error(beam, reason))
-    end
-  end
-
-  defp attributes(:missing_chunk), do: []
-  defp attributes(attributes), do: attributes
-
-  defp beam_error(beam, reason) do
-    "#{Path.relative_to_cwd(beam)} could not be read as a beam file: #{inspect(reason)}"
-  end
-
-  # Two things come out of the `.app` resource, and both are needed.
-  #
-  # The **version** an appup entry is keyed by is the application's own, and at
-  # `:compile` level there is no `.rel` to read it out of and the directory name
-  # does not carry it either. This file is where it is, in both layouts.
-  #
-  # The **modules list** is what `systools_rc` means by "every module of the
-  # application": `#application.modules` comes from here, so it is what an
-  # `add_application` or a `restart_application` expands over, and it is what
-  # `get_lib/2` resolves object code through. It is deliberately *not* assumed to
-  # agree with the beams in `ebin` - see `unresolvable/2` and
-  # `Forecastle.Appup.effects/4` for what happens where it does not.
-  #
-  # A missing or malformed list is read as an **empty** one, and that is not what
-  # `:systools` makes of it: `systools_make:check_item/2` ends in
-  # `throw({missing_param, Item})`, and a `modules` value that is not a list of
-  # atoms is a `bad_param`. Validating a `.app` is that function's job and it
-  # does it when a release or a relup is built; a second, weaker copy of it here
-  # could only disagree with the first, which is the very failure
-  # `Forecastle.Appup` exists to prevent for appups.
-  #
-  # Reading it as empty is the conservative direction rather than the convenient
-  # one, which is what makes leaving it to `:systools` safe. An empty inventory
-  # resolves nothing, so every module that moved is reported by `unresolvable/2`
-  # and an application-level instruction covers nothing beyond what it names by
-  # hand - strictly more findings and a non-zero exit, never fewer. A malformed
-  # resource cannot buy a clean bill of health here.
-  defp app_resource!(file, app) do
-    case :file.consult(to_charlist(file)) do
-      {:ok, [{:application, ^app, opts}]} when is_list(opts) ->
-        {inventory, listed?} = inventory(opts)
-
-        {fetch_vsn!(opts, file), inventory, listed?}
-
-      {:ok, terms} ->
-        Mix.raise(
-          "#{Path.relative_to_cwd(file)} is not an application resource file for #{app}. " <>
-            "Expected a single {application, #{app}, Options} tuple, but got: " <>
-            "#{inspect(terms)}"
-        )
-
-      {:error, reason} ->
-        Mix.raise(
-          "#{Path.relative_to_cwd(file)} could not be read as an application resource " <>
-            "file: #{inspect(reason)}"
-        )
-    end
-  end
-
-  # A list with a non-atom anywhere in it is read as **empty**, not filtered down
-  # to the atoms in it. `systools_make:a_list_p/1` is all-or-nothing - one
-  # non-atom and the whole `modules` value is a `bad_param` - so keeping the valid
-  # subset invented an inventory `:systools` never accepts, and a
-  # whole-application instruction could then cover a changed module out of it and
-  # exit zero. That is the one thing the conservative reading of a malformed `.app`
-  # is supposed to rule out: it errs toward *more* findings precisely so a
-  # malformed resource cannot buy a clean bill of health, and a surviving subset
-  # broke that.
-  #
-  # The second element says whether `:systools` would accept the value at all, so
-  # that `resources/2` can report it as the fact about the build that it is,
-  # rather than leaving it to be inferred from an empty inventory downstream.
-  defp inventory(opts) do
-    case List.keyfind(opts, :modules, 0) do
-      {:modules, modules} when is_list(modules) ->
-        if Enum.all?(modules, &is_atom/1),
-          do: {MapSet.new(modules), true},
-          else: {MapSet.new(), false}
-
-      _absent_or_malformed ->
-        {MapSet.new(), false}
-    end
-  end
-
-  # `List.keyfind/3` rather than `Keyword.fetch/2`, and `is_list/1` on the way in:
-  # a `.app` file is arbitrary consulted terms rather than something this project
-  # wrote, and `Keyword` functions raise on a list that is not a keyword list -
-  # which would report a malformed resource file as a crash in this task instead
-  # of as the file it could not make sense of.
-  #
-  # `to_string/1` takes the version whether the file spells it as a charlist,
-  # which is what every tool writes, or as a binary.
-  defp fetch_vsn!(opts, file) do
-    case List.keyfind(opts, :vsn, 0) do
-      {:vsn, vsn} when is_list(vsn) or is_binary(vsn) ->
-        to_string(vsn)
-
-      nil ->
-        Mix.raise(
-          "#{Path.relative_to_cwd(file)} names no version, so there is no from-version to " <>
-            "look an appup entry up by."
-        )
-
-      {:vsn, vsn} ->
-        Mix.raise(
-          "#{Path.relative_to_cwd(file)} names the version #{inspect(vsn)}, which is not a " <>
-            "string. An appup entry is keyed by the version as it is written, so there is " <>
-            "nothing to look one up by."
-        )
     end
   end
 
