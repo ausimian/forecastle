@@ -512,6 +512,28 @@ defmodule Forecastle.AppupSourceTest do
       assert File.ls!(ctx.tmp_dir) == ["appup.exs"]
     end
 
+    test "replace/2 leaves a staging file it did not create alone", ctx do
+      # Raised in review, and it was the rule this module cites `Baseline` for:
+      # a name this run *believes* is unique is not something it may act on
+      # destructively. Sharing one error branch between the exclusive create and
+      # everything after it meant an `:eexist` - another run holding that name -
+      # deleted that run's live staging file.
+      #
+      # The names carry random bytes, so a collision cannot be arranged. What is
+      # arranged instead is the shape that made it possible: a staging file
+      # beside the target that this run did not create must survive a successful
+      # publish, and nothing but the run's own may be removed.
+      path = write!(ctx, ~s|{~c"0.1.1", [], []}\n|)
+      squatter = path <> ".castle-deadbeefdeadbeef"
+      File.write!(squatter, "somebody else's work in progress")
+
+      {:literal, literal} = Source.read(path)
+
+      assert Source.replace(literal, "merged\n") == :ok
+      assert File.read!(path) == "merged\n"
+      assert File.read!(squatter) == "somebody else's work in progress"
+    end
+
     test "replace/2 keeps the file's mode" do
       # The rename replaces the inode, so a source somebody had made
       # group-writable for a shared checkout would otherwise come back with this

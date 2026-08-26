@@ -88,6 +88,18 @@ defmodule Forecastle.AppupGenTest do
       assert output =~ ":compilers"
     end
 
+    test "says the same of a project whose :appup key is false", ctx do
+      # `Mix.Tasks.Compile.Appup.source/0` reads the key with
+      # `if src = Mix.Project.config()[:appup]`, so *any* falsy value compiles
+      # nothing. Reading it as configured wrote the file and left off the note,
+      # which is a successful run producing a source no build reads. Raised in
+      # review.
+      output = gen!(both(ctx), "false")
+
+      assert output =~ "wrote appup.exs"
+      assert output =~ "This project has no :appup key"
+    end
+
     test "says what it could not decide, beside the instructions it drafted", ctx do
       gen!(both(ctx), "none")
 

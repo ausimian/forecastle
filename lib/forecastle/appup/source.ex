@@ -729,11 +729,38 @@ defmodule Forecastle.Appup.Source do
   # The mode is carried across because the rename replaces the inode, so a source
   # file somebody had made executable, or group-writable for a shared checkout,
   # would silently come back with this run's umask instead.
-  defp publish(path, text) do
+  # **Only a staging file this run created is ever removed, and a name already
+  # taken is retried rather than cleared.** Raised in review, and it was the very
+  # rule the paragraph above cites `Baseline` for: a name this run *believes* is
+  # unique is not something it may act on destructively. Sharing one error branch
+  # between the exclusive create and everything after it meant an `:eexist` -
+  # another run holding that name - deleted that run's live staging file. The
+  # claim and the cleanup are now on opposite sides of the `case`, so nothing
+  # this did not create is touched.
+  @staging_attempts 5
+
+  defp publish(path, text, attempts \\ @staging_attempts)
+
+  defp publish(path, _text, 0) do
+    {:error,
+     "could not be written: #{@staging_attempts} staging names beside " <>
+       "#{Path.basename(path)} were all taken, so something else is writing there"}
+  end
+
+  defp publish(path, text, attempts) do
     staging = path <> ".castle-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 
-    with :ok <- File.write(staging, text, [:exclusive]),
-         :ok <- copy_mode(path, staging),
+    case File.write(staging, text, [:exclusive]) do
+      :ok -> rename(path, staging)
+      {:error, :eexist} -> publish(path, text, attempts - 1)
+      {:error, reason} -> {:error, "could not be written: " <> format(reason)}
+    end
+  end
+
+  # Past the exclusive create this run owns the staging file, so every path out
+  # of here either publishes it or takes it away.
+  defp rename(path, staging) do
+    with :ok <- copy_mode(path, staging),
          :ok <- File.rename(staging, path) do
       :ok
     else

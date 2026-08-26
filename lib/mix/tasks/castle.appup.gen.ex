@@ -456,11 +456,23 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # project with no key has nothing compiling the file that is about to be
   # written, and that is worth a line in the report rather than a surprise at the
   # next build.
+  # **Whether the key is set is asked the way the compiler asks it, which is
+  # truthiness and not `nil`.** `Mix.Tasks.Compile.Appup.source/0` is
+  # `if src = Mix.Project.config()[:appup]`, so `appup: false` compiles nothing -
+  # and reading it as configured here wrote a file and left off the note saying
+  # nothing would compile it, which is a successful run producing a source no
+  # build reads. Raised in review. The compiler's own reading is the one that
+  # decides, so this matches it rather than approximating it.
   defp appup_path do
-    configured = Mix.Project.config()[:appup]
     dir = Path.dirname(Mix.Project.project_file())
 
-    {:ok, Path.expand(configured || "appup.exs", dir), not is_nil(configured)}
+    case Mix.Project.config()[:appup] do
+      configured when configured in [nil, false] ->
+        {:ok, Path.expand("appup.exs", dir), false}
+
+      configured ->
+        {:ok, Path.expand(configured, dir), true}
+    end
   end
 
   ## Doing it
