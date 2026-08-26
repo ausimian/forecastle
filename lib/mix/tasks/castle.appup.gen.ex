@@ -110,9 +110,10 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
       on a regular expression can already select this from-version. Where a
       sibling answers for one direction and the file being written is not there
       yet, this is a **refusal** rather than a no-op, because a new file carries
-      both directions or neither. Two siblings answering for one direction are a
-      refusal too - that is a tree the next build refuses, whatever this run
-      does.
+      both directions or neither. Two entries in the set that can both be
+      selected for one direction are a refusal too - whether they are in two
+      files or in one - because that is a tree the next build refuses, whatever
+      this run does.
 
   ## Where it writes
 
@@ -338,17 +339,28 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # back. The from-version is the baseline's either way, because an appup's `dn`
   # list is keyed by the version being downgraded *to*.
   defp entries(app, heading, from, to) do
-    drafted = %{
-      up: Draft.entry(from.vsn, from, to),
-      down: Draft.entry(from.vsn, to, from)
-    }
-
     {path, kind, notes} = source(app, from.vsn, to.vsn)
-    elsewhere = siblings(kind, path, from.vsn)
 
-    refuse_sibling_collision!(elsewhere, from.vsn)
+    # Read once and carried, rather than read here and again where the writing
+    # case is chosen: the collision question below is about what this file holds,
+    # and a second read is not necessarily a second read of the same bytes.
+    read = Source.read(path)
+    mine = destination_matches(read, path, from.vsn)
+    theirs = siblings(kind, path, from.vsn)
 
-    write_plan(heading, path, kind, notes, drafted, from.vsn, to.vsn, elsewhere)
+    refuse_collision!(mine ++ theirs, from.vsn)
+
+    write_plan(heading, %{
+      path: path,
+      read: read,
+      kind: kind,
+      notes: notes,
+      drafted: %{up: Draft.entry(from.vsn, from, to), down: Draft.entry(from.vsn, to, from)},
+      from_vsn: from.vsn,
+      to_vsn: to.vsn,
+      mine: directions(mine),
+      elsewhere: theirs
+    })
   end
 
   ## The sources beside the one this would write
@@ -366,7 +378,7 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # Asked with `appup_search_for_version/2` over each sibling's own term, which is
   # the function the assembly step asks with, so the two cannot disagree about
   # coverage. There is no such set for an owned application: the `:appup` key
-  # names one file, and `merge_plan/4` already asks this of it.
+  # names one file, and the destination's own entries are asked about below.
   defp siblings(kind, path, from_vsn)
 
   defp siblings(:project, _path, _from_vsn), do: []
@@ -374,8 +386,17 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   defp siblings({:dependency, app, to_vsn}, path, from_vsn) do
     app
     |> sibling_files(to_vsn, path)
-    |> Enum.flat_map(&covered_directions!(&1, from_vsn))
+    |> Enum.flat_map(&matches!(&1, from_vsn))
   end
+
+  # The file this would write is part of the same set, so its own entries count
+  # towards both coverage and multiplicity. A destination that computes is refused
+  # by `write_plan/2` whatever this answers, so it contributes nothing here.
+  defp destination_matches({:literal, literal}, path, from_vsn) do
+    selecting(literal.term, path, from_vsn)
+  end
+
+  defp destination_matches(_read, _path, _from_vsn), do: []
 
   # Named the way `Forecastle.Appup.Dep` reads a name - the application at the
   # front, the version this release carries at the back - and anchored at both
@@ -411,12 +432,10 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # knowable from here. Assembly *does* evaluate it, and is where the collision
   # would land, so guessing that it covers nothing is the one answer that could
   # leave a tree that no longer builds.
-  defp covered_directions!(file, from_vsn) do
+  defp matches!(file, from_vsn) do
     case Source.read(file) do
       {:literal, literal} ->
-        for direction <- @directions,
-            covered?(literal.term, direction, from_vsn),
-            do: {direction, Path.relative_to_cwd(file)}
+        selecting(literal.term, file, from_vsn)
 
       :absent ->
         []
@@ -431,48 +450,72 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
     end
   end
 
-  # **Two siblings that both answer for one direction are a refusal, and reducing
-  # the directions to a set before noticing was a false pass raised in review.**
-  # That is a tree `Forecastle.Appup.Dep` already refuses, so reporting a
-  # successful no-op over it would be this task saying a release is fine about
-  # one that does not assemble. It is not a state this run created, and it is
-  # still this run's to report: it is the tool the author is holding.
-  defp refuse_sibling_collision!(elsewhere, from_vsn) do
-    elsewhere
+  # **One `{direction, file}` per *entry* that can be selected, not one per
+  # direction that has any**, because multiplicity is the question the release
+  # asks and a set answers it wrong. Asked of one entry at a time, which is what
+  # `Forecastle.Appup.Dep.selectable/2` does and for the same reason:
+  # `appup_search_for_version/2` answers with the first match rather than a count,
+  # and one entry is the smallest thing it can be asked about.
+  defp selecting(term, file, from_vsn) do
+    for direction <- @directions,
+        entry <- Appup.entries(term, direction),
+        match?({:ok, _script}, Appup.script([entry], from_vsn)),
+        do: {direction, Path.relative_to_cwd(file)}
+  end
+
+  # **Two entries that can both be selected for one direction are a refusal, and
+  # two rounds of review found two ways of asking it that missed one.** First the
+  # directions were reduced to a set before being counted, so two siblings
+  # competing collapsed into one covered direction; then the *destination's* own
+  # entries were left out, so a destination and a sibling competing did the same.
+  # Both leave a tree `Forecastle.Appup.Dep` refuses at the next `mix release`,
+  # reported here as a successful no-op or, worse, written into.
+  #
+  # So it is asked of every entry in the set, this file included, before anything
+  # is reduced - which also catches one file holding two of them. It is not a
+  # state this run created, and it is still this run's to report: this is the tool
+  # the author is holding.
+  defp refuse_collision!(matches, from_vsn) do
+    matches
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
     |> Enum.find(fn {_direction, files} -> length(files) > 1 end)
     |> case do
-      nil ->
-        :ok
-
-      {direction, files} ->
-        Mix.raise(
-          "#{Enum.join(files, " and ")} both answer for #{from_vsn} in the #{word(direction)} " <>
-            "direction. The release merges every source naming this application into one " <>
-            "appup and appup_search_for_version/2 takes the first entry that matches, so the " <>
-            "order the file names sort in would decide which instructions run - which the " <>
-            "next build refuses rather than allows. Nothing was drafted; keep one of them."
-        )
+      nil -> :ok
+      {direction, files} -> Mix.raise(collision(direction, Enum.uniq(files), from_vsn))
     end
   end
 
-  # Which of the three writing cases this is. The appup source is read *before*
-  # anything is decided about it, because "is this file one that can be rewritten"
-  # is the question that gates the other two.
-  defp write_plan(heading, path, kind, notes, drafted, from_vsn, to_vsn, elsewhere) do
-    case Source.read(path) do
+  defp collision(direction, [file], from_vsn) do
+    "#{file} holds more than one #{word(direction)} entry that can be selected for " <>
+      "#{from_vsn}. appup_search_for_version/2 takes the first that matches, so the order " <>
+      "they are written in would decide which instructions run - which the next build " <>
+      "refuses rather than allows. Nothing was drafted; keep one of them."
+  end
+
+  defp collision(direction, files, from_vsn) do
+    "#{Enum.join(files, " and ")} both answer for #{from_vsn} in the #{word(direction)} " <>
+      "direction. The release merges every source naming this application into one appup and " <>
+      "appup_search_for_version/2 takes the first entry that matches, so the order the file " <>
+      "names sort in would decide which instructions run - which the next build refuses " <>
+      "rather than allows. Nothing was drafted; keep one of them."
+  end
+
+  # Which of the three writing cases this is, decided on the read carried down
+  # from `entries/4`.
+  defp write_plan(heading, plan) do
+    case plan.read do
       :absent ->
-        create_plan(heading, path, kind, notes, drafted, from_vsn, to_vsn, elsewhere)
+        create_plan(heading, plan)
 
       {:literal, literal} ->
-        merge_plan(heading, literal, drafted, from_vsn, elsewhere)
+        merge_plan(heading, literal, plan)
 
       {tag, phrase} when tag in [:computed, :malformed] ->
         refusal(
           heading,
-          "#{Path.relative_to_cwd(path)} #{phrase}. Nothing was written; the entry to merge " <>
-            "by hand is below.",
-          printed(drafted, @directions)
+          "#{Path.relative_to_cwd(plan.path)} #{phrase}. Nothing was written; the entry to " <>
+            "merge by hand is below.",
+          printed(plan.drafted, @directions)
         )
     end
   end
@@ -481,24 +524,28 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # which is what makes the middle case a refusal rather than a partial write:
   # `Forecastle.Appup.Source.render/4` renders an entry per direction, and a
   # direction a sibling already answers for is one this must not add.
-  defp create_plan(heading, path, kind, notes, drafted, from_vsn, to_vsn, elsewhere) do
-    case @directions -- directions(elsewhere) do
+  defp create_plan(heading, plan) do
+    case @directions -- directions(plan.elsewhere) do
       @directions ->
-        %{heading: heading, action: {:create, path, to_vsn, kind, drafted}, notes: notes}
+        %{
+          heading: heading,
+          action: {:create, plan.path, plan.to_vsn, plan.kind, plan.drafted},
+          notes: plan.notes
+        }
 
       [] ->
-        %{heading: heading, action: :covered, notes: answered(elsewhere, from_vsn)}
+        %{heading: heading, action: :covered, notes: answered(plan.elsewhere, plan.from_vsn)}
 
       [direction] ->
         refusal(
           heading,
-          "#{files(elsewhere)} already answers for #{from_vsn} in the " <>
+          "#{files(plan.elsewhere)} already answers for #{plan.from_vsn} in the " <>
             "#{word(other_direction(direction))} direction, and the release merges every " <>
             "source naming this application into one appup - so a new file with both " <>
             "directions in it would give that one two entries that can both be selected for " <>
-            "#{from_vsn}, which the next build refuses. Nothing was written; the entry to " <>
-            "merge into that file by hand is below.",
-          printed(drafted, @directions)
+            "#{plan.from_vsn}, which the next build refuses. Nothing was written; the entry " <>
+            "to merge into that file by hand is below.",
+          printed(plan.drafted, @directions)
         )
     end
   end
@@ -513,29 +560,22 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # them into one appup.** A direction a sibling answers for is one nothing can
   # be added to; a direction this file answers for is one that is never
   # rewritten. Both leave the same thing to do, which is nothing.
-  defp merge_plan(heading, literal, drafted, from_vsn, elsewhere) do
-    mine = Enum.filter(@directions, &covered?(literal.term, &1, from_vsn))
-    theirs = directions(elsewhere)
-
-    case @directions -- (mine ++ theirs) do
+  defp merge_plan(heading, literal, plan) do
+    case @directions -- (plan.mine ++ directions(plan.elsewhere)) do
       [] ->
         %{
           heading: heading,
           action: :covered,
-          notes: nothing_to_add(literal, elsewhere, from_vsn)
+          notes: nothing_to_add(literal, plan.elsewhere, plan.from_vsn)
         }
 
       directions ->
         %{
           heading: heading,
-          action: {:merge, literal, Enum.map(directions, &{&1, drafted[&1]})},
-          notes: partial(directions, literal, mine, elsewhere, from_vsn)
+          action: {:merge, literal, Enum.map(directions, &{&1, plan.drafted[&1]})},
+          notes: partial(directions, literal, plan.mine, plan.elsewhere, plan.from_vsn)
         }
     end
-  end
-
-  defp covered?(term, direction, from_vsn) do
-    match?({:ok, _script}, Appup.script(Appup.entries(term, direction), from_vsn))
   end
 
   defp directions(elsewhere), do: elsewhere |> Enum.map(&elem(&1, 0)) |> Enum.uniq()

@@ -2563,15 +2563,21 @@ is a refusal too: this task does not evaluate a source it has not read as a
 literal, so what that file covers is not knowable from here, and assembly — which
 does evaluate it — is where the collision would land.
 
-**The set includes the destination, and two siblings answering for one direction
-are a refusal — both were false passes found on the PR.** Asking only the
-siblings refused a case where the file being written covers one direction and a
-sibling covers the other, which is a release that assembles perfectly well; and
-reducing the covered directions to a *set* before counting them turned two
-siblings competing for one direction — a tree `Forecastle.Appup.Dep` already
-refuses — into a reported no-op. So coverage is `mine ++ theirs` per direction,
-and multiplicity is checked before the reduction. A merge into an existing
-literal needs no refusal at all: it adds exactly the directions nothing answers
+**The set includes the destination, for coverage *and* for multiplicity, and
+three rounds on the PR found three ways of asking that missed one.** Asking only
+the siblings refused a case where the file being written covers one direction and
+a sibling covers the other — a release that assembles perfectly well. Reducing the
+covered directions to a *set* before counting them turned two siblings competing
+for one direction into a reported no-op. And leaving the destination's own entries
+out of the count did the same for a destination competing with a sibling. Both of
+the latter are trees `Forecastle.Appup.Dep` already refuses, reported here as
+success and, worse, written into.
+
+So `selecting/3` yields one pair **per entry** rather than one per direction that
+has any, `refuse_collision!/2` is asked of every entry in the set — this file
+included, which also catches one file holding two — and only then is coverage
+reduced to `mine ++ theirs` per direction. A merge into an existing literal needs
+no refusal of its own after that: it adds exactly the directions nothing answers
 for.
 
 **The generator's file name is built out of two version strings, so it is checked

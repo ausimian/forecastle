@@ -392,6 +392,31 @@ defmodule Forecastle.AppupGenTest do
       assert output =~ "answer for #{@from} between them, in both directions"
     end
 
+    test "refuses where the file itself and a sibling answer for one direction", ctx do
+      # The same multiplicity one file further in: the destination holds an
+      # upgrade entry for 0.1.0 and a sibling's pattern selects it too, which the
+      # next `mix release` refuses. Counting only the siblings reduced the pair to
+      # one covered direction and merged the missing one into a tree that does not
+      # assemble.
+      write_dep_source!("sample_dep-#{@from}-#{@to}.exs", literal_appup(@from, :up))
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :up))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a colliding destination and sibling were merged into:\n\n#{output}"
+      assert output =~ "both answer for #{@from} in the upgrade direction"
+    end
+
+    test "refuses a file holding two entries that can both be selected", ctx do
+      # And the same question inside one file, which the release asks too.
+      write_dep_source!("sample_dep-#{@from}-#{@to}.exs", twice_appup(@from, ~S(0\\.1\\..*)))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a file with two selectable entries was merged into:\n\n#{output}"
+      assert output =~ "holds more than one upgrade entry that can be selected for #{@from}"
+    end
+
     test "refuses two siblings that answer for one direction between them", ctx do
       # A tree the release already refuses, so reporting a successful no-op over
       # it would be this task saying a release is fine about one that does not
@@ -581,6 +606,13 @@ defmodule Forecastle.AppupGenTest do
   # And the same shape keyed on a version rather than a pattern.
   defp literal_appup(from, directions) do
     dep_appup(~s|~c"#{from}"|, directions)
+  end
+
+  # One file holding two upgrade entries that can both be selected for `from` -
+  # the literal and a pattern that matches it - which is the multiplicity question
+  # asked inside a single source rather than across two.
+  defp twice_appup(from, pattern) do
+    ~s|{~c"#{@to}", [{~c"#{from}", []}, {"#{pattern}", []}], []}\n|
   end
 
   # `directions` is which lists get the entry: an appup covering one direction and
