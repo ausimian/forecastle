@@ -104,6 +104,24 @@ there is no `:tar` step, generation is appended last; if you pack your own
 archive in a step of your own, place `&Forecastle.generate_relup/1` before it
 yourself, because nothing here can tell which of your steps does the packing.
 
+**A `&Forecastle.generate_relup/1` you placed yourself keeps its place, and no
+second one is added.** `Forecastle.steps/1` splices generation in only where the
+list does not already have it, so the arrangement above — generation in front of
+the step that packs — is honoured rather than duplicated. A step placed *before*
+`:assemble` does not count: it cannot generate anything there, because the
+release file it reads has not been written yet, and it fails naming that file.
+
+**Generation placed *after* `:tar` is refused, for a release that asks for a
+relup.** `mix release` allows a function step on either side of `:tar`, but
+`:tar` packs the version directory — so a relup generated afterwards can never be
+in the archive, and the build would announce the plan it had generated and exit 0
+having shipped an artefact with none in it. Move the step in front of `:tar`, or
+drop `:tar` and pack your own archive in a step with generation ahead of it. The
+refusal happens before anything is assembled, and again immediately before `:tar`
+in case a step of your own added `:upgrade_from` in between — so no archive is
+ever packed without it. A release that sets no `:upgrade_from` is unaffected:
+generation does nothing there, so the placement costs nothing.
+
 `generate_relup/1` does nothing at all unless the release sets `:upgrade_from`,
 so adding it to a release that generates no relup changes nothing and costs
 nothing.
