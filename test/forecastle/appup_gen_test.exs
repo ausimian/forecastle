@@ -482,22 +482,20 @@ defmodule Forecastle.AppupGenTest do
       # `config/runtime.exs`.
       root = dep_copy!(ctx.to, "gen-escaping-vsn")
       set_dep_vsn!(root, "2.0/x/../../../../config/runtime")
+      escaping!(ctx, root)
+    end
 
-      # The fixture has one, which is the point rather than an inconvenience: the
-      # path this escapes to is a file the project already owns.
-      runtime = Path.join(Fixture.workspace(), "config/runtime.exs")
-      before = File.read!(runtime)
+    test "refuses a version that walks out of rel/appups and back into it", ctx do
+      # Raised in review, and the half asking the *expanded* parent missed: this
+      # normalises back to a path directly under the directory, so the check
+      # passed - while getting there created `sample_dep-x` inside it and left the
+      # file under a basename naming no application. Both are refused by the next
+      # build, written by a run that reported success.
+      root = dep_copy!(ctx.to, "gen-normalising-vsn")
+      set_dep_vsn!(root, "x/../2.0")
+      escaping!(ctx, root)
 
-      {output, status} =
-        gen(
-          ["--from", "rel:" <> rel(ctx.from, @from), "--to", "rel:" <> rel(root, @to)] ++
-            ["--app", "sample_dep"],
-          "generated.exs"
-        )
-
-      assert status != 0, "a version naming a path was written to:\n\n#{output}"
-      assert output =~ "do not make a file name in rel/appups"
-      assert File.read!(runtime) == before, "the fixture's own config/runtime.exs was rewritten"
+      refute File.exists?(Path.join(Fixture.workspace(), "rel/appups/sample_dep-x"))
     end
 
     test "never rewrites an entry it already has, the same as for an owned application", ctx do
@@ -647,6 +645,26 @@ defmodule Forecastle.AppupGenTest do
   # And the same shape keyed on a version rather than a pattern.
   defp literal_appup(from, directions) do
     dep_appup(~s|~c"#{from}"|, directions)
+  end
+
+  # Drafts for a dependency whose `.app` names a version that is a path rather
+  # than a version, and asserts nothing was written where it points. The fixture
+  # has a `config/runtime.exs`, which is the point rather than an inconvenience:
+  # the path these escape to is a file the project already owns.
+  defp escaping!(ctx, root) do
+    runtime = Path.join(Fixture.workspace(), "config/runtime.exs")
+    before = File.read!(runtime)
+
+    {output, status} =
+      gen(
+        ["--from", "rel:" <> rel(ctx.from, @from), "--to", "rel:" <> rel(root, @to)] ++
+          ["--app", "sample_dep"],
+        "generated.exs"
+      )
+
+    assert status != 0, "a version naming a path was written to:\n\n#{output}"
+    assert output =~ "do not make a file name in rel/appups"
+    assert File.read!(runtime) == before, "the fixture's own config/runtime.exs was rewritten"
   end
 
   # A source whose version tag is not the one the transition goes to, which the

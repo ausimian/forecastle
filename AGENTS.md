@@ -2616,10 +2616,25 @@ to be a name.** `Forecastle.Build` refuses a version that is not valid UTF-8 or
 that carries control characters — those reach a report and a terminal — and says
 nothing about path separators, which reach nothing anywhere else and reach the
 filesystem here: a `.app` naming its version `2.0/x/../../../../config/runtime`
-made `mix castle.appup.gen` create and write `config/runtime.exs`. Checked by
-expansion rather than by looking for separators, because that is the question the
-filesystem will answer and a `..` is not a separator. `bin/castle` refuses a path
-separator in a version one layer out, for the same reason.
+made `mix castle.appup.gen` create and write `config/runtime.exs`. Checked on the
+parent **as written**, not on the parent it expands to — a version carrying
+`x/../1.0` normalises back to a path directly under the directory and passed the
+expanded check, while getting there created the intermediate directory inside it
+and left the file under a basename naming no application. The parent as written
+is the directory exactly when the name carries no separator, which is the whole
+of what a file name in a directory means. `bin/castle` refuses a path separator
+in a version one layer out, for the same reason.
+
+**Not checked: whether the generated name is ambiguous in the target release.**
+`<app>-<from>-<to>.exs` can read as two applications only where one application's
+name ends in `-` plus something that is the other's version — `foo-bar` at 2.0
+beside `foo` at 2.0 — and `Dep.named!/2` refuses that by name, showing both
+readings. Asking it here would mean an inventory of every application in the
+`--to` build and its version, machinery nothing else needs, to move a loud and
+exact build failure slightly earlier. That is the line for this whole class: a
+disagreement that ends in *silence* or in a file written to the wrong place is
+this task's to prevent; one that ends in the build naming the file and both
+readings is the build's to report.
 
 **A file covering only one direction is deliberately not refused.** An appup with
 an upgrade entry and no downgrade is a legitimate thing to write, `auto`

@@ -767,18 +767,28 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # `config/runtime.exs`, which is a file outside the appup directory altogether
   # and one the project may already have.
   #
-  # Checked by expansion rather than by looking for separators, because that is
-  # the same question the filesystem will answer and a `..` is not a separator.
-  # `bin/castle` refuses a path separator in a version for the same reason, one
-  # layer out: a version that names a directory is not a version.
+  # **Asked of the parent as written, not of the parent it expands to, and asking
+  # the expanded one was a hole raised on the PR.** A version carrying `x/../1.0`
+  # expands back to a path directly under the directory and passed - while
+  # `created/2` creates the intermediate `<app>-x` on its way there and the file
+  # lands under a basename the release then reads as naming no application at
+  # all. Both are things the next build refuses, written by a run that reported
+  # success.
+  #
+  # The parent as written is `dir` exactly when the name carries no separator,
+  # which is the whole of what a file name in a directory means. The expanded path
+  # is still named in the message, because that is where the bytes would have
+  # gone. `bin/castle` refuses a path separator in a version for the same reason,
+  # one layer out: a version that names a directory is not a version.
   defp confined!(path, dir, from_vsn, to_vsn) do
-    if Path.dirname(Path.expand(path)) != Path.expand(dir) do
+    if Path.dirname(path) != dir do
       Mix.raise(
         "#{from_vsn} and #{to_vsn} do not make a file name in #{Path.relative_to_cwd(dir)}: " <>
-          "#{Path.relative_to_cwd(Path.expand(path))} is somewhere else. An appup for a " <>
-          "dependency is named for its transition, so a version carrying a path separator or " <>
-          "a .. would put the source outside the directory the build reads - or over a file " <>
-          "that is already there. Nothing was written."
+          "#{Path.relative_to_cwd(Path.expand(path))} is somewhere else, and getting there " <>
+          "would leave a directory behind in it. An appup for a dependency is named for its " <>
+          "transition, so a version carrying a path separator or a .. would put the source " <>
+          "outside the directory the build reads - or over a file that is already there. " <>
+          "Nothing was written."
       )
     end
   end
