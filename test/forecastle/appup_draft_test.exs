@@ -227,6 +227,40 @@ defmodule Forecastle.AppupDraftTest do
       refute text =~ "exports NO code_change/4"
     end
 
+    test "asks a supervisor destination for the old behaviour's callback" do
+      # Raised in review, and the same rule as the case above rather than a new
+      # one: `expand_script/1` turns `{update, M, supervisor}` into an advanced
+      # change, so `change_code` reaches it too - and a process still running as
+      # a `gen_server` asks for `code_change/3` of a `use Supervisor` module,
+      # which does not export one. Asking only in the advanced branch let this
+      # through.
+      none = %{Mod => none()}
+      old = side(%{Mod => {"a", [behaviour: [GenServer]]}}, nil, none)
+      new = side(%{Mod => {"b", [behaviour: [Supervisor]]}}, nil, none)
+
+      assert [{{:update, Mod, :supervisor}, comments}] = instructions({old, new})
+
+      assert Enum.join(comments, " ") =~ "exports NO code_change/3"
+    end
+
+    test "asks nothing where no process is running the module under a behaviour" do
+      # The other half of the rule, and where a union of both sides would have
+      # warned falsely. A module that was plain has no process running it under
+      # a behaviour, so nothing calls `code_change` on this edge whatever the
+      # destination declares; and a supervisor process re-reads `init/1` rather
+      # than calling one. Both are silent, and right to be.
+      none = %{Mod => none()}
+      plain = side(%{Mod => {"a", []}}, nil, none)
+      supervisor = side(%{Mod => {"a", [behaviour: [Supervisor]]}}, nil, none)
+      genserver = side(%{Mod => {"b", [behaviour: [GenServer]]}}, nil, none)
+
+      for from <- [plain, supervisor] do
+        assert [{{:update, Mod, {:advanced, []}}, comments}] = instructions({from, genserver})
+
+        refute Enum.join(comments, " ") =~ "exports NO"
+      end
+    end
+
     test "does not ask a supervisor for one at all" do
       # `supervisor:system_code_change/4` re-reads `init/1` and calls no
       # `code_change`, so the export says nothing about a supervisor update.

@@ -2041,15 +2041,40 @@ module and is not visible in a beam — so a module declaring `:gen_statem` and
 `GenServer` and exporting only `code_change/4` passed silently while a
 `gen_server` process using it would fail. The ambiguity itself is now said too.
 
-**The arity is the *old* side's and the export is the *new* side's**, which a
-later round found. `sys:change_code` is handled by the behaviour the process was
-*started* under, so the old code decides whether `code_change/3` or
-`code_change/4` is called and the newly loaded module is what it is called on. A
-module going from `GenServer` to `:gen_statem` is therefore asked for both, and
-the role comparison distinguishes them: within the advanced row, roles are
-compared by which arity the behaviour calls, so `GenServer` for `:gen_server` is
-the same role spelled two ways and says nothing while `GenServer` for
-`:gen_statem` is a different callback contract and does.
+### One rule, because three rounds asked it the wrong way round
+
+**Three review findings were the same mistake wearing different clothes:
+reading the *destination* for a question the *running* side answers.** They were
+patched one at a time until the rule was stated, and the rule is what stops a
+fourth:
+
+> The callback called on this edge is the one the **old** side's behaviour calls,
+> on the **new** side's module.
+
+`sys:change_code` is a system message handled by the behaviour the process was
+*started* under, and a hot upgrade does not restart the process — so the old
+code decides whether `code_change/3` or `code_change/4` is sent, and the module
+just loaded is what it is invoked on. The three findings:
+
+- classifying on the destination alone, so a behaviour-role change said nothing;
+- asking the destination's arity, so `GenServer` → `:gen_statem` exporting only
+  `code_change/4` passed while a still-running `gen_server` would ask for `/3`;
+- asking it only in the advanced branch, so `GenServer` → `Supervisor` passed —
+  `expand_script/1` turns `{update, M, supervisor}` into an advanced change too,
+  so `change_code` reaches a `use Supervisor` module that exports no
+  `code_change/3` at all.
+
+**The rule covers all three and makes the silent cases decidable rather than
+lucky.** An old side with no advanced behaviour requires nothing, because no
+process is running that module under one — which is why plain → `GenServer` and
+`Supervisor` → `GenServer` say nothing, and are right to. A `load_module` is
+never asked, since it suspends nothing and calls nothing. Do not reintroduce a
+union of both sides' arities: it warns falsely on exactly those two.
+
+The role comparison is the same rule from the other end: within the advanced row,
+roles compare by which arity the behaviour calls, so `GenServer` for
+`:gen_server` is one role spelled two ways and says nothing, while `GenServer`
+for `:gen_statem` is a different callback contract and does.
 
 **The `Attr`-to-`Draft` boundary is pinned against real beams**, in
 `appup_draft_test.exs`'s "against real beams read through Forecastle.Build". Every

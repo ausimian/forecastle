@@ -169,14 +169,22 @@ defmodule Forecastle.Appup.Draft do
     was = Build.behaviours(old, module)
     now = Build.behaviours(new, module)
 
+    # `callback/3` is asked of both `update` branches and of neither
+    # `load_module`: an update is what makes `release_handler` call
+    # `sys:change_code`, and a `load_module` swaps code and calls nothing. The
+    # supervisor form is an advanced change with a `static` module type -
+    # `expand_script/1` rewrites it to `{update, Mod, static, default,
+    # {advanced, []}, …}` - so it reaches `change_code` exactly as the other one
+    # does.
     {instruction, comments} =
       case classify(now) do
         {:supervisor, match} ->
-          {{:update, module, :supervisor}, supervisor_comment(module, match, now)}
+          {{:update, module, :supervisor},
+           supervisor_comment(module, match, now) ++ callback(module, was, new)}
 
         {:advanced, matches} ->
           {{:update, module, {:advanced, []}},
-           advanced_comment(module, matches, now) ++ callback(module, matches, was, new)}
+           advanced_comment(module, matches, now) ++ callback(module, was, new)}
 
         :plain ->
           {{:load_module, module}, plain_comment(module, now)}
@@ -240,24 +248,36 @@ defmodule Forecastle.Appup.Draft do
   # unsafe one, since a state that did need migrating is left alone silently. So
   # the draft says the module needs a `code_change` and lets the author write one.
   #
-  # **Every matched behaviour is asked, not just the one that decided the
-  # instruction.** A module declaring `:gen_statem` and `GenServer` needs
-  # `code_change/4` for one and `code_change/3` for the other, and which of them
-  # the running process asks for is decided at run time - so exporting one of the
-  # two is not enough, and checking only the first was a silent pass. Raised in
-  # review.
+  # **Three review rounds asked this the wrong way round before the rule was
+  # stated, so state it once:**
   #
-  # **The arity is the *running* process's and the export is the *new* module's,
-  # which are two different sides.** Raised in a later round. `sys:change_code`
-  # is handled by the behaviour the process was started under - the old code's -
-  # and that is what decides whether `code_change/3` or `code_change/4` is
-  # called; the module it is called *on* is the one just loaded. So a module
-  # going from `GenServer` to `:gen_statem` is asked for both, because a process
-  # still running as a `gen_server` will ask for `code_change/3` of a module that
-  # may only export the `gen_statem` one. Asking only the destination's arity let
-  # that through.
-  defp callback(module, matches, was, new) do
-    behaviours = Enum.uniq(matches ++ (present(was, @advanced) || []))
+  # > The callback called on this edge is the one the **old** side's behaviour
+  # > calls, on the **new** side's module.
+  #
+  # `sys:change_code` is a system message, and it is handled by the behaviour the
+  # process was *started* under. A hot upgrade does not restart the process, so
+  # that is the old code's behaviour, and it is what decides whether
+  # `code_change/3` or `code_change/4` is sent. The module it is invoked on is the
+  # one just loaded. Every round that got this wrong read the destination for
+  # both halves:
+  #
+  #   * classifying on the destination alone, so a role change said nothing.
+  #   * asking the destination's arity, so `GenServer` to `:gen_statem` exporting
+  #     only `code_change/4` passed while a still-running `gen_server` would ask
+  #     for `code_change/3`.
+  #   * asking it only in the advanced branch, so `GenServer` to `Supervisor`
+  #     passed - `expand_script/1` turns the supervisor form into an advanced
+  #     change too, so `change_code` reaches a `use Supervisor` module that
+  #     exports no `code_change/3` at all.
+  #
+  # One rule covers all three, and the four transitions fall out of it rather
+  # than needing cases: an old side with **no** advanced behaviour requires
+  # nothing, because no process is running that module under one - which is why
+  # plain-to-`GenServer` and `Supervisor`-to-`GenServer` are silent, and right to
+  # be. A `load_module` never reaches here at all, since it suspends nothing and
+  # calls nothing.
+  defp callback(module, was, new) do
+    behaviours = present(was, @advanced) || []
 
     case Enum.reject(arities(behaviours), &Build.exports?(new, module, :code_change, &1)) do
       [] -> []
@@ -268,11 +288,12 @@ defmodule Forecastle.Appup.Draft do
   defp missing_callback(module, behaviours, missing) do
     [
       "",
-      "#{inspect(module)} exports NO #{callbacks(missing)}, which #{list(behaviours)} needs",
-      "and makes optional. release_handler calls sys:change_code, which the *running*",
-      "process's behaviour handles - so the arity is the old code's and the module it is",
-      "called on is the new one. Without it the install fails with undef. Elixir's `use",
-      "GenServer` injects one; @behaviour alone and Erlang callback modules do not."
+      "#{inspect(module)} exports NO #{callbacks(missing)}, which the OLD build's",
+      "#{list(behaviours)} calls and makes optional. sys:change_code is handled by the",
+      "behaviour the running process was started under - the old code's - and invoked on",
+      "the module just loaded, so this is asked of the new build's exports. Without it the",
+      "install fails with undef. Elixir's `use GenServer` injects one; @behaviour alone and",
+      "Erlang callback modules do not."
     ]
   end
 
