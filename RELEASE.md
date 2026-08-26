@@ -679,7 +679,11 @@
   source the `:appup` key names: arbitrary Elixir evaluated for its value, and
   source you review and commit.
   `mix castle.appup.gen --app jason --from <spec>` drafts one and writes it
-  there. `mix release` then places it into the assembled release at
+  there, asking whether the transition is already covered across *every* source
+  for that application rather than only the one it would write — so a sibling
+  whose from-version is a regular expression that already matches leaves it a
+  no-op rather than a second entry the next build would refuse.
+  `mix release` then places it into the assembled release at
   `lib/<app>-<vsn>/ebin/<app>.appup` and names it on standard output, and `auto`
   reads it exactly as it reads an appup a dependency shipped for itself — an
   entry that matches this from-version *is* an instruction for this transition —

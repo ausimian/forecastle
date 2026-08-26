@@ -103,6 +103,13 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
       directions. Nothing is added and the run says so - and it says, too, that
       an entry existing is not the same as it covering everything that moved,
       because nothing here has checked that and `mix castle.appup` is what does.
+    * **another `rel/appups` source for the same dependency already answers for
+      it** in both directions. A dependency's appups are one file per transition
+      and the release merges every file naming the application into one appup, so
+      coverage is a question about the *set*: a sibling keyed on a regular
+      expression can already select this from-version. Covered in one direction
+      only, this is a **refusal** rather than a no-op, because the file it would
+      write is one the next build would refuse.
 
   ## Where it writes
 
@@ -335,7 +342,122 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
 
     {path, kind, notes} = source(app, from.vsn, to.vsn)
 
-    write_plan(heading, path, kind, notes, drafted, from.vsn, to.vsn)
+    case siblings(kind, path, from.vsn) do
+      [] -> write_plan(heading, path, kind, notes, drafted, from.vsn, to.vsn)
+      covered -> sibling_plan(heading, covered, drafted, from.vsn)
+    end
+  end
+
+  ## The sources beside the one this would write
+
+  # **A dependency's appups are one file per transition and the release merges
+  # every file naming the application into one appup, so "is this transition
+  # already covered" is a question about the *set* rather than about this file.
+  # Raised in review.** A sibling keyed on a regular expression that already
+  # selects this from-version makes the entry this would write a second one that
+  # `Forecastle.Appup.Dep` refuses - deterministically, from the next build
+  # onwards. The generator would have reported success and left a tree that no
+  # longer assembles, which is exactly the disagreement between what writes an
+  # appup and what reads it that this pair of tasks exists not to have.
+  #
+  # Asked with `appup_search_for_version/2` over each sibling's own term, which is
+  # the function the assembly step asks with, so the two cannot disagree about
+  # coverage. There is no such set for an owned application: the `:appup` key
+  # names one file, and `merge_plan/4` already asks this of it.
+  defp siblings(kind, path, from_vsn)
+
+  defp siblings(:project, _path, _from_vsn), do: []
+
+  defp siblings({:dependency, app, to_vsn}, path, from_vsn) do
+    app
+    |> sibling_files(to_vsn, path)
+    |> Enum.flat_map(&covered_directions!(&1, from_vsn))
+  end
+
+  # Named the way `Forecastle.Appup.Dep` reads a name - the application at the
+  # front, the version this release carries at the back - and anchored at both
+  # ends for its reason: a version may itself contain a `-`, so a split is a
+  # guess. A directory that cannot be listed is not this task's to report, since
+  # it is the assembly step that has to read it.
+  defp sibling_files(app, to_vsn, path) do
+    dir = Dep.dir()
+
+    case File.ls(dir) do
+      {:ok, entries} ->
+        entries
+        |> Enum.sort()
+        |> Enum.filter(&sibling?(&1, app, to_vsn))
+        |> Enum.map(&Path.join(dir, &1))
+        |> Enum.reject(&(&1 == path))
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp sibling?(entry, app, to_vsn) do
+    base = Path.basename(entry, ".exs")
+
+    Path.extname(entry) == ".exs" and String.starts_with?(base, "#{app}-") and
+      String.ends_with?(base, "-#{to_vsn}")
+  end
+
+  # **A sibling that computes is a refusal rather than an omission.** This task
+  # deliberately does not evaluate an appup source it has not read as a literal -
+  # `Forecastle.Appup.Source` is built on that - so what such a file covers is not
+  # knowable from here. Assembly *does* evaluate it, and is where the collision
+  # would land, so guessing that it covers nothing is the one answer that could
+  # leave a tree that no longer builds.
+  defp covered_directions!(file, from_vsn) do
+    case Source.read(file) do
+      {:literal, literal} ->
+        for direction <- @directions,
+            covered?(literal.term, direction, from_vsn),
+            do: {direction, Path.relative_to_cwd(file)}
+
+      :absent ->
+        []
+
+      {tag, phrase} when tag in [:computed, :malformed] ->
+        Mix.raise(
+          "#{Path.relative_to_cwd(file)} #{phrase}, and it names the same application and " <>
+            "version as the file this would write. Whether it already answers for " <>
+            "#{from_vsn} cannot be read from here, and if it does then the release refuses " <>
+            "both of them. Nothing was written."
+        )
+    end
+  end
+
+  defp sibling_plan(heading, covered, drafted, from_vsn) do
+    files = covered |> Enum.map(&elem(&1, 1)) |> Enum.uniq() |> Enum.join(", ")
+
+    case covered |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.sort() do
+      [:down, :up] ->
+        %{
+          heading: heading,
+          action: :covered,
+          notes: [
+            "#{files} already answers for #{from_vsn} in both directions, and the release " <>
+              "merges every source naming this application into one appup. Nothing was " <>
+              "added: a second entry there would be one appup_search_for_version/2 never " <>
+              "selects, and the build refuses rather than choosing between them.",
+            "An entry existing is not the same as it covering everything that moved, and " <>
+              "nothing here has checked that it does. mix castle.appup is what answers it."
+          ]
+        }
+
+      [direction] ->
+        refusal(
+          heading,
+          "#{files} already answers for #{from_vsn} in the #{word(direction)} direction, and " <>
+            "the release merges every source naming this application into one appup - so " <>
+            "this file would " <>
+            "give that direction two entries that can both be selected for #{from_vsn}, and " <>
+            "the next build refuses it. Nothing was written; the entry to merge into that " <>
+            "file by hand is below.",
+          printed(drafted, @directions)
+        )
+    end
   end
 
   # Which of the three writing cases this is. The appup source is read *before*
@@ -406,6 +528,9 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
 
   defp article(:up), do: "an upgrade"
   defp article(:down), do: "a downgrade"
+
+  defp word(:up), do: "upgrade"
+  defp word(:down), do: "downgrade"
 
   defp unconfigured(path) do
     "This project has no :appup key, so nothing compiles that file yet. Add " <>

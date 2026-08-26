@@ -470,7 +470,11 @@ Elixir evaluated for its value, and source you review and commit:
 `mix castle.appup.gen --app jason --from <spec>` drafts one for you and writes it
 there, with the same comments it writes beside an owned application's
 instructions. A dependency whose modules are all stateless yields a
-`load_module`-only appup, which is the common and useful case.
+`load_module`-only appup, which is the common and useful case. It asks whether
+the transition is already covered across *every* source for that application, not
+just the one it would write — so a sibling whose from-version is a regular
+expression that already matches leaves it a no-op rather than a second entry the
+next build would refuse.
 
 `mix release` writes each of them into the assembled release at
 `lib/<app>-<vsn>/ebin/<app>.appup`, and says so. **Nothing is ever written into

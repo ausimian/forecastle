@@ -336,6 +336,48 @@ defmodule Forecastle.AppupGenTest do
       assert Path.wildcard(Path.join(Fixture.workspace(), "deps/**/*.appup")) == []
     end
 
+    test "leaves the transition alone where a sibling source already answers for it", ctx do
+      # Raised in review. A dependency's appups are one file per transition and
+      # the release merges every file naming the application into one appup, so
+      # coverage is a question about the *set*: this sibling is keyed on a regular
+      # expression that already selects 0.1.0, and writing a second entry for it
+      # would leave a tree the next build refuses. Reported success on a tree that
+      # no longer assembles is the shape of failure this whole tooling is for.
+      sibling = write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*)))
+
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      assert output =~ "0 appups written"
+      assert output =~ "already answers for #{@from} in both directions"
+      assert output =~ Path.relative_to(sibling, Fixture.workspace())
+      refute File.exists?(dep_source())
+
+      # And the tree it left still assembles, which is the half an announcement
+      # cannot be trusted for. The project's own appup is the checked-in one
+      # here, since this case wrote none.
+      into = Path.join(Fixture.workspace(), "gen-sibling-rel")
+      on_exit(fn -> File.rm_rf!(into) end)
+
+      {assembled, status} =
+        Fixture.mix(["release", "sample", "--overwrite", "--path", into], env("appup.exs"))
+
+      assert status == 0, "the tree the generator left does not assemble:\n\n#{assembled}"
+    end
+
+    test "refuses where a sibling answers for one direction only", ctx do
+      # Half-covered is a refusal rather than a no-op: the file this would write
+      # is one the next build refuses, because that direction would have two
+      # entries that can both be selected for 0.1.0.
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\..*), :up))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "a colliding entry was written:\n\n#{output}"
+      assert output =~ "already answers for #{@from} in the upgrade direction"
+      assert output =~ "the upgrade entry:"
+      refute File.exists?(dep_source())
+    end
+
     test "refuses a version that would put the file somewhere other than rel/appups", ctx do
       # Raised in review. The name is built out of two version strings, and
       # `Forecastle.Build` refuses a version that is not valid UTF-8 or that
@@ -490,6 +532,25 @@ defmodule Forecastle.AppupGenTest do
   end
 
   defp dep_sources, do: Path.join(Fixture.workspace(), "rel/appups")
+
+  defp write_dep_source!(name, contents) do
+    File.mkdir_p!(dep_sources())
+
+    path = Path.join(dep_sources(), name)
+    File.write!(path, contents)
+
+    path
+  end
+
+  # An appup whose from-version is a **binary**, which is a regular expression to
+  # `appup_search_for_version/2` rather than a version compared for equality - so
+  # it answers for 0.1.0 without being named for it.
+  defp regex_appup(pattern, directions \\ :both) do
+    entry = ~s|[{"#{pattern}", [{:load_module, SampleDep}]}]|
+    down = if directions == :up, do: "[]", else: entry
+
+    ~s|{~c"#{@to}", #{entry}, #{down}}\n|
+  end
 
   # Put back from the checked-in fixture rather than from a copy taken at setup
   # time, so that a run killed part way through cannot leave a rewritten appup

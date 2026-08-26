@@ -74,9 +74,14 @@ defmodule Forecastle.Appup.Dep do
       bindings, that holds something which is not a `{from_version, script}`
       entry, or whose version tag is not the version the release carries.
     * a file whose own appup has no entry for the from-version its name claims.
+    * an entry keyed on a binary that is not a regular expression `re` can
+      compile. A binary key *is* a regular expression to
+      `appup_search_for_version/2`, which raises on one it cannot compile, so
+      asking once per file is what keeps that out of the middle of a build.
     * two entries for one application that can both be selected for one version.
-    * an appup the application itself ships that cannot be read, since this is
-      about to place one over it.
+    * an appup the application itself ships that cannot be read, or that holds
+      either of the two above - its entries are merged into what is placed, so
+      they get the checks a project source gets.
 
   The one thing that is *not* refused is a file covering only one direction. An
   appup with an upgrade entry and no downgrade is a legitimate thing to write,
@@ -414,7 +419,7 @@ defmodule Forecastle.Appup.Dep do
   defp refuse_bad_entry!(entries, path) do
     case Enum.reject(entries, &entry?/1) do
       [] ->
-        :ok
+        refuse_bad_pattern!(entries, path)
 
       [bad | _rest] ->
         Mix.raise(
@@ -427,6 +432,36 @@ defmodule Forecastle.Appup.Dep do
 
   defp entry?({vsn, script}) when (is_list(vsn) or is_binary(vsn)) and is_list(script), do: true
   defp entry?(_element), do: false
+
+  # **A from-version written as a regular expression has to be one, and the check
+  # is here so that nothing downstream has to rescue.**
+  # `appup_search_for_version/2` runs a binary key with
+  # `re:run(BaseVsn, Vsn, [unicode, …])`, which *raises* `ArgumentError` on a
+  # pattern it cannot compile - measured on OTP 28.3 against `"0\\.1\\.["`. Every
+  # question this module asks of an entry goes through that function, so an
+  # uncompilable key would otherwise come back out of a `mix release` as a bare
+  # argument error with nothing pointing at the file that holds it. Asked once,
+  # per file, with the same option the search runs under.
+  defp refuse_bad_pattern!(entries, path) do
+    case Enum.find(entries, &uncompilable?/1) do
+      nil ->
+        :ok
+
+      {pattern, _script} ->
+        Mix.raise(
+          "#{shorten(path)} keys an entry on #{inspect(pattern)}, which is not a regular " <>
+            "expression re can compile. A from-version given as a binary is one - that is how " <>
+            "release_handler selects an entry - so this is refused here rather than raised out " <>
+            "of the middle of a build."
+        )
+    end
+  end
+
+  defp uncompilable?({vsn, _script}) when is_binary(vsn) do
+    match?({:error, _reason}, :re.compile(vsn, [:unicode]))
+  end
+
+  defp uncompilable?(_entry), do: false
 
   # Asked the way `release_handler` asks it rather than by comparing strings, so
   # a from-version written as a regular expression counts as naming the one the
@@ -567,7 +602,11 @@ defmodule Forecastle.Appup.Dep do
 
   defp consulted!(app, file) do
     case Appup.read(file) do
-      {:ok, appup} ->
+      {:ok, {_tag, up, dn} = appup} ->
+        # The same checks a project source gets, because these entries are merged
+        # into the file this places and every question asked of them afterwards
+        # is asked of both sides together.
+        refuse_bad_entry!(up ++ dn, file)
         appup
 
       {:error, phrase} ->

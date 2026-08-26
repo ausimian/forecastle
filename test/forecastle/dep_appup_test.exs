@@ -215,6 +215,21 @@ defmodule Forecastle.DepAppupTest do
       refute File.exists?(path)
     end
 
+    test "a source keyed on something that is not a regular expression re can compile" do
+      # A binary key *is* a regular expression to `appup_search_for_version/2`,
+      # which raises rather than returning on a pattern it cannot compile -
+      # measured on OTP 28.3. Every question this asks of an entry goes through
+      # that function, so an uncompilable key would otherwise come back out of the
+      # middle of a build as a bare argument error naming nothing.
+      {path, output, status} =
+        refuse("sample_dep-#{@from}-#{@to}.exs", regex_source(~S(0\\.1\\.[), @to))
+
+      assert status != 0, "an uncompilable pattern reached the search:\n\n#{output}"
+      assert output =~ "which is not a regular expression re can compile"
+      refute output =~ "ArgumentError"
+      refute File.exists?(path)
+    end
+
     test "a source that does not evaluate to an appup" do
       {path, output, status} = refuse("sample_dep-#{@from}-#{@to}.exs", ":not_an_appup\n")
 

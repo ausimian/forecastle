@@ -2536,6 +2536,22 @@ so `rel/appups -> ../shared/appups` with the target missing answers exactly as a
 absent directory does — and a project that *has* appups would have assembled a
 release with none of them and nothing said. `File.lstat/1` tells the two apart.
 
+**Coverage is a question about the *set* of sources, not about the one file the
+generator would write, and asking it of the file alone was a later finding.** A
+dependency's appups are one file per transition and the release merges every file
+naming the application into one appup, so a sibling keyed on a regular expression
+can already select this from-version — and a second entry for it is one
+`Forecastle.Appup.Dep` refuses from the next build onwards. `mix castle.appup.gen`
+would have reported success and left a tree that no longer assembles, which is
+the disagreement between what writes an appup and what reads it that this pair of
+tasks exists not to have. It asks with `appup_search_for_version/2` over each
+sibling's own term, which is what the assembly step asks with. Both directions
+covered is a named no-op; one direction is a **refusal**, because the file it
+would write is one the next build refuses. A sibling that *computes* is a refusal
+too: this task does not evaluate a source it has not read as a literal, so what
+that file covers is not knowable from here, and assembly — which does evaluate
+it — is where the collision would land.
+
 **The generator's file name is built out of two version strings, so it is checked
 to be a name.** `Forecastle.Build` refuses a version that is not valid UTF-8 or
 that carries control characters — those reach a report and a terminal — and says
