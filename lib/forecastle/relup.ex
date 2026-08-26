@@ -16,10 +16,12 @@ defmodule Forecastle.Relup do
   `Forecastle.Baseline`.
 
   What differs between those two is where the target comes from, which baselines
-  it is against, where the file goes, and *when* the baselines were resolved -
-  which is the whole of what `generate!/6` takes as arguments. Everything else is
-  here, once: the refusal of two baselines for one version, the three strategies
-  and how an edge is classified, the announcement, and the atomic publication.
+  it is against, where the file goes - or whether it goes anywhere at all, which
+  is what `mix castle.relup --dry-run` asks for - and *when* the baselines were
+  resolved. That is the whole of what `generate!/7` takes as arguments.
+  Everything else is here, once: the refusal of two baselines for one version,
+  the three strategies and how an edge is classified, the announcement, and the
+  atomic publication.
 
   `Mix.Tasks.Castle.Relup`'s `@moduledoc` is the account of the strategies and of
   what an operator sees, because that is where somebody goes looking for it.
@@ -69,6 +71,17 @@ defmodule Forecastle.Relup do
   # and exit 0 having assembled nothing. Resolving before `:assemble` takes that
   # whole class out of the window; what is left needs the assembled target and
   # has nowhere earlier to go.
+  #
+  # `dry_run?` defaults to `false` because publishing is what generating a relup
+  # is for. Only the task can ask for the other thing, and only because somebody
+  # typed `--dry-run`; the assembly step exists to put a relup into a release, so
+  # a mode that writes none would be a release assembled without its upgrade
+  # plan.
+  #
+  # Both arities are spec'd. A default argument leaves the shorter head a real
+  # exported function with no spec of its own, and the shorter head is the one
+  # the assembly step calls - so spec'ing only the longer one would have taken
+  # the type off the only call site outside this module.
   @spec generate!(
           Path.t(),
           [binary()],
@@ -78,8 +91,19 @@ defmodule Forecastle.Relup do
           Path.t()
         ) ::
           :ok
-  def generate!(target_path, up_specs, down_specs, resolved, strategy, outdir)
-      when is_list(up_specs) and is_list(down_specs) and strategy in [:auto, :hot, :restart] do
+  @spec generate!(
+          Path.t(),
+          [binary()],
+          [binary()],
+          %{binary() => Path.t()} | nil,
+          strategy(),
+          Path.t(),
+          boolean()
+        ) ::
+          :ok
+  def generate!(target_path, up_specs, down_specs, resolved, strategy, outdir, dry_run? \\ false)
+      when is_list(up_specs) and is_list(down_specs) and strategy in [:auto, :hot, :restart] and
+             is_boolean(dry_run?) do
     Forecastle.Appup.ensure_systools!()
 
     target = read_rel!(target_path)
@@ -99,11 +123,26 @@ defmodule Forecastle.Relup do
     # either no relup or - deliberately - the older one that was already there.
     # Said first, the run printed that every transition was a hot upgrade and
     # then failed to produce the relup it was describing.
+    #
+    # A dry run does not weaken that. There is no file for the verdict to be
+    # wrong about, and everything that could still have gone wrong about the
+    # *plan* - including encoding it - has already happened by the time anything
+    # is said. What is left unproven is only whether the bytes could have been
+    # written, which is what the notice below is careful not to claim.
     {plan, verdict} = plan!(strategy, target, froms, ups, downs)
 
-    write_relup!(plan, outdir)
+    # Encoded either way, and published only on an ordinary run. That is where
+    # the line between the plan and the destination falls: encoding is the last
+    # thing that can fail about the relup *itself*, while opening, writing,
+    # closing and renaming are facts about a file, which a mode whose whole
+    # promise is that it writes nothing cannot go and find out.
+    bytes = encode!(plan)
+
+    unless dry_run?, do: publish_relup!(bytes, outdir)
 
     if verdict, do: Mix.shell().info(verdict)
+
+    if dry_run?, do: Mix.shell().info(dry_run_notice(outdir))
 
     :ok
   end
@@ -153,7 +192,7 @@ defmodule Forecastle.Relup do
   @doc false
   # Public so that a caller can resolve *before* the work that would be wasted by
   # a baseline that cannot be resolved - which for the assembly step means before
-  # `:assemble`. See `generate!/6` for why the two callers differ.
+  # `:assemble`. See `generate!/7` for why the two callers differ.
   @spec resolve_baselines!([binary()]) :: %{binary() => Path.t()}
   def resolve_baselines!(specs) do
     Map.new(Enum.uniq(specs), fn spec ->
@@ -756,7 +795,7 @@ defmodule Forecastle.Relup do
   # in the first clause here for exactly that reason - it is only true after
   # generation.
   #
-  # These *return* the verdict rather than printing it, and `generate!/6` prints
+  # These *return* the verdict rather than printing it, and `generate!/7` prints
   # it only once the relup has been published. An announcement is a claim about a
   # file, and it was being made before the file existed: a failure to encode,
   # open, write, close or rename left a run that had already said every
@@ -778,14 +817,41 @@ defmodule Forecastle.Relup do
       "or --restart to restart every transition."
   end
 
+  ## Saying that nothing was written
+
+  # Named for the switch, as `restart_verdict/0` is: what this says is about the
+  # invocation rather than about the relup, and an invocation is a command line.
+  #
+  # After the verdict rather than before it. The verdict is the answer to the
+  # question a dry run exists to ask - which edge can be hot, and why - and this
+  # is the caveat on it; put first it would read as a heading for everything
+  # after it. It is also the only output a `--hot --dry-run` that succeeds
+  # produces, since `--hot` says nothing on success, so it has to stand on its
+  # own as "this could have been generated".
+  #
+  # The destination is named because the promise is about that path in
+  # particular, and an operator who has just been told nothing was written is
+  # owed the name of the file it was not written to.
+  #
+  # **What is claimed is what this invocation did, and nothing about the file's
+  # contents.** It said "<path> is whatever it was before this run" once, and
+  # that is a claim about a moment that has already passed: nothing here locks or
+  # snapshots the destination, so an ordinary run sharing the output directory -
+  # two CI jobs, a `mix release` alongside - can publish over it while this one
+  # is still generating, and the sentence would be false as it was printed. Said
+  # this way there is nothing for a concurrent writer to falsify, because a run
+  # that did not write is a fact about the run.
+  defp dry_run_notice(outdir) do
+    "--dry-run: the relup was generated and then discarded. This run did not write " <>
+      "#{Path.join(outdir, "relup")}. Run without --dry-run to write it."
+  end
+
   ## Writing the relup
 
   # A relup file is an encoding comment and a single term followed by a period,
   # which is the format `systools_relup:write_relup_file/2` writes and that
   # `release_handler` - and `Forecastle.verify_relup!/2`, on the way into a
   # release - reads back.
-  defp write_relup!(plan, outdir), do: publish_relup!(encode!(plan), outdir)
-
   defp encode!(plan) do
     case :unicode.characters_to_binary(:io_lib.format(~c"%% coding: utf-8~n~tp.~n", [plan])) do
       bytes when is_binary(bytes) -> bytes

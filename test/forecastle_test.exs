@@ -432,7 +432,7 @@ defmodule ForecastleTest do
       # Two steps and any function step of the project's own run between the
       # resolution in pre-assembly and its use here, and a Mix.Release is theirs
       # to rewrite. A stash that no longer answers for every spec is therefore
-      # discarded rather than indexed into: generate!/6 looks specs up with
+      # discarded rather than indexed into: generate!/7 looks specs up with
       # Map.fetch!/2, so a missing one would arrive as a KeyError naming a map.
       # Re-resolving is also the correct branch, not merely the safe one - what
       # the option says now is what the relup should be generated from.

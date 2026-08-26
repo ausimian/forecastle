@@ -36,9 +36,16 @@ defmodule Forecastle.RelupTest do
   `Forecastle.AssemblyRelupTest` is the other caller of that module - the step
   that generates a relup into the release being assembled - and the two suites
   divide by what they can reach. What is asserted here is what the task adds:
-  argument handling, `--outdir`, the three strategies and the exit status. What
-  is asserted there is that a `mix release` produces a relup at all, and what it
-  does when the option names nothing.
+  argument handling, `--outdir`, the three strategies, `--dry-run` and the exit
+  status. What is asserted there is that a `mix release` produces a relup at all,
+  and what it does when the option names nothing.
+
+  `--dry-run` is asserted against an ordinary run of the same command wherever it
+  can be. A mode whose whole promise is that it produces no artefact can only be
+  believed by comparing what it said with what the same command writes when it is
+  allowed to, and by looking at the directory it was pointed at rather than at
+  the relup alone - a run that got as far as staging would leave a `.tmp` behind
+  even where the relup itself survived.
 
   Baseline specs are covered here only as far as the task's own part in them -
   that a bare path still means what it always meant, that `rel:` and `tar:` reach
@@ -967,6 +974,248 @@ defmodule Forecastle.RelupTest do
     end
   end
 
+  describe "a dry run" do
+    test "leaves the relup already in the output directory exactly as it was", ctx do
+      # The subtle half of "writes nothing", and the reason the directory is
+      # listed rather than the relup merely read: publication replaces the
+      # destination by renaming a staging file over it, so a run that got as far
+      # as staging would leave a `.tmp` behind even where the relup itself
+      # survived - and post-assembly scans this directory.
+      File.write!(ctx.relup, "%% stale\n")
+
+      output = relup!(upgrade(ctx) ++ ["--dry-run", "--outdir", @outdir], @to)
+
+      assert output =~ "auto: every transition in this relup is a hot upgrade."
+      assert File.read!(ctx.relup) == "%% stale\n"
+      assert File.ls!(outdir(ctx)) == ["relup"], "a dry run wrote into --outdir"
+    end
+
+    test "writes nothing into the working directory either", ctx do
+      # No `--outdir`, so the destination is the one post-assembly picks a relup
+      # up from - the path that would be packaged as this release's upgrade plan.
+      # The workspace holds a great deal besides, so the staging file is looked
+      # for by name rather than by listing the directory.
+      File.write!(ctx.cwd_relup, "%% stale\n")
+
+      relup!(upgrade(ctx) ++ ["--dry-run"], @to)
+
+      assert File.read!(ctx.cwd_relup) == "%% stale\n"
+
+      assert Path.wildcard(Path.join(Fixture.workspace(), ".relup-*.tmp"), match_dot: true) == [],
+             "a dry run left a staging file behind"
+    end
+
+    test "says nothing was written, and names the file it left alone", ctx do
+      output = relup!(upgrade(ctx) ++ ["--dry-run", "--outdir", @outdir], @to)
+
+      assert output =~ "--dry-run: the relup was generated and then discarded"
+      assert output =~ "This run did not write #{Path.join(@outdir, "relup")}."
+      assert output =~ "Run without --dry-run to write it."
+      refute File.exists?(ctx.relup)
+
+      # What it says is what this run did, not what the file now holds. Nothing
+      # locks or snapshots the destination, so an ordinary run sharing the
+      # directory can publish over it while this one is generating - and a
+      # sentence about the file's contents would have been false as it was
+      # printed.
+      refute output =~ "is whatever it was before this run"
+    end
+
+    test "reports the classification an ordinary run does, per edge and per direction", ctx do
+      # The dependency can be upgraded from 0.1.0 but not downgraded back to it,
+      # so the only correct answer is a hot upgrade one way and a restart the
+      # other - the shape a single classification used for both directions gets
+      # wrong.
+      set_dep_appup!(ctx.to, @to, [{~c"#{@from}", []}], [])
+
+      dry = relup!(upgrade(ctx) ++ ["--dry-run", "--outdir", @outdir], @to)
+
+      refute_all_hot(dry)
+      assert dry =~ "auto made a restart transition of the downgrade to #{@from}"
+      assert dry =~ "sample_dep.appup has no downgrade instructions to #{@from}"
+      refute dry =~ "upgrade from #{@from}"
+      refute File.exists?(ctx.relup)
+
+      # And the claim is settled against the file the same command writes when it
+      # is allowed to. Two announcements agreeing proves only that they were
+      # printed by the same code; what makes the dry run's answer worth having is
+      # that the relup it declined to write carries the split it described.
+      wet = relup!(upgrade(ctx) ++ ["--outdir", @outdir], @to)
+
+      assert wet =~ "auto made a restart transition of the downgrade to #{@from}"
+      refute wet =~ "--dry-run", "an ordinary run announced a dry one"
+
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], up}], [{@from_vsn, [], down}]}]} =
+               :file.consult(to_charlist(ctx.relup))
+
+      assert down == [:restart_emulator]
+      refute :restart_emulator in up
+    end
+
+    test "exits non-zero when generation would have failed, and still writes nothing", ctx do
+      # A dry run that cannot generate is a failure, not a success with a caveat:
+      # a pipeline asking "could this be hot?" before it builds has to get the
+      # status it would have got after. Backwards through `--hot`, which is this
+      # suite's ungeneratable transition - 0.1.0's appup says nothing about
+      # coming from 0.1.1.
+      File.write!(ctx.cwd_relup, "%% stale\n")
+
+      {output, status} =
+        relup(
+          ["--target", rel(ctx.from, @from), "--fromto", rel(ctx.to, @to), "--hot", "--dry-run"],
+          @from
+        )
+
+      assert status != 0, "a dry run that could not generate reported success:\n\n#{output}"
+
+      assert output =~
+               ~r/No release upgrade script entry for \w+-#{Regex.escape(@from)} to \w+-#{Regex.escape(@to)}/
+
+      refute output =~ "--dry-run: the relup was generated",
+             "a run that generated nothing said it had:\n\n#{output}"
+
+      assert File.read!(ctx.cwd_relup) == "%% stale\n"
+    end
+
+    test "answers a --hot question that would otherwise be a silent exit 0", ctx do
+      # `--hot` announces nothing of its own on success, so this is the case the
+      # notice exists for. Without it a dry run proving the transition can be hot
+      # is a bare zero, which is also what a run that did nothing looks like -
+      # and asking before the pipeline runs is what `--hot --dry-run` is best at.
+      output = relup!(hot(ctx) ++ ["--dry-run", "--outdir", @outdir], @to)
+
+      assert output =~ "--dry-run: the relup was generated and then discarded"
+      assert File.ls!(outdir(ctx)) == [], "a dry run of --hot wrote something"
+    end
+
+    test "still passes on a systools warning from a run that succeeds", ctx do
+      # And that notice is not the *only* thing such a run can print, which is a
+      # different claim and the one a pipeline could be built on wrongly.
+      # `silent` hands systools' own diagnostics back to be forwarded rather than
+      # printed by it, and they go to standard error while the verdict and the
+      # notice go to standard output. A dry run forwards them for the same reason
+      # it prints the verdict: it says what the ordinary run would have said.
+      mistag_appup(ctx)
+
+      output = relup!(hot(ctx) ++ ["--dry-run", "--outdir", @outdir], @to)
+
+      assert output =~ "*WARNING* {bad_vsn"
+      assert output =~ "--dry-run: the relup was generated and then discarded"
+
+      assert File.ls!(outdir(ctx)) == [],
+             "a warning is not a failure, and a dry run still writes nothing"
+    end
+
+    test "says what --restart would do without doing it", ctx do
+      # Orthogonal to the strategy, and `--restart` is the strategy that would
+      # notice if it were not: it takes a different path through generation, with
+      # no appup read and `:systools` not involved at all. That is also the limit
+      # of what a dry run of it is worth - the releases could be read and the
+      # entries built, and nothing about any appup, because `--restart` does not
+      # look either.
+      output = relup!(upgrade(ctx) ++ ["--restart", "--dry-run", "--outdir", @outdir], @to)
+
+      assert output =~ "--restart: every transition is a restart_emulator instruction"
+      assert output =~ "--dry-run: the relup was generated and then discarded"
+      assert File.ls!(outdir(ctx)) == [], "a dry run of --restart wrote something"
+    end
+
+    test "exits zero where only publishing would have failed", ctx do
+      # The one place a dry run and an ordinary run disagree, pinned on purpose
+      # rather than left to be found. A directory standing where the relup goes
+      # fails the rename and nothing before it, so the plan generates perfectly
+      # well and only the publication cannot happen - which is exactly what this
+      # mode does not attempt.
+      File.mkdir_p!(Path.join(ctx.relup, "occupied"))
+
+      output = relup!(upgrade(ctx) ++ ["--dry-run", "--outdir", @outdir], @to)
+
+      assert output =~ "auto: every transition in this relup is a hot upgrade."
+      assert output =~ "--dry-run: the relup was generated and then discarded"
+      assert File.ls!(ctx.relup) == ["occupied"], "a dry run disturbed the destination"
+
+      # The control, and the reason this is a boundary rather than an assertion
+      # about nothing: the same command without the switch does fail here, so the
+      # zero above is the divergence being stated rather than a case that could
+      # not have failed anyway.
+      {control, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir], @to)
+
+      assert status != 0, "the ordinary run published over a directory:\n\n#{control}"
+      assert control =~ "could not be renamed"
+    end
+
+    test "resolves a tar: baseline, and still writes no relup", ctx do
+      # Every other case here names a `rel:` baseline, which is read rather than
+      # made - so on its own the suite would say nothing about the sources that
+      # resolve by *making* something. `tar:` unpacks the artefact into the
+      # baseline cache and `ref:` builds a commit into it, and both do so under
+      # `--dry-run`, deliberately: a baseline that cannot be resolved is a
+      # generation that would have failed, and the only way to say so is to
+      # resolve it. What the mode promises is about the relup, and that is what
+      # is asserted on either side of the resolution.
+      #
+      # Started from a *verified* cache miss, or the assertion below proves
+      # nothing: this suite resolves the same artefact elsewhere, the cache
+      # outlives the run, and every assembly digests to a fresh entry - so
+      # entries are usually already sitting there before this test begins, and
+      # ExUnit randomises order, which would make it a test that passes on some
+      # seeds. `baseline_test.exs` clears its own cache for the same reason.
+      # Clearing is safe: the cache is content-addressed, so anything that needs
+      # an entry resolves it again.
+      cache = baseline_cache(@to)
+
+      for entry <- Path.wildcard(Path.join(cache, "tar-*")), do: File.rm_rf!(entry)
+      assert Path.wildcard(Path.join(cache, "tar-*")) == [], "the baseline cache was not cleared"
+
+      File.write!(ctx.relup, "%% stale\n")
+
+      output =
+        relup!(
+          ["--target", rel(ctx.to, @to), "--fromto", "tar:#{tarball(ctx.from, @from)}"] ++
+            ["--dry-run", "--outdir", @outdir],
+          @to
+        )
+
+      assert output =~ "auto: every transition in this relup is a hot upgrade."
+      assert File.read!(ctx.relup) == "%% stale\n"
+      assert File.ls!(outdir(ctx)) == ["relup"], "a dry run wrote into --outdir"
+
+      # And the other half of the same promise, stated rather than merely
+      # tolerated: this run resolved the miss, and into a whole release. An entry
+      # is published by renaming a finished tree into place, so a `.rel` inside
+      # one is the artefact having been unpacked rather than a directory having
+      # been created.
+      assert [entry] = Path.wildcard(Path.join(cache, "tar-*"))
+      assert File.regular?(Path.join([entry, "releases", @from, "sample.rel"]))
+    end
+
+    test "still refuses an --outdir that is not a directory", ctx do
+      # Nothing is written either way, so this check would be easy to drop - but
+      # the exit status is the answer a dry run gives, and an ordinary run of
+      # this command would have refused the directory before reading a release.
+      {output, status} = relup(upgrade(ctx) ++ ["--dry-run", "--outdir", "nowhere"], @to)
+
+      assert status != 0, "a dry run accepted an --outdir that does not exist:\n\n#{output}"
+      assert output =~ "--outdir nowhere is not a directory"
+    end
+
+    test "may be given once, and is not negatable", ctx do
+      # `:count` rather than `:boolean`, as the strategy switches are: a repeat
+      # is visible here rather than silently the same as one, and `--no-dry-run`
+      # is an unrecognised switch rather than a quiet way of asking for a run
+      # that writes.
+      {output, status} = relup(upgrade(ctx) ++ ["--dry-run", "--dry-run"], @to)
+
+      assert status != 0, "a repeated --dry-run was accepted:\n\n#{output}"
+      assert output =~ "--dry-run may be given once, but was given 2 times"
+
+      {output, status} = relup(upgrade(ctx) ++ ["--no-dry-run"], @to)
+
+      assert status != 0, "--no-dry-run was accepted:\n\n#{output}"
+      assert output =~ ~s(Unrecognised arguments: "--no-dry-run")
+    end
+  end
+
   # A run has one verdict about its strategy, so a run with a restart in it must
   # not also have said that every transition was hot. Classification alone cannot
   # answer that - an appup can ask for the emulator to be restarted by name, and
@@ -1063,6 +1312,13 @@ defmodule Forecastle.RelupTest do
   end
 
   defp outdir(ctx), do: Path.dirname(ctx.relup)
+
+  # Where `Forecastle.Baseline` keeps what it resolved: beside the environments
+  # in the build root the task was run in, which for this suite is one per
+  # version - the same root `env_for/1` points the task at.
+  defp baseline_cache(vsn) do
+    Path.join([Fixture.workspace(), "_build-#{vsn}", "castle", "baselines"])
+  end
 
   defp upgrade(ctx), do: ["--target", rel(ctx.to, @to), "--fromto", rel(ctx.from, @from)]
 

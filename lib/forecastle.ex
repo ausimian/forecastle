@@ -339,7 +339,7 @@ defmodule Forecastle do
   #
   # Two steps and a caller's own function steps run between the resolution and
   # the use, and a `Mix.Release` is theirs to rewrite: a step that added a
-  # baseline to `upgrade_from:` would leave the map missing it. `generate!/6`
+  # baseline to `upgrade_from:` would leave the map missing it. `generate!/7`
   # looks specs up with `Map.fetch!/2`, so that arrives as a `KeyError` naming a
   # map rather than as anything an author could act on - and re-resolving is not
   # merely the safer branch but the *correct* one, since what the option says now

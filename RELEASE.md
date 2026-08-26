@@ -413,6 +413,52 @@
   repository, and a checkout on a disk that is not mounted today looks exactly
   like a dead one — so only registrations inside the baseline cache are removed,
   and never a locked one.
+- `mix castle.relup --dry-run` answers *can 1.0.0 be upgraded to 1.1.0 hot, and
+  if not, which edge and why* without writing anything, and before any appup has
+  been written. It does everything the same invocation without the switch would
+  have done — the same announcement included — and then discards the plan.
+  Nothing is written where the relup would have gone, including when one is
+  already sitting there: the run does not touch that file, and leaves no staging
+  file beside it. What it prints says what *it* did rather than what the file now
+  holds, since nothing stops another run publishing into the same directory
+  while this one generates.
+
+  What "everything" amounts to depends on the strategy, and a dry run is worth
+  exactly what the run it stands in for is worth. The baselines are resolved
+  under all three. `auto` then classifies each edge and asks `systools` for
+  whatever half it judged hot; `--hot` asks `systools` for the whole relup;
+  `--restart` reads no appup at all and never reaches `systools`, because writing
+  the entries by hand is the whole of what it does — so `--restart --dry-run`
+  reports that the releases could be read and the entries built, and nothing
+  whatever about appups.
+
+  The exit status is the other half of the answer, and it is about generation:
+  zero when the relup could have been generated, non-zero when generation would
+  have failed. A dry run that cannot generate fails rather than reporting success
+  with a caveat, so a pipeline can ask the question before it builds and act on
+  what it is told. Generation ends at the encoded bytes, which is the last step
+  that is a property of the plan rather than of the destination — so everything
+  that refuses before the write refuses here too, `--outdir` included, and a dry
+  run never reports success where an ordinary run would have refused the *plan*.
+  What it cannot see is a failure to *publish* one: a directory standing where
+  the relup goes, a destination that cannot be written, no space left. Those are
+  found by writing, and writing is the one thing this mode does not do.
+
+  It is orthogonal to the strategy and combines with either switch.
+  `--hot --dry-run` is the zero-downtime pipeline's question asked before the
+  pipeline runs. `--hot` announces nothing of its own on success, which is why
+  the dry run prints a line at all — without it that run is a silent exit 0. It
+  is not necessarily the only line: `systools` warnings still reach standard
+  error under `--dry-run` exactly as they would without it, so the exit status
+  rather than the output is what a pipeline should read.
+
+  "Writes nothing" is a promise about the relup and the directory it would have
+  gone in, rather than about the run as a whole. A dry run still resolves its
+  baselines, and resolving one writes: `tar:` unpacks the artefact into
+  `_build/castle/baselines` and `ref:` builds the commit into the same place,
+  while `rel:` names a release already on disk and costs nothing. A baseline that
+  cannot be resolved is a generation that would have failed, and saying so means
+  resolving it.
 - `mix castle.appup`, a read-only check that compares two builds of an
   application and reports how the committed appup covers the modules that moved.
   It exits non-zero when one is mentioned by no instruction, which is what makes
