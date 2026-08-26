@@ -35,6 +35,15 @@ defmodule Forecastle.ReleaseCase do
     on_exit(fn -> File.rm(relup) end)
     File.rm(relup)
 
+    # `rel/appups` is the same hazard one directory further on, and a sharper one:
+    # every source in there names a transition, and `Forecastle.Appup.Dep` refuses
+    # one that is not the transition being assembled. So a file left behind by a
+    # suite that died half way through would fail every *other* suite's assembly,
+    # with a message about a version pair that says nothing about the real cause.
+    appups = Path.join(workspace, "rel/appups")
+    on_exit(fn -> File.rm_rf(appups) end)
+    File.rm_rf!(appups)
+
     {:ok, workspace: workspace}
   end
 

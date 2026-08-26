@@ -112,8 +112,23 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   `:appup` compiler, without which nothing compiles the file.
 
   An application `--app` names that is neither the current project nor an
-  umbrella child - a dependency - has no source here to write. Its entry is
-  printed instead.
+  umbrella child - a dependency - is written to `rel/appups/<app>-<from>-<to>.exs`
+  instead, which `Forecastle.Appup.Dep` reads while assembling a release and
+  places at `lib/<app>-<vsn>/ebin/<app>.appup`. Nothing is ever written into
+  `deps/`: that is the shared checkout, and an appup there would be one project's
+  upgrade instructions in every build that uses it.
+
+  **It writes there rather than printing, and that was the open question.** The
+  answer is in what the refusal it replaces actually said: a dependency's appup
+  was printed because there was "no source here to write", not because writing one
+  would have been wrong. `rel/appups` is that source, so the premise is gone -
+  and once a destination exists, printing is the *inconsistent* branch. D2 holds
+  either way: what comes out is source a person reviews and commits, nothing
+  generates an appup during assembly, and what assembly does is place a file
+  somebody wrote after checking that its name still describes the transition being
+  built. That check is a guarantee the project's own `appup.exs` has not got: a
+  drifted tag there is a `bad_vsn` note, while a dependency file that no longer
+  names this transition fails the build.
 
   **A `:appup` key naming a file that does not exist is a compilation error, and
   it is in the way of the default `--to`.** `Mix.Tasks.Compile.Appup` refuses a
@@ -133,6 +148,7 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   use Mix.Task
 
   alias Forecastle.Appup
+  alias Forecastle.Appup.Dep
   alias Forecastle.Appup.Draft
   alias Forecastle.Appup.Source
   alias Forecastle.Build
@@ -317,36 +333,18 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
       down: Draft.entry(from.vsn, to, from)
     }
 
-    case source(app) do
-      {:ok, path, configured?} ->
-        write_plan(heading, path, configured?, drafted, from.vsn, to.vsn)
+    {path, kind, notes} = source(app, from.vsn, to.vsn)
 
-      :unknown ->
-        unknown_project(app, heading, drafted)
-    end
-  end
-
-  defp unknown_project(app, heading, drafted) do
-    refusal(
-      heading,
-      "#{app} is neither this project nor one of its umbrella children, so its appup source " <>
-        "is not this project's to write. The entry is below; it belongs in that " <>
-        "application's own appup.",
-      printed(drafted, @directions)
-    )
+    write_plan(heading, path, kind, notes, drafted, from.vsn, to.vsn)
   end
 
   # Which of the three writing cases this is. The appup source is read *before*
   # anything is decided about it, because "is this file one that can be rewritten"
   # is the question that gates the other two.
-  defp write_plan(heading, path, configured?, drafted, from_vsn, to_vsn) do
+  defp write_plan(heading, path, kind, notes, drafted, from_vsn, to_vsn) do
     case Source.read(path) do
       :absent ->
-        %{
-          heading: heading,
-          action: {:create, path, to_vsn, drafted},
-          notes: configure(path, configured?)
-        }
+        %{heading: heading, action: {:create, path, to_vsn, kind, drafted}, notes: notes}
 
       {:literal, literal} ->
         merge_plan(heading, literal, drafted, from_vsn)
@@ -409,12 +407,22 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   defp article(:up), do: "an upgrade"
   defp article(:down), do: "a downgrade"
 
-  defp configure(_path, true), do: []
+  defp unconfigured(path) do
+    "This project has no :appup key, so nothing compiles that file yet. Add " <>
+      "`appup: #{inspect(Path.basename(path))}` to project/0 and `:appup` to :compilers."
+  end
 
-  defp configure(path, false) do
+  # What a reader of a *dependency's* file needs and cannot get from the term:
+  # nothing compiles it, and what puts it into a release is an assembly step that
+  # checks the name against the version the release carries.
+  defp dependency_notes(app, to_vsn) do
     [
-      "This project has no :appup key, so nothing compiles that file yet. Add " <>
-        "`appup: #{inspect(Path.basename(path))}` to project/0 and `:appup` to :compilers."
+      "#{app} is not this project's to compile an appup for, and nothing writes one into " <>
+        "deps/ - that would leak this project's upgrade instructions into every build " <>
+        "sharing that checkout.",
+      "Forecastle places that file at lib/#{app}-#{to_vsn}/ebin/#{app}.appup while " <>
+        "assembling a release, and refuses it once #{app} is no longer #{to_vsn} there. The " <>
+        "name is what says which transition it is for, so rename it rather than editing it."
     ]
   end
 
@@ -429,9 +437,28 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # against - so a run from anywhere writes the file that compiler will read.
   #
   # An umbrella child is reached through `Mix.Project.in_project/3`, because its
-  # `:appup` key is in its own `mix.exs` and there is no other way to ask. A
-  # dependency is neither, and has no source here to write: its entry is printed.
-  defp source(app) do
+  # `:appup` key is in its own `mix.exs` and there is no other way to ask.
+  #
+  # **A dependency is neither, and it is written to all the same** - into
+  # `rel/appups/<app>-<from>-<to>.exs`, which `Forecastle.Appup.Dep` owns. That is
+  # a change of answer rather than a change of policy, and the old answer said so
+  # itself: it refused because a dependency "has no source here to write", not
+  # because writing one would be wrong. forecastle#30 gave it one, so the premise
+  # is gone.
+  #
+  # Consistency argues the same way round once there is a destination. For an
+  # owned application this task writes, and printing for a dependency would leave
+  # the merge case dead and a second, weaker workflow - copy this out of your
+  # terminal - beside the good one. D2 is satisfied identically either way: the
+  # output is source a person reviews and commits, and nothing generates an appup
+  # during assembly. What assembly does with it is place a file somebody wrote,
+  # after checking that its name still describes the transition being built.
+  #
+  # The safety story is in fact stronger here than for `appup.exs`. A dependency
+  # file is named for exactly the transition it was drafted for, so the moment the
+  # dependency moves on the build refuses it by name; an `appup.exs` whose tag has
+  # drifted is only a `bad_vsn` note.
+  defp source(app, from_vsn, to_vsn) do
     cond do
       app == Mix.Project.config()[:app] ->
         appup_path()
@@ -440,8 +467,18 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
         Mix.Project.in_project(app, path, fn _module -> appup_path() end)
 
       true ->
-        :unknown
+        dependency_path(app, from_vsn, to_vsn)
     end
+  end
+
+  # The from-version and the to-version are both in the name, because that is
+  # what `Forecastle.Appup.Dep` reads it as, and it is the only thing saying which
+  # transition the file is for: nothing about a dependency's appup is keyed to a
+  # `:appup` project key that could name it.
+  defp dependency_path(app, from_vsn, to_vsn) do
+    path = Path.join(Dep.dir(), "#{app}-#{from_vsn}-#{to_vsn}.exs")
+
+    {path, {:dependency, app, to_vsn}, dependency_notes(app, to_vsn)}
   end
 
   defp umbrella_path(app) do
@@ -452,10 +489,9 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   end
 
   # `appup.exs` is the default name only for a project that has no `:appup` key
-  # at all, and the third element says which of the two this was - because a
-  # project with no key has nothing compiling the file that is about to be
-  # written, and that is worth a line in the report rather than a surprise at the
-  # next build.
+  # at all, and the note that comes back with it says so - because a project with
+  # no key has nothing compiling the file that is about to be written, and that is
+  # worth a line in the report rather than a surprise at the next build.
   # **Whether the key is set is asked the way the compiler asks it, which is
   # truthiness and not `nil`.** `Mix.Tasks.Compile.Appup.source/0` is
   # `if src = Mix.Project.config()[:appup]`, so `appup: false` compiles nothing -
@@ -468,10 +504,10 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
 
     case Mix.Project.config()[:appup] do
       configured when configured in [nil, false] ->
-        {:ok, Path.expand("appup.exs", dir), false}
+        {Path.expand("appup.exs", dir), :project, [unconfigured("appup.exs")]}
 
       configured ->
-        {:ok, Path.expand(configured, dir), true}
+        {Path.expand(configured, dir), :project, []}
     end
   end
 
@@ -482,9 +518,9 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # drafted. Nothing half-written reaches the source - see
   # `Forecastle.Appup.Source.create/2` and `replace/2` for what each does about
   # that.
-  defp apply_plan(%{action: {:create, path, to_vsn, drafted}} = plan) do
-    with {:ok, text} <- Source.render(to_vsn, drafted.up, drafted.down),
-         :ok <- Source.create(path, text) do
+  defp apply_plan(%{action: {:create, path, to_vsn, kind, drafted}} = plan) do
+    with {:ok, text} <- Source.render(to_vsn, drafted.up, drafted.down, kind),
+         :ok <- created(path, text) do
       %{plan | action: {:wrote, ["wrote #{Path.relative_to_cwd(path)}"]}}
     else
       # The entries go out here for the same reason they do on a computed appup:
@@ -523,6 +559,22 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   end
 
   defp apply_plan(plan), do: plan
+
+  # `rel/appups` is the ordinary case of a directory that is not there yet: a
+  # project with no dependency appups has no reason to have one. Creating it is
+  # not a weakening of `Source.create/2`'s exclusive create - that refusal is
+  # about the file, and it still owns whether this run was the one that made it.
+  defp created(path, text) do
+    case File.mkdir_p(Path.dirname(path)) do
+      :ok ->
+        Source.create(path, text)
+
+      {:error, reason} ->
+        {:error, "could not be created: nor could its directory (#{format(reason)})"}
+    end
+  end
+
+  defp format(reason), do: :file.format_error(reason)
 
   defp printed(drafted, directions) do
     Enum.flat_map(directions, fn direction ->

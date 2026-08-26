@@ -381,7 +381,7 @@ defmodule Forecastle.AppupSourceTest do
 
   describe "rendering a first appup" do
     test "reads back as the term it drafted" do
-      assert {:ok, text} = Source.render("0.1.1", @up, @down)
+      assert {:ok, text} = Source.render("0.1.1", @up, @down, :project)
 
       assert Code.eval_string(text) ==
                {{~c"0.1.1", [{~c"0.1.0", [{:update, Sample.Counter, {:advanced, []}}]}],
@@ -392,20 +392,33 @@ defmodule Forecastle.AppupSourceTest do
       # The property that makes a generated file usable twice. A renderer that
       # produced something this module could not read back would work once and
       # refuse for ever after.
-      {:ok, text} = Source.render("0.1.1", @up, @down)
+      {:ok, text} = Source.render("0.1.1", @up, @down, :project)
       path = write!(ctx, text)
 
       assert {:literal, _read} = Source.read(path)
     end
 
     test "carries the comments beside the instructions", ctx do
-      {:ok, text} = Source.render("0.1.1", @up, @down)
+      {:ok, text} = Source.render("0.1.1", @up, @down, :project)
       _path = write!(ctx, text)
 
       assert text =~ "# Sample.Counter: behaviour GenServer."
       assert text =~ "# Ordering is stable, not correct."
       assert text =~ "# No module moved."
       assert text =~ "Nothing can derive it."
+    end
+
+    test "says what places a dependency's file, which nothing about the term does" do
+      # The two headers differ by everything a reader of a *dependency's* appup
+      # needs and cannot get from the term: no `:appup` key names the file,
+      # nothing compiles it, and what puts it into a release refuses it once the
+      # dependency has moved on.
+      {:ok, text} = Source.render("1.4.2", @up, @down, {:dependency, :jason, "1.4.2"})
+
+      assert text =~ "an application this project does not own"
+      assert text =~ "nothing writes it into deps/"
+      assert text =~ "lib/jason-1.4.2/ebin/jason.appup"
+      refute text =~ "The version tag below is a literal"
     end
   end
 

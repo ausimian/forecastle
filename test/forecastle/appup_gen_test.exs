@@ -277,18 +277,6 @@ defmodule Forecastle.AppupGenTest do
       refute File.exists?(generated())
     end
 
-    test "an application whose appup source is not this project's", ctx do
-      # The fixture's dependency. Its version moves with the sample's, so there
-      # really is a transition to draft - and its appup lives in its own project,
-      # which this run has no business rewriting. The entry is printed instead.
-      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
-
-      assert status != 0, "a dependency's appup source was written:\n\n#{output}"
-      assert output =~ "neither this project nor one of its umbrella children"
-      assert output =~ "the upgrade entry:"
-      refute File.exists?(generated())
-    end
-
     test "an application in one build and not the other", ctx do
       # `:systools` covers that with add_application, which no appup entry
       # describes. `mix castle.appup` reports the same state as a note and exits
@@ -302,6 +290,61 @@ defmodule Forecastle.AppupGenTest do
       assert output =~ "which is not a transition an appup describes"
       assert output =~ "add_application"
       refute File.exists?(generated())
+    end
+  end
+
+  describe "an application this project does not own" do
+    test "writes rel/appups/<app>-<from>-<to>.exs rather than printing the entry", ctx do
+      # The fixture's dependency. Its version moves with the sample's, so there
+      # really is a transition to draft - and forecastle#30 gave the project a
+      # place to put one, which is what retired the refusal this used to be. The
+      # name carries the whole transition, because nothing else does: no `:appup`
+      # key names this file and nothing compiles it.
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      assert output =~ "1 appup written"
+      assert output =~ "wrote rel/appups/sample_dep-#{@from}-#{@to}.exs"
+
+      # `SampleDep` declares no behaviour, so the decision table's last row is the
+      # one that applies and the instruction is the common, useful case: an
+      # application whose modules are all stateless drafts to `load_module`.
+      assert {{@to_vsn, [{@from_vsn, up}], [{@from_vsn, down}]}, []} =
+               Code.eval_file(dep_source())
+
+      assert up == [{:load_module, SampleDep}]
+      assert down == [{:load_module, SampleDep}]
+    end
+
+    test "says what puts the file into a release, and what never does", ctx do
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+      source = File.read!(dep_source())
+
+      # Both the report and the file itself, because they are read at different
+      # times by different people and the second is the one that survives.
+      assert output =~ "nothing writes one into deps/"
+      assert output =~ "lib/sample_dep-#{@to}/ebin/sample_dep.appup"
+      assert output =~ "refuses it once sample_dep is no longer #{@to} there"
+
+      assert source =~ "an application this project does not own"
+      assert source =~ "nothing writes it into deps/"
+      assert source =~ "lib/sample_dep-#{@to}/ebin/sample_dep.appup"
+      assert source =~ "refuses it once"
+
+      # And nothing was written into the dependency's own checkout or its build,
+      # which is the failure the location exists to avoid rather than a detail of
+      # it: those are shared by every release built from this tree.
+      assert Path.wildcard(Path.join(Fixture.workspace(), "deps/**/*.appup")) == []
+    end
+
+    test "never rewrites an entry it already has, the same as for an owned application", ctx do
+      gen!(both(ctx, "sample_dep"), "generated.exs")
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      # The file this writes is named for one transition, so a second run of the
+      # same one meets its own output - which is the merge case, answering that
+      # both directions are already covered.
+      assert output =~ "0 appups written"
+      assert output =~ "already has an upgrade and a downgrade entry for #{@from}"
     end
   end
 
@@ -412,6 +455,15 @@ defmodule Forecastle.AppupGenTest do
 
   defp write_generated!(source), do: File.write!(generated(), source)
 
+  # Where a dependency's entry goes. Named for the transition rather than by a
+  # project key, which is the whole of how the assembly step knows which release
+  # it belongs to.
+  defp dep_source do
+    Path.join(dep_sources(), "sample_dep-#{@from}-#{@to}.exs")
+  end
+
+  defp dep_sources, do: Path.join(Fixture.workspace(), "rel/appups")
+
   # Put back from the checked-in fixture rather than from a copy taken at setup
   # time, so that a run killed part way through cannot leave a rewritten appup
   # behind for another suite to build against. `ReleaseCase` clears a stale
@@ -423,6 +475,12 @@ defmodule Forecastle.AppupGenTest do
     )
 
     File.rm(generated())
+
+    # A dependency's entry is written into the workspace's `rel/appups`, which
+    # every other suite assembles against: a source left there names a transition
+    # and `Forecastle.Appup.Dep` refuses one that is not the transition being
+    # built, so it would fail their assemblies rather than this one's.
+    File.rm_rf!(dep_sources())
 
     :ok
   end
