@@ -717,14 +717,40 @@ defmodule Forecastle.Build do
   # printable and writable without a fallback of its own - the same shape as
   # `bin/castle`'s `validate_vsn`, which refuses rather than encoding everywhere.
   defp valid_vsn!(vsn, file) do
-    if String.valid?(vsn) do
-      vsn
-    else
-      Mix.raise(
-        "#{Path.relative_to_cwd(file)} names a version that is not valid UTF-8. It cannot be " <>
-          "printed, written into an appup, or compared as the string :systools compares it " <>
-          "as, so this refuses rather than carrying it into a report that would crash on it."
-      )
+    cond do
+      not String.valid?(vsn) ->
+        Mix.raise(
+          "#{Path.relative_to_cwd(file)} names a version that is not valid UTF-8. It cannot " <>
+            "be printed, written into an appup, or compared as the string :systools compares " <>
+            "it as, so this refuses rather than carrying it into a report that would crash " <>
+            "on it."
+        )
+
+      controls?(vsn) ->
+        Mix.raise(
+          "#{Path.relative_to_cwd(file)} names a version carrying control characters. A " <>
+            "version reaches a report heading, an appup source and a refusal message, and " <>
+            "one carrying a newline or an escape can forge a line of output or drive a " <>
+            "terminal - so this refuses it, which is the contract bin/castle already holds " <>
+            "a managed version to: valid UTF-8 with no C0, DEL or C1 controls."
+        )
+
+      true ->
+        vsn
     end
+  end
+
+  # **A literal set of codepoints, not a character class.** `AGENTS.md` records
+  # why at length for the shell half: a class is resolved against the locale, so
+  # it describes the host rather than the contract, and the accepted set becomes
+  # a property of the machine. The same reasoning applies to a regex here, and a
+  # literal range cannot drift.
+  #
+  # **A space is not a control character and is deliberately allowed.** Mix
+  # permits one in a version and Castle manages such versions, and the shell half
+  # records a bug where a display guard matching whitespace withheld exactly the
+  # versions an operator most needed named. Only C0, DEL and C1 are refused.
+  defp controls?(vsn) do
+    Enum.any?(String.to_charlist(vsn), &(&1 <= 0x1F or &1 == 0x7F or (&1 >= 0x80 and &1 <= 0x9F)))
   end
 end

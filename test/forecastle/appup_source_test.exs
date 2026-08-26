@@ -191,21 +191,51 @@ defmodule Forecastle.AppupSourceTest do
       assert Source.read(Path.join(ctx.tmp_dir, "nothing.exs")) == :absent
     end
 
+    test "a version carrying control characters is refused, and a space is not", ctx do
+      # `bin/castle` already holds a managed version to "valid UTF-8 with no C0,
+      # DEL or C1 controls", and a version reaches a report heading, an appup
+      # source and a refusal message - so one carrying a newline can forge a line
+      # of output, and reporting happens after the file has been written. Raised
+      # in review. A space is explicitly *not* a control character: Mix permits
+      # one in a version and Castle manages such versions.
+      for {vsn, refused?} <- [{~c"1.0\n[error] forged", true}, {~c"1.0 rc1", false}] do
+        ebin = resource!(ctx, vsn)
+
+        if refused? do
+          assert_raise Mix.Error, ~r/control characters/, fn ->
+            Forecastle.Build.side!(ebin, :probe_ctrl)
+          end
+        else
+          assert %{vsn: "1.0 rc1"} = Forecastle.Build.side!(ebin, :probe_ctrl)
+        end
+      end
+    end
+
     test "a version that is not valid UTF-8 is refused before it can be printed", ctx do
       # Refused by `Forecastle.Build.fetch_vsn!/2` at the point a version enters,
       # which is what lets everything downstream take one as printable and
       # writable. Asserted here through the `.app` because that is the only way
       # such a version can arrive: `~tp` writes a charlist of codepoints, and
       # `List.to_string/1` of those is always valid.
-      ebin = Path.join(ctx.tmp_dir, "probe_bad-1/ebin")
-      File.mkdir_p!(ebin)
-
-      resource = {:application, :probe_bad, [vsn: <<0xFF, 0xFE>>, modules: []]}
-      File.write!(Path.join(ebin, "probe_bad.app"), :io_lib.format(~c"~w.~n", [resource]))
+      ebin = resource!(ctx, <<0xFF, 0xFE>>)
 
       assert_raise Mix.Error, ~r/not valid UTF-8/, fn ->
-        Forecastle.Build.side!(ebin, :probe_bad)
+        Forecastle.Build.side!(ebin, :probe_ctrl)
       end
+    end
+
+    # A one-application library directory holding a `.app` with the given version
+    # and no beams, which is all `Forecastle.Build.side!/2` needs to reach the
+    # version it reads. `~w` rather than `~tp` so a version that is not valid
+    # UTF-8 survives being written out.
+    defp resource!(ctx, vsn) do
+      ebin = Path.join([ctx.tmp_dir, "vsn-#{System.unique_integer([:positive])}", "ebin"])
+      File.mkdir_p!(ebin)
+
+      resource = {:application, :probe_ctrl, [vsn: vsn, modules: []]}
+      File.write!(Path.join(ebin, "probe_ctrl.app"), :io_lib.format(~c"~w.~n", [resource]))
+
+      ebin
     end
   end
 
