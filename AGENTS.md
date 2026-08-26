@@ -2121,15 +2121,32 @@ both the same way made every `~c` carrying an escape disagree with
 merged wrongly, which is the cross-check earning its keep rather than an argument
 for not having found it.
 
-**A `<<…>>` bitstring needs its own clause too**, which Codex raised on the PR.
-`Extra` is an arbitrary term, so `{:advanced, <<1, 2>>}` is an ordinary thing for
-an appup to carry, and it parses to a `{:<<>>, …}` rather than to a plain binary —
-so without a clause the whole file read as computed and the documented merge case
-failed on a literal. Only whole literal bytes are taken. A `::` segment falls
-through, which is what keeps an *interpolated string* refused since that parses
-to a `<<>>` as well; and an integer outside `0..255` falls through rather than
-having Elixir's truncation rule reproduced by hand. Both are narrower than
-`Macro.quoted_literal?/1`, which is the direction this is allowed to be wrong in.
+### Where the accepted set stops, and why that is now a rule rather than a list
+
+**Successive review rounds each found one more shape that is a literal and was
+refused — a `<<…>>` bitstring, then a cons cell — and a list that grows one round
+at a time is a list nobody can tell is finished.** That is the recurring class,
+and it is closed by stating the rule instead of extending the list:
+
+> **A shape is accepted when the term it denotes is determined by the AST alone.**
+
+That admits an alias (`Module.concat/1` of its segments), the two charlist sigils
+(their text, under the escape rule above), and a cons cell — `[1 | 2]` parses to a
+one-element list holding a `{:|, …}`, which `Macro.quoted_literal?/1` does not
+walk. It excludes two things that look like literals and are not determined by the
+AST: a **struct**, whose term needs the module's compile-time defaults rather than
+anything in the syntax tree, and a bitstring segment Elixir would **truncate**
+(`<<256>>` denotes `<<0>>` by a rule of the language). A `::` segment is excluded
+too, which is what keeps an *interpolated string* refused — that parses to a
+`<<>>` as well.
+
+**The boundary is pinned rather than described.** `appup_source_test.exs` runs a
+corpus of shapes through `to_term/1` and `Macro.quoted_literal?/1` and asserts
+they agree everywhere except at two named sets, each with its reason. A new
+shape — or a future Elixir widening its own predicate — fails that test instead of
+arriving as a review finding. It earned its keep immediately: adding the cons
+clause moved cons cells from "both refuse" to "ours only", and the test said so
+before the commit.
 
 **The bytes evaluated are the bytes that were checked**, which a later round
 found: `Code.eval_file/1` opens the path a second time, so a source replaced in

@@ -33,6 +33,34 @@ defmodule Forecastle.Appup.Source do
   is built on: too narrow costs a refusal with the entry printed beside it, too
   wide costs a file rewritten to mean something else.
 
+  ## Where the accepted set stops, and why that is a rule rather than a list
+
+  Successive review rounds each found one more shape that is a literal and was
+  refused - a `<<…>>` bitstring, then a cons cell - and a list that grows one
+  round at a time is a list nobody can tell is finished. So the rule, rather than
+  the list:
+
+  > **A shape is accepted when the term it denotes is determined by the AST
+  > alone.**
+
+  That admits an alias, whose value is `Module.concat/1` of its segments; the two
+  charlist sigils, whose value is their text under a rule this module states; and
+  a cons cell, which `Macro.quoted_literal?/1` does not walk. It excludes two
+  things that look like literals and are not determined by the AST:
+
+    * **A struct.** `%Range{first: 1}` needs the struct's *compile-time
+      defaults*, which live in the module and not in the syntax tree, so nothing
+      here can produce the term without loading it. `Macro.quoted_literal?/1`
+      says `true` for one; this says no, and that difference is the rule doing
+      its job rather than a gap in it.
+    * **A bitstring segment Elixir would truncate.** `<<256>>` denotes `<<0>>` by
+      a rule of the language, not of the tree.
+
+  `appup_source_test.exs` pins the whole boundary against
+  `Macro.quoted_literal?/1` over a corpus, asserting the two agree everywhere
+  except at those exceptions, named. A new shape - or a future Elixir widening
+  its own predicate - fails that test instead of arriving as a review finding.
+
   Two shapes are accepted that `Macro.quoted_literal?/1` refuses, and both are
   measured rather than assumed:
 
@@ -296,7 +324,23 @@ defmodule Forecastle.Appup.Source do
     with {:ok, left} <- to_term(left), {:ok, right} <- to_term(right), do: {:ok, {left, right}}
   end
 
-  def to_term(list) when is_list(list), do: all(list)
+  # A list, and the cons cell an improper one ends in. `[1 | 2]` parses to a
+  # one-element list holding a `{:|, meta, [head, tail]}`, and `|` can only be
+  # the last element - so the tail is read on its own and consed on rather than
+  # appended. Raised in review, where the file read as computed for it.
+  def to_term(list) when is_list(list) do
+    case List.pop_at(list, -1) do
+      {{:|, _meta, [head, tail]}, front} ->
+        with {:ok, front} <- all(front),
+             {:ok, head} <- to_term(head),
+             {:ok, tail} <- to_term(tail) do
+          {:ok, front ++ [head | tail]}
+        end
+
+      _proper ->
+        all(list)
+    end
+  end
 
   def to_term(literal) when is_atom(literal) or is_number(literal) or is_binary(literal),
     do: {:ok, literal}

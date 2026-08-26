@@ -192,6 +192,113 @@ defmodule Forecastle.AppupSourceTest do
     end
   end
 
+  describe "the boundary of what counts as a literal" do
+    # **Three review rounds each found one more shape that was a literal and was
+    # refused, and a list that grows one round at a time is a list nobody can
+    # tell is finished.** So the boundary is pinned here against Elixir's own
+    # predicate rather than rediscovered: `to_term/1` and
+    # `Macro.quoted_literal?/1` must agree over this corpus except at the
+    # exceptions named below, and each exception has a reason.
+    #
+    # A new shape, or a future Elixir widening its own predicate, fails this
+    # instead of arriving as a review finding.
+    @corpus [
+      ":atom",
+      "1",
+      "1.5",
+      "-1",
+      ~s|"str"|,
+      "[]",
+      "[1, 2]",
+      "[a: 1, b: 2]",
+      "{1, 2}",
+      "{1, 2, 3}",
+      "{}",
+      "%{a: 1}",
+      "%{}",
+      "<<>>",
+      "<<1, 2>>",
+      ~s|<<"ab", 3>>|,
+      "<<1::4>>",
+      "Sample.Counter",
+      ~S|"a#{1}b"|,
+      ~s|System.get_env("X")|,
+      "1..2",
+      "[{:load_module, Sample}, {:update, Foo, {:advanced, %{a: <<1>>}}}]"
+    ]
+
+    # Literals this accepts and Elixir's predicate does not, each for a reason
+    # the rule covers: a charlist sigil is a *call* to that predicate, and
+    # refusing one would refuse every appup written the way Elixir has spelled a
+    # charlist since 1.15; and a cons cell's term is determined by the AST alone,
+    # which is the rule, even though `Macro.quoted_literal?/1` does not walk one.
+    @ours_only [
+      ~s|~c"abc"|,
+      ~s|~C"abc"|,
+      "[1 | 2]",
+      "[1 | [2, 3]]",
+      "%{{1, 2} => [3 | 4]}",
+      "[{:update, Sample.Counter, {:advanced, [1 | 2]}}]"
+    ]
+
+    # Literals by Elixir's predicate that this refuses, because their term is not
+    # determined by the AST alone: a struct needs the module's compile-time
+    # defaults, and `<<256>>` needs the language's truncation rule.
+    @theirs_only ["%Range{first: 1, last: 2, step: 1}", "<<256>>"]
+
+    test "agrees with Macro.quoted_literal?/1 everywhere it is not a named exception" do
+      for source <- @corpus do
+        {:ok, plain} = Code.string_to_quoted(source)
+
+        assert literal?(source) == Macro.quoted_literal?(plain),
+               "#{source}: to_term says #{literal?(source)}, " <>
+                 "Macro.quoted_literal?/1 says #{Macro.quoted_literal?(plain)}"
+      end
+    end
+
+    test "reads every accepted shape as the term it evaluates to" do
+      for source <- @corpus ++ @ours_only, literal?(source) do
+        {value, []} = Code.eval_string(source)
+
+        assert Source.to_term(encoded(source)) == {:ok, value},
+               "#{source} did not read as the term it evaluates to"
+      end
+    end
+
+    test "the exceptions are exactly the two named sets" do
+      # Asserted rather than described: if a future Elixir made a sigil a
+      # `quoted_literal?`, or stopped calling a struct one, this fails and the
+      # reasoning above has to be revisited rather than quietly drifting.
+      for source <- @ours_only do
+        {:ok, plain} = Code.string_to_quoted(source)
+
+        assert literal?(source)
+        refute Macro.quoted_literal?(plain)
+      end
+
+      for source <- @theirs_only do
+        {:ok, plain} = Code.string_to_quoted(source)
+
+        refute literal?(source)
+        assert Macro.quoted_literal?(plain)
+      end
+    end
+
+    defp literal?(source), do: match?({:ok, _term}, Source.to_term(encoded(source)))
+
+    defp encoded(source) do
+      {:ok, ast} =
+        Code.string_to_quoted(source,
+          literal_encoder: fn literal, meta -> {:ok, {:__block__, meta, [literal]}} end,
+          token_metadata: true,
+          columns: true,
+          emit_warnings: false
+        )
+
+      ast
+    end
+  end
+
   describe "what gets evaluated" do
     test "a source that computes is never evaluated", ctx do
       # The promise the module makes: evaluation happens only after the AST has
