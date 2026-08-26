@@ -1977,6 +1977,242 @@ asks for. Both children have to be *supervised* for the comparison to mean
 anything, because `update` only reaches processes found through the supervision
 tree.
 
+**Reading the two builds lives in `Forecastle.Build`, not in the task, and every
+paragraph above about absence applies there.** `mix castle.appup.gen` diffs the
+same two builds and must not be able to disagree with the check about which
+modules moved — a generator drafting from one diff while the gate ran on another
+would produce output the gate rejects, or worse, output that passes a check
+computed differently from the upgrade. So the library-directory refusals, the
+`ebin` discovery, the `.app` resource reading and the fingerprint pair are one
+module with two callers. The behaviours `mix castle.appup.gen` classifies on come
+out of the *same* read: the attribute half of the fingerprint is already the
+decoded attribute list, so `behaviours/2` is a lookup rather than a second file
+read.
+
+## Drafting an appup
+
+`mix castle.appup.gen` takes the same arguments and the same diff and writes the
+instructions for it. [forecastle#29](https://github.com/ausimian/forecastle/issues/29),
+and `design/upgrade-tooling.md` §D2, §3.2, §3.3 and §3.4 in ausimian/castle, are
+where the reasoning started. §D3 is the framing: the coverage check is the
+primary artefact and the generator falls out of it.
+
+**The signal is the behaviour in the beam's `Attr` chunk, and `code_change/3`
+being exported is not a signal.** Elixir 1.19.5's `gen_server.ex:953` injects an
+overridable `@doc false def code_change(_old, state, _extra), do: {:ok, state}`,
+so **every** `use GenServer` module exports it — and the injected one cannot be
+told from a hand-written one at a release's beams, since that would need the
+`Docs` chunk or the abstract code and `Mix.Release.strip_beam/2` removes both.
+`appup_draft_test.exs` pins this by compiling a `use GenServer` module beside a
+module that hand-writes `code_change/3` and asserting the second is a
+`load_module`, which is a discriminator rather than a restatement.
+
+`{:update, M}` (soft) is the unsafe alternative, since it does not call
+`code_change/3` at all and so leaves a state that did need migrating alone,
+silently — and nothing here emits it.
+
+**§3.3's "`{:advanced, []}` is safe whether or not a `code_change/3` was
+written" is Elixir-specific, and that was found in review on this branch.** It
+holds for `use GenServer`, whose injected identity runs. It holds for nothing
+else: `code_change/3` is in `gen_server`'s and `gen_event`'s
+`-optional_callbacks` and `code_change/4` in `gen_statem`'s and `gen_fsm`'s, so
+`@behaviour GenServer` without `use`, and every Erlang callback module, can
+declare the behaviour and export neither. Measured on OTP 28, against a
+`@behaviour GenServer` module with no `code_change/3`: `sys:change_code/4`
+answers `{error, {'EXIT', {undef, [{Mod, code_change, …}, …]}}}`, and
+`release_handler_1:change_code/5` matches `ok = sys:change_code(…)` — so the
+install fails and rolls back.
+
+**The instruction is not changed for it, and the export is not a classification
+signal.** §3.2 forbids reading `code_change/3`'s *presence*, because Elixir's
+injected one makes it meaningless. *Absence* is a different fact and is
+decidable, and what the alternatives would cost is what settles it: a
+`load_module` swaps the code under a live process with no suspend at all, and a
+soft update suspends and migrates nothing. So the draft keeps the instruction the
+behaviour implies and says the module needs a `code_change` written. Do not turn
+`Forecastle.Build.exports?/4` into a classifier.
+
+**Every matched behaviour is asked for its arity, not just the one that decided
+the instruction**, and that was a second review round's finding. `gen_server` and
+`gen_event` call `code_change/3`; `gen_statem` and `gen_fsm` call
+`code_change/4`. A module declaring two of them needs both, because which one the
+running process asks for is decided at run time by that process's behaviour
+module and is not visible in a beam — so a module declaring `:gen_statem` and
+`GenServer` and exporting only `code_change/4` passed silently while a
+`gen_server` process using it would fail. The ambiguity itself is now said too.
+
+**The `Attr`-to-`Draft` boundary is pinned against real beams**, in
+`appup_draft_test.exs`'s "against real beams read through Forecastle.Build". Every
+other case in that suite hands `Draft` a side built by hand, so none of them
+exercises the read that produces one — a regression where `Forecastle.Build`
+misread `ExpT`, or associated one module's exports with another's, would pass all
+of them. That case compiles two modules differing only in whether `use GenServer`
+injected the callback, writes them to a real `ebin` with a real `.app`, and reads
+both sides through `Build.side!/2`.
+
+**A module whose behaviour *role* differs between the two builds is drafted for
+what it becomes, and the change is said.** The classification is the destination
+side, because that is the code that will be running — but the process running now
+was started by the old code, and an instruction only swaps code under it. A
+`GenServer` that becomes a plain module is a `load_module` under a live
+`gen_server`; the reverse is an advanced update whose `code_change` runs against a
+process that was never one. Neither is mechanically decidable, so both are
+reported and neither is refused: refusing an entry over one module would take the
+other twenty with it.
+
+Both attribute *keys* are read, and that is measured rather than defensive: the
+Erlang compiler keeps the spelling the source used, so `-behavior(gen_server).`
+is stored under `behavior` and `-behaviour(...)` under `behaviour`. Elixir's
+`@behaviour` always produces the British one, so the American key turns up only
+in Erlang sources — which is exactly where a `gen_server` is likely to live.
+
+A module carrying more than one behaviour is classified by the first row of the
+table that matches, and **supervisor wins**. That is reachable in ordinary code —
+`use GenServer` beside `@behaviour Supervisor` compiles to
+`behaviour: [GenServer, Supervisor]` — and it is the conservative direction,
+since a supervisor upgraded as a plain gen_server has its child specs left alone
+silently. The comment beside the instruction names every behaviour found and
+which one decided it, so the choice is visible rather than implied.
+
+### The three writing cases, and why the refusal is the load-bearing one
+
+An appup source is **arbitrary Elixir evaluated for its value** — the fixture's
+own is a `case` on `SAMPLE_VSN` — so flattening one into a static term would
+silently discard the logic that decides what it produces. Hence: no appup yet →
+write; a pure literal → merge and print the diff; anything that computes →
+**refuse to write** and print the entry to merge by hand.
+
+`Forecastle.Appup.Source` decides that on the parsed AST, and **the predicate and
+the reader are one function**. `to_term/1` either produces the term the AST
+denotes or answers `:error`, and "is this a pure literal?" is exactly "did
+`to_term/1` answer" — so there is no second predicate that could be wider than
+the reader, which is the shape a heuristic takes. Every accepted shape is written
+out and the default is `:error`, the same asymmetry `Forecastle.Appup.legal?/1`
+is built on.
+
+Two shapes are accepted that `Macro.quoted_literal?/1` refuses, and the first is
+not optional: `~c"0.1.0"` parses to a `sigil_c` call, which that function answers
+`false` for, so a purity test built on it alone would refuse every appup written
+the way Elixir has spelled a charlist since 1.15 — including every file this task
+writes, which would make the merge case work only on files nobody writes any
+more. `appup_source_test.exs` pins the measurement rather than the claim. The
+second is the `{:__block__, meta, [literal]}` wrapper the `:literal_encoder`
+parse option produces, which is asked for because it is the only way to get the
+position of a `[` out of the parser.
+
+**`~c` and `~C` are two clauses, not one, and the difference is measured.** A
+sigil's contents reach the AST *raw* — they are handed to the sigil function
+unprocessed and it is the function that decides — so `~c"a\n"` and `~C"a\n"` both
+arrive as the same four characters while evaluating to different charlists.
+`Kernel.sigil_c/2` unescapes and `Kernel.sigil_C/2` does not, which is why the
+first goes through `Macro.unescape_string/1` and the second does not. Reading
+both the same way made every `~c` carrying an escape disagree with
+`Code.eval_file/1` — `confirm/4` caught it, so the file was *refused* rather than
+merged wrongly, which is the cross-check earning its keep rather than an argument
+for not having found it.
+
+The term that is merged into comes from `Code.eval_file/1` — the same call the
+`:appup` compiler makes, so it is what the build will produce — and it is
+compared against what `to_term/1` read. A disagreement is a refusal rather than a
+rewrite. The evaluation happens only after the AST has read as a literal, so
+nothing arbitrary is ever run.
+
+### A merge is a text splice, and it has to prove it landed
+
+Re-rendering the term would take the file's comments with it, **including the
+ones a previous run wrote to say what it could not decide** — which is the point
+of the draft, so losing them on the next run would take the honesty out of the
+tool one generation at a time. So the entry is inserted as text and nothing else
+in the file is touched.
+
+**It goes in at the front of the list, immediately after the `[`, and that is a
+fact about Elixir's grammar rather than a preference.** Appending means writing
+the separator on a line of its own, and a newline ends the expression before it:
+a `,` opening a line after a complete element is a syntax error where a `,`
+closing the previous line is not. Position cannot shadow anything, and that is
+exact rather than likely — `appup_search_for_version/2` takes the first entry
+that matches, a charlist from-version matches by term equality, and an entry is
+only ever added to a direction where that same function found none.
+
+The splice is then verified: the result is parsed again, read as a literal again,
+and refused unless the term it denotes is exactly the merged term intended. So a
+rendering bug, a splice in the wrong place, or an instruction that does not
+survive `inspect/2` is a refusal with nothing written rather than an appup
+claiming coverage it has not got. The same check runs on a freshly rendered file,
+which is also what says the output is mergeable next time.
+
+**Verifying the text says nothing about the file, so publishing is separate and
+has two rules.** Raised in review. A first appup is created with `:exclusive`, so
+a file that appeared between being read as absent and being written refuses in
+the same operation that would have created it — everything drafted was drafted on
+its absence. **Exclusivity is not atomicity**, which a second round found: the
+open creates the inode, and a failure in the write or the close after it leaves a
+partial `.exs` that the next `mix compile` cannot evaluate. So the open is done
+directly rather than through `File.write/3` — only the caller of `:file.open/2`
+knows it created the file and may remove it again — and where the removal fails
+too, the refusal says the path may hold partial output instead of saying nothing
+was written. A merge goes to a staging file *in the same directory* and is
+renamed on, which is the mechanism `Forecastle.Baseline` publishes a cache entry
+with and `Forecastle.Relup` a relup: `File.write/2` truncates before it writes, so
+a failure part way through would leave the source neither what it was nor what it
+was going to be. The mode is carried across, because the rename replaces the
+inode. Before the rename the bytes are compared against what was read, which
+turns "an edit between planning and writing was discarded" into a refusal — that
+**narrows the window rather than closing it**, and there is no closing it, but
+unlike the read-a-build-while-it-rebuilds case this module declines, this one
+*writes*, and the check costs one read of a file whose expected contents it
+already holds.
+
+### Nothing ends without saying so
+
+Every way a run can end without writing an instruction is either a refusal or a
+named no-op, and the exit status is derived from that. **Refused and non-zero:**
+an application in one build and not the other (`:systools` covers that with
+`add_application` / `remove_application`, which no appup entry describes); one
+whose version did not move; a build of the application with no beams in it, where
+every module of the other side would read as added or removed and the entry
+drafted from it would load or delete the whole application; an appup that
+computes; one that is not an appup; and one whose merged form does not read back.
+**Named and zero:** nothing moved while the version did, which writes an entry
+with an empty script and a comment saying an empty script is the instruction that
+nothing has to be loaded rather than an omission; and an appup that already has
+an entry for this from-version in both directions, which is never rewritten.
+
+The absent-application case is the one place this deliberately **diverges** from
+`mix castle.appup`, which reports the same state as a note and exits zero. A
+check has an answer for it and a generator that was asked to write something has
+not.
+
+### Boundaries
+
+- **A drafted `update`, `load_module` or `add_module` naming a module the new
+  side's `.app` does not list is still drafted, and carries the reason it cannot
+  work.** `systools_rc:get_lib/2` resolves object code through
+  `#application.modules`, so such an instruction is a `{no_such_module, Mod}` and
+  the whole relup fails. Leaving it out instead would produce an appup that
+  *builds* a relup and leaves the module running its old code — the §1.1 failure
+  this tooling exists to catch — so the loud direction is the right one, and the
+  comment says the fix is the `modules` list rather than the instruction. A
+  `delete_module` gets no such note: it translates to a `remove` and a `purge`
+  and resolves nothing.
+- **The version tag of a file this writes is a literal**, so it names the version
+  it was generated for and does not follow the application's. The generated
+  header says so. A merge leaves an existing tag alone: updating it is a third
+  kind of edit on a file the task was asked to add one entry to, and
+  `mix castle.appup` already reports a `bad_vsn` mismatch as the note
+  `:systools` makes of it.
+- **A `:appup` key naming a file that does not exist is a compilation error, and
+  it is in the way of the default `--to`.** `Mix.Tasks.Compile.Appup` refuses a
+  configured-but-missing source deliberately and the default `--to` compiles, so
+  the first appup for a project that has already set the key needs an explicit
+  `--to`. Leaving the key unset until there is a file to name is the other way
+  round it, and is what the report tells a project with no key to do afterwards.
+- **An application that is neither this project nor an umbrella child has no
+  source here to write.** Its entry is printed. Umbrella children are reached
+  through `Mix.Project.in_project/3`, because the `:appup` key is in the child's
+  own `mix.exs` and there is no other way to ask; there is no umbrella fixture
+  here, so that path is exercised by no test.
+
 ## Layout
 
 | Path | Purpose |
@@ -1984,9 +2220,13 @@ tree.
 | `lib/forecastle.ex` | Release step hooks (the whole of the build-time logic) |
 | `lib/forecastle/baseline.ex` | The baseline resolver — `rel:`, `tar:` and `ref:` specs, and the cache under `_build/castle/baselines` |
 | `lib/forecastle/appup.ex` | Reading appups and asking them what `systools` asks: the from-version matching, what an instruction covers, and which applications the project owns the appups for |
+| `lib/forecastle/appup/draft.ex` | The decision table — behaviours out of the beam's `Attr` chunk — and the comments that go beside each drafted instruction |
+| `lib/forecastle/appup/source.ex` | Reading and rewriting an appup *source* file: whether its AST is a pure literal, and splicing a from-version entry into one that is |
+| `lib/forecastle/build.ex` | Reading one build of an application and diffing two of them: the library-directory refusals, the `ebin` discovery, the `.app` resource, and the module fingerprints. Shared by the check and the generator |
 | `lib/forecastle/relup.ex` | Generating a relup: resolving baselines, classifying each transition, the three strategies, the announcement and the atomic publication. Shared by the task and the assembly step |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
 | `lib/mix/tasks/castle.appup.ex` | `mix castle.appup` — the read-only coverage check. Non-zero when a module that moved is mentioned nowhere |
+| `lib/mix/tasks/castle.appup.gen.ex` | `mix castle.appup.gen` — drafts the entry for a transition and writes or merges it into the appup source |
 | `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — the command line over `Forecastle.Relup`: argument handling, `--target`, `--outdir` and the strategy switches |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
@@ -2003,15 +2243,21 @@ tree.
   piecemeal.
 - **`mix precommit` green does not mean CI green, and the gap is structural
   rather than bad luck.** `mix.exs` allows `~> 1.18` and the CI matrix runs
-  1.18, 1.19 and 1.20, but the only cell running `--warnings-as-errors` is
-  pinned to 1.19 — so a warning that exists on 1.20 alone is invisible to
-  precommit *and* fails no test cell, because those run a plain `mix test`.
-  Two concrete instances so far: `File.stream!/3` with modes before the byte
-  count, deprecated in 1.20, which merged on #26 and was only found later; and
-  a `defp` fallback clause that 1.20's set-theoretic inference proves dead,
-  which failed every 1.20 cell. When touching code near either, compile against
-  the top of the supported range as well:
+  1.18, 1.19 and 1.20, while `mix precommit` runs whatever Elixir is on the
+  developer's path — so a warning that exists on 1.20 alone is invisible to
+  precommit and turns up only once the matrix has run. Two concrete instances so
+  far: `File.stream!/3` with modes before the byte count, deprecated in 1.20,
+  which merged on #26 and was only found later; and a `defp` fallback clause
+  that 1.20's set-theoretic inference proves dead, which failed every 1.20 cell.
+  When touching code near either, compile against the top of the supported range
+  before pushing:
   `mise x elixir@1.20.3-otp-28 -- mix compile --warnings-as-errors --force`.
+
+  This note used to say that the matrix cells run a plain `mix test` and so
+  catch no warning at all. They do not: every cell of the `test` job runs
+  `mix compile --warnings-as-errors` before its `mix test --include e2e`, and
+  has since the workflow was added. The remedy above is unchanged — what a
+  1.20 cell catches, it catches after a push rather than before one.
 - **CI failing on one OS and not the other is a signal, not flakiness.** Two
   instances now: bsdtar and GNU tar disagree about hard links, and `/lib` is a
   real directory on Linux and absent on macOS — which is what let a nonsense
@@ -2045,6 +2291,9 @@ directory to start from a clean slate.
 | `test/forecastle/assembly_relup_test.exs` | The relup a single `mix release` produces from `upgrade_from:` — in the version path and in the tarball — and what the option does when it names nothing |
 | `test/forecastle/baseline_test.exs` | The baseline grammar and all three sources. `tar:` against a release-shaped tree built in the test; `ref:` against a throwaway git repository holding a Mix project of its own |
 | `test/forecastle/appup_check_test.exs` | `mix castle.appup` as a command, against two assembled releases: what it reports, what it passes over, and the exit status |
+| `test/forecastle/appup_draft_test.exs` | The decision table, against module attribute lists built in the test — plus the two rows that are measured rather than stated: `code_change/3` against real compiled modules, and the American `-behavior` spelling against real Erlang |
+| `test/forecastle/appup_source_test.exs` | The line between an appup that states a term and one that computes it, against real files in a scratch directory, and what a merge does to the file it merges into |
+| `test/forecastle/appup_gen_test.exs` | `mix castle.appup.gen` as a command, against two assembled releases: the three writing cases, everything it refuses, and `mix castle.appup` run over the output |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 

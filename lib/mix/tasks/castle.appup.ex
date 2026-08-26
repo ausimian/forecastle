@@ -11,6 +11,10 @@ defmodule Mix.Tasks.Castle.Appup do
   exits non-zero when a module that moved is covered by no instruction, which is
   what makes it usable as a release-pipeline gate.
 
+  `mix castle.appup.gen` takes the same arguments and the same diff and drafts
+  the instructions this reports the absence of. This is the gate; that is a draft
+  you review.
+
   ## The failure it exists to catch
 
   `Mix.Tasks.Compile.Appup` never sees a second version of the application, so

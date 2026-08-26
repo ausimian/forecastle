@@ -100,6 +100,7 @@ defmodule Forecastle.Build do
           inventory: MapSet.t(module()),
           listed?: boolean(),
           modules: %{module() => fingerprint()},
+          exports: %{module() => MapSet.t({atom(), arity()})},
           ebin: binary(),
           resource: binary()
         }
@@ -403,12 +404,14 @@ defmodule Forecastle.Build do
   def side!(ebin, app) do
     resource = Path.join(ebin, "#{app}.app")
     {vsn, inventory, listed?} = app_resource!(resource, app)
+    {modules, exports} = read!(ebin)
 
     %{
       vsn: vsn,
       inventory: inventory,
       listed?: listed?,
-      modules: modules!(ebin),
+      modules: modules,
+      exports: exports,
       ebin: ebin,
       resource: resource
     }
@@ -468,6 +471,38 @@ defmodule Forecastle.Build do
     end
   end
 
+  @doc """
+  Whether a module exports a function, read from the beam's `ExpT` chunk.
+
+  **This is not a classification signal and must never become one.**
+  `design/upgrade-tooling.md` §3.2 is explicit that `code_change/3` being
+  *exported* says nothing: Elixir injects an overridable one into every
+  `use GenServer` module, and the injected one cannot be told from a hand-written
+  one at a release's beams. Which instruction a module needs is decided by
+  `behaviours/2` and by nothing else.
+
+  What an *absent* export decides is a different question, and that one is
+  answerable. `code_change/3` is an optional callback of `gen_server` and
+  `gen_event`, and `code_change/4` of `gen_statem` and `gen_fsm`, so a module can
+  legitimately declare the behaviour and export neither - `@behaviour GenServer`
+  without `use`, or any Erlang callback module. Measured on OTP 28:
+  `sys:change_code/4` on such a process answers
+  `{error, {'EXIT', {undef, [{Mod, code_change, ...}]}}}`, and
+  `release_handler_1:change_code/5` matches `ok = sys:change_code(...)`, so the
+  install fails. `mix castle.appup.gen` reports that beside the instruction it
+  drafted rather than choosing a different one.
+
+  A module absent from the build, or one whose beam has no export table, answers
+  `false`.
+  """
+  @spec exports?(side(), module(), atom(), arity()) :: boolean()
+  def exports?(side, module, name, arity) do
+    case Map.fetch(side.exports, module) do
+      {:ok, exports} -> MapSet.member?(exports, {name, arity})
+      :error -> false
+    end
+  end
+
   # The beams on disk rather than the `.app` file's `modules` list. A beam is
   # what `release_handler` can load and what an instruction can name, and the
   # `.app` list is derived from the same directory anyway - so this asks the
@@ -479,10 +514,25 @@ defmodule Forecastle.Build do
   # `File.ls!/1` rather than a message of this module's own, because the
   # directory was established as one moments ago - a failure here is a race or a
   # permissions change, and Elixir's own error names the path and the reason.
-  defp modules!(ebin) do
-    for name <- File.ls!(ebin), Path.extname(name) == ".beam", into: %{} do
-      fingerprint!(Path.join(ebin, name))
-    end
+  # Two maps out of one listing and one read per beam: the fingerprints that
+  # change detection compares, and the export sets `exports/2` answers from.
+  #
+  # **They are kept apart rather than folded into one value, and that is the
+  # point.** What counts as a module having *changed* is `:beam_lib.md5/1` and
+  # the persisted attributes, and nothing else - putting the exports in the same
+  # tuple would silently make an export-only difference a change, which is a
+  # claim about upgrades nobody has made. Exports are read for a different
+  # question entirely: whether an instruction the behaviours imply can actually
+  # run. See `exports/2`.
+  defp read!(ebin) do
+    ebin
+    |> File.ls!()
+    |> Enum.filter(&(Path.extname(&1) == ".beam"))
+    |> Enum.reduce({%{}, %{}}, fn name, {modules, exports} ->
+      {module, fingerprint, exported} = fingerprint!(Path.join(ebin, name))
+
+      {Map.put(modules, module, fingerprint), Map.put(exports, module, exported)}
+    end)
   end
 
   # `:beam_lib.md5/1` rather than a digest of the bytes: see the moduledoc. The
@@ -507,15 +557,20 @@ defmodule Forecastle.Build do
   # the documented weaker answer, and is the right one - there are no attributes
   # for it to miss. It also means `behaviours/2` answers `[]` for one, which is
   # the same thing the runtime would say about it.
+  # The two chunks are looked up by name rather than matched positionally.
+  # `:beam_lib.chunks/3` answers in the order it was asked, so a positional match
+  # works today - and a `case` with no clause for any other order is a
+  # `CaseClauseError` in a task that had something else to report, for a change
+  # in OTP that nothing here would otherwise care about.
   defp fingerprint!(beam) do
     binary = File.read!(beam)
-    chunks = :beam_lib.chunks(binary, [:attributes], [:allow_missing_chunks])
+    chunks = :beam_lib.chunks(binary, [:attributes, :exports], [:allow_missing_chunks])
 
     case {:beam_lib.md5(binary), chunks} do
-      {{:ok, {module, md5}}, {:ok, {module, [attributes: attributes]}}} ->
-        {module, {md5, attributes(attributes)}}
+      {{:ok, {module, md5}}, {:ok, {module, read}}} when is_list(read) ->
+        {module, {md5, attributes(read[:attributes])}, exports(read[:exports])}
 
-      {{:error, :beam_lib, reason}, _attributes} ->
+      {{:error, :beam_lib, reason}, _chunks} ->
         Mix.raise(beam_error(beam, reason))
 
       {_md5, {:error, :beam_lib, reason}} ->
@@ -524,7 +579,16 @@ defmodule Forecastle.Build do
   end
 
   defp attributes(:missing_chunk), do: []
-  defp attributes(attributes), do: attributes
+  defp attributes(attributes) when is_list(attributes), do: attributes
+
+  # `ExpT` is one of `:beam_lib.significant_chunks()`, so stripping keeps it and
+  # a beam the runtime can load always has one. `allow_missing_chunks` is on for
+  # `Attr`'s sake, so this has to answer for the case anyway: an empty set, which
+  # is what a module with no export table would report, and which makes
+  # `exports/2` say "no" to every question rather than raising in a task that had
+  # something else to report.
+  defp exports(:missing_chunk), do: MapSet.new()
+  defp exports(exports) when is_list(exports), do: MapSet.new(exports)
 
   defp beam_error(beam, reason) do
     "#{Path.relative_to_cwd(beam)} could not be read as a beam file: #{inspect(reason)}"
