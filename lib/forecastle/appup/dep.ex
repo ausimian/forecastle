@@ -169,6 +169,25 @@ defmodule Forecastle.Appup.Dep do
   end
 
   @doc """
+  The from-version a file name claims for `app` at `vsn`, or `nil` where it claims
+  none.
+
+  Exported because `mix castle.appup.gen` has to find the sources for one
+  application and one target version too, and a *second* reading of these names
+  is one more than a writer and a reader of the same directory can have. Asking
+  the name in two places is how they came to disagree about whether
+  `<app>--<vsn>.exs` is one of them: this rule requires a from-version between
+  the ends, and the looser copy did not.
+  """
+  @spec from_version(Path.t(), atom(), binary()) :: binary() | nil
+  def from_version(path, app, vsn) do
+    case anchored(Path.basename(path, ".exs"), {app, vsn}) do
+      [{_app, _vsn, from}] -> from
+      [] -> nil
+    end
+  end
+
+  @doc """
   Reads every appup source in `dir/0` and returns what to write into the release.
 
   Called from `Forecastle.pre_assemble/1`, so every refusal below happens before

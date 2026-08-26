@@ -2580,6 +2580,14 @@ reduced to `mine ++ theirs` per direction. A merge into an existing literal need
 no refusal of its own after that: it adds exactly the directions nothing answers
 for.
 
+**Which names belong to the set is asked of `Forecastle.Appup.Dep.from_version/3`
+rather than re-derived, and re-deriving it was the fourth round of the same
+disagreement.** A copy that only checked the two ends took `<app>--<vsn>.exs` for
+a source — the release refuses that name, because the rule requires a from-version
+*between* the ends — so the generator counted as coverage a file the next build
+rejects. That is why `from_version/3` is exported at all: one reading of these
+names, in the module that owns the directory.
+
 **The generator's file name is built out of two version strings, so it is checked
 to be a name.** `Forecastle.Build` refuses a version that is not valid UTF-8 or
 that carries control characters — those reach a report and a terminal — and says

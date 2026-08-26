@@ -398,11 +398,17 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
 
   defp destination_matches(_read, _path, _from_vsn), do: []
 
-  # Named the way `Forecastle.Appup.Dep` reads a name - the application at the
-  # front, the version this release carries at the back - and anchored at both
-  # ends for its reason: a version may itself contain a `-`, so a split is a
-  # guess. A directory that cannot be listed is not this task's to report, since
-  # it is the assembly step that has to read it.
+  # **Which names are this application's is asked of `Forecastle.Appup.Dep`, not
+  # re-derived here, and re-deriving it was a review finding.** The rule is
+  # anchored at both ends against the version the release carries - a version may
+  # itself contain a `-`, so a split is a guess - and it requires a from-version
+  # *between* them. A copy that only checked the two ends took
+  # `<app>--<vsn>.exs` for a source, so this task counted as coverage a file the
+  # next build refuses by name. One reading, in the module that owns the
+  # directory.
+  #
+  # A directory that cannot be listed is not this task's to report, since it is
+  # the assembly step that has to read it.
   defp sibling_files(app, to_vsn, path) do
     dir = Dep.dir()
 
@@ -420,10 +426,7 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   end
 
   defp sibling?(entry, app, to_vsn) do
-    base = Path.basename(entry, ".exs")
-
-    Path.extname(entry) == ".exs" and String.starts_with?(base, "#{app}-") and
-      String.ends_with?(base, "-#{to_vsn}")
+    Path.extname(entry) == ".exs" and Dep.from_version(entry, app, to_vsn) != nil
   end
 
   # **A sibling that computes is a refusal rather than an omission.** This task

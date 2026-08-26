@@ -407,6 +407,21 @@ defmodule Forecastle.AppupGenTest do
       assert output =~ "both answer for #{@from} in the upgrade direction"
     end
 
+    test "does not take a name the release refuses for one of this application's", ctx do
+      # `sample_dep--0.1.1.exs` has the application at the front and the version
+      # at the back and *nothing* between them, so `Forecastle.Appup.Dep` refuses
+      # it by name - while a looser reading here took it for a source and counted
+      # its broad entry as coverage, leaving this task and the build disagreeing
+      # about what is in the directory. The name rule is now asked of the module
+      # that owns it.
+      write_dep_source!("sample_dep--#{@to}.exs", regex_appup(~S(0\\.1\\..*)))
+
+      output = gen!(both(ctx, "sample_dep"), "generated.exs")
+
+      assert output =~ "1 appup written"
+      assert File.exists?(dep_source())
+    end
+
     test "refuses a file holding two entries that can both be selected", ctx do
       # And the same question inside one file, which the release asks too.
       write_dep_source!("sample_dep-#{@from}-#{@to}.exs", twice_appup(@from, ~S(0\\.1\\..*)))
