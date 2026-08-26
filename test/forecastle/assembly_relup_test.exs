@@ -92,6 +92,27 @@ defmodule Forecastle.AssemblyRelupTest do
       refute File.exists?(relup_path(from, @from))
     end
 
+    test "assembles a release that names none even with generation after :tar" do
+      # The documented no-op, at the one placement `steps/1` guards, and the
+      # reason that guard is a step rather than a refusal in `steps/1` itself.
+      # Without `upgrade_from:` generation does nothing at all, so the placement
+      # costs nothing and the build has to succeed - `steps/1` is handed a list
+      # and cannot tell, `refuse_unpackaged_relup/1` is handed the release and
+      # can. A release naming no baselines assembles exactly as it would without
+      # any of this.
+      path =
+        assemble!(
+          into: "assembly-relup-after-tar-noop",
+          vsn: @to,
+          env: [{"SAMPLE_STEPS", "after-tar"}]
+        )
+
+      refute File.exists?(relup_path(path)), "a release naming no baselines generated a relup"
+
+      assert {:ok, members} = :erl_tar.table(to_charlist(tarball(path, @to)), [:compressed])
+      refute ~c"releases/#{@to}/relup" in members
+    end
+
     test "generates from the tree a caller step left behind, not the one before it",
          %{from: from} do
       # `mix release` documents a function step between `:assemble` and `:tar` as
@@ -124,6 +145,59 @@ defmodule Forecastle.AssemblyRelupTest do
       # that line is what a relup generated too early would have printed.
       assert output =~ "auto made a restart transition of"
       refute output =~ "every transition in this relup is a hot upgrade"
+    end
+
+    test "packs the relup the caller generated, and leaves that same one on disk",
+         %{from: from} do
+      # The one arrangement `Forecastle`'s own comments send a project to: a step
+      # of its own that packs the archive, with `&Forecastle.generate_relup/1`
+      # placed in front of it by hand, because nothing in `steps/1` can tell
+      # which step does the packing. A splice that did not look for it added a
+      # second generation step *after* the packing - so the archive held the
+      # relup from the first run and the version path the one from the second.
+      #
+      # The fixture's packing step slims the tree before packing it, dropping the
+      # dependency's appup: `auto` reads that while classifying the transition
+      # and nothing reads it at upgrade time. So the two runs would not merely
+      # happen twice, they would *disagree* - the first says hot, the second says
+      # `restart_emulator`. That is what gives "identical" something behind it
+      # rather than making it a comparison of two copies of the same bytes.
+      {generated, output} =
+        assemble_with!(
+          "assembly-relup-packing",
+          "rel:" <> rel(from, @from),
+          [{"SAMPLE_STEPS", "packing"}]
+        )
+
+      archive = generated <> ".tar.gz"
+      on_exit(fn -> File.rm_rf!(archive) end)
+      member = ~c"releases/#{@to}/relup"
+
+      assert {:ok, [{^member, packed}]} =
+               :erl_tar.extract(to_charlist(archive), [:compressed, :memory, {:files, [member]}])
+
+      assert packed == File.read!(relup_path(generated)),
+             "the packaged relup and the one in the version path are different upgrade plans"
+
+      # And it is the caller's generation that survived rather than a spliced
+      # one: the appup was still there when it ran, so the transition is hot.
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], up}], [{@from_vsn, [], _down}]}]} =
+               :file.consult(to_charlist(relup_path(generated)))
+
+      refute up == [:restart_emulator],
+             "the relup on disk was generated after the packing step, not before it"
+
+      # One generation, so one verdict, and this is the half a build watcher sees
+      # first. Counted rather than merely matched: two generations that happened
+      # to agree would leave the relups identical and this assertion is what
+      # would still catch them.
+      hot = "auto: every transition in this relup is a hot upgrade."
+      verdicts = length(String.split(output, hot)) - 1
+
+      assert verdicts == 1, "expected one generation summary, got #{verdicts}:\n\n#{output}"
+
+      refute output =~ "auto made a restart transition of",
+             "a second relup generation ran after the packing step:\n\n#{output}"
     end
   end
 
@@ -165,6 +239,77 @@ defmodule Forecastle.AssemblyRelupTest do
       assert output =~ relup
       assert output =~ "upgrade_from:"
       refute File.exists?(path)
+    end
+
+    test "a generation step the project put after :tar", %{from: from} do
+      # `Mix.Release.validate_steps!/1` allows function steps on either side of
+      # `:tar`, so this is a list Mix assembles happily. Honoured, `:tar` would
+      # pack the version directory before generation had written a relup into it
+      # and the run would still announce the plan it generated afterwards and
+      # exit 0 - a green build shipping an archive with no upgrade plan, which is
+      # the failure this feature exists to remove wearing a success.
+      #
+      # The baseline resolves, so nothing else in this build has anything to
+      # refuse: the placement is the only thing wrong with it. The sibling test
+      # above assembles the same steps list with no baselines named at all, and
+      # that build succeeds - the guard asks the release, not the list.
+      {output, path} =
+        assemble_failure!(
+          "assembly-relup-after-tar",
+          "rel:" <> rel(from, @from),
+          [{"SAMPLE_STEPS", "after-tar"}]
+        )
+
+      assert output =~ "after :tar"
+
+      # Refused while the release definition is being read, so Mix has created
+      # nothing - no release directory, and above all no archive that a pipeline
+      # could pick up and ship.
+      refute File.exists?(path), "a refused steps list left a partial release behind"
+      refute File.exists?(tarball(path, @to)), "a refused steps list still packed an archive"
+
+      # And it did not quietly generate one somewhere else on the way out.
+      refute output =~ "every transition in this relup is a hot upgrade"
+    end
+
+    test "a generation step after :tar, on a release a caller step made ask for one",
+         %{from: from} do
+      # The guard runs twice for the reason `refuse_hand_written_relup!/0` is
+      # called twice. A `Mix.Release` is the caller's to rewrite - this module's
+      # own `staged_baselines/1` says a step adding a baseline to `upgrade_from:`
+      # is a thing that happens - so the guard before `:assemble` passes for a
+      # release that names nothing yet, and only the one immediately before
+      # `:tar` sees the options as they finally are.
+      #
+      # Without that second guard this build packs an archive, generates a relup
+      # into the release behind it, announces the plan and exits 0: the archive a
+      # deployment is handed carries no upgrade plan at all, and nothing said so.
+      path = Path.join(Fixture.workspace(), "assembly-relup-after-tar-late")
+
+      File.rm_rf!(path)
+      on_exit(fn -> File.rm_rf!(path) end)
+
+      # Deliberately not `env/1`: the release must name no baselines when the
+      # build starts, and be given one by `add_upgrade_from/1` afterwards.
+      {output, status} =
+        mix(
+          ["release", "sample", "--overwrite", "--path", path],
+          [
+            {"SAMPLE_VSN", @to},
+            {"MIX_BUILD_ROOT", Path.join(Fixture.workspace(), "_build-#{@to}")},
+            {"SAMPLE_STEPS", "after-tar-late"},
+            {"SAMPLE_LATE_UPGRADE_FROM", "rel:" <> rel(from, @from)}
+          ]
+        )
+
+      assert status != 0, "assembly was expected to fail:\n\n#{output}"
+      assert output =~ "after :tar"
+
+      # This one refuses after `:assemble`, so the release directory is there and
+      # a retry needs `--overwrite`. What must *not* be there is the archive:
+      # the refusal landed before `:tar`, so nothing shippable was produced.
+      refute File.exists?(tarball(path, @to)), "a refused build still packed an archive"
+      refute File.exists?(relup_path(path)), "a refused build still generated a relup"
     end
   end
 
@@ -282,14 +427,15 @@ defmodule Forecastle.AssemblyRelupTest do
 
   # `mix/2` rather than `mix!/2`: assembly is meant to fail here, and what it
   # says while failing is the thing under test.
-  defp assemble_failure!(into, specs) do
+  defp assemble_failure!(into, specs, extra_env \\ []) do
     workspace = Fixture.workspace()
     path = Path.join(workspace, into)
 
     File.rm_rf!(path)
     on_exit(fn -> File.rm_rf!(path) end)
 
-    {output, status} = mix(["release", "sample", "--overwrite", "--path", path], env(specs))
+    {output, status} =
+      mix(["release", "sample", "--overwrite", "--path", path], env(specs) ++ extra_env)
 
     assert status != 0, "assembly was expected to fail:\n\n#{output}"
     {output, path}

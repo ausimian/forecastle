@@ -60,8 +60,166 @@ defmodule ForecastleTest do
       assert relup == (&Forecastle.generate_relup/1)
     end
 
+    test "keeps a relup step the caller placed, rather than splicing a second" do
+      # The arrangement the module sends a project to when it packs its own
+      # archive: generation in front of the step that packs, because nothing in
+      # `steps/1` can tell which step that is. A splice that did not look would
+      # add a second one *after* the packing step, so the archive would hold the
+      # relup from the first run and the version path the one from the second -
+      # two upgrade plans for one release, with nothing saying they differ.
+      # `Forecastle.AssemblyRelupTest` pins that consequence on a real build.
+      #
+      # The list being exactly this long is half the assertion: one generation
+      # step, in the caller's position.
+      pack = fn release -> release end
+
+      assert [pre, :assemble, post, relup, ^pack] =
+               Forecastle.steps([:assemble, &Forecastle.generate_relup/1, pack])
+
+      assert pre == (&Forecastle.pre_assemble/1)
+      assert post == (&Forecastle.post_assemble/1)
+      assert relup == (&Forecastle.generate_relup/1)
+    end
+
+    test "keeps the caller's placement rather than moving it in front of :tar" do
+      # The same rule where there *is* a `:tar` to precede. Generation before a
+      # caller step is not where `steps/1` would have put it, and that is the
+      # point: a placement made deliberately is not a mistake to correct.
+      custom = fn release -> release end
+
+      assert [_pre, :assemble, _post, relup, ^custom, :tar] =
+               Forecastle.steps([:assemble, &Forecastle.generate_relup/1, custom, :tar])
+
+      assert relup == (&Forecastle.generate_relup/1)
+    end
+
+    test "guards a relup step the caller put after :tar" do
+      # `Mix.Release.validate_steps!/1` allows function steps on either side of
+      # `:tar`, so this is a list Mix accepts. Honouring it would have `:tar`
+      # pack the version directory before anything wrote a relup into it, and the
+      # build would then generate one into the assembled release, announce it,
+      # and exit 0 having shipped an archive with no upgrade plan - the failure
+      # this feature exists to remove, wearing a success. Splicing a second step
+      # before `:tar` is no better: the archive gets one plan and the version
+      # path another, with nothing saying which is which.
+      #
+      # So neither. A guard goes in, and it is a *step* because whether the
+      # placement costs anything is a fact about the release rather than about
+      # the list - see `refuse_unpackaged_relup/1` below.
+      #
+      # **Twice**, and the second position is the one that cannot be dropped: a
+      # `Mix.Release` is the caller's to rewrite, so a step between the two can
+      # add `upgrade_from:` to a release that named nothing when the first ran.
+      # Immediately before `:tar` is the packaging boundary, and the only
+      # position sure of the options as they finally are.
+      assert [guard, _pre, :assemble, _post, guard, :tar, relup] =
+               Forecastle.steps([:assemble, :tar, &Forecastle.generate_relup/1])
+
+      assert guard == (&Forecastle.refuse_unpackaged_relup/1)
+      assert relup == (&Forecastle.generate_relup/1)
+
+      # Including where the caller placed a packageable one as well: the
+      # after-`:tar` step would still overwrite what was packed. Both of the
+      # caller's steps keep their places, and nothing is added but the guards.
+      assert [^guard, _pre, :assemble, _post, first, ^guard, :tar, second] =
+               Forecastle.steps([
+                 :assemble,
+                 &Forecastle.generate_relup/1,
+                 :tar,
+                 &Forecastle.generate_relup/1
+               ])
+
+      assert first == (&Forecastle.generate_relup/1)
+      assert second == (&Forecastle.generate_relup/1)
+    end
+
+    test "does not refuse a caller step after :tar that is not relup generation" do
+      # The refusal is about one capture in one position, not about steps after
+      # `:tar`, which `mix release` allows and this has no opinion on.
+      after_tar = fn release -> release end
+
+      assert [_pre, :assemble, _post, relup, :tar, ^after_tar] =
+               Forecastle.steps([:assemble, :tar, after_tar])
+
+      assert relup == (&Forecastle.generate_relup/1)
+    end
+
+    test "counts only a relup step after :assemble" do
+      # Before `:assemble` the step cannot generate anything: it reads
+      # `<name>.rel` out of `version_path`, which Mix has not written yet, and
+      # fails naming that file. A project that put one there is a build that
+      # already fails loudly, and counting it would trade that for a release
+      # assembled with no relup in it and nothing said.
+      # `Mix.Release.validate_steps!/1` does not settle this - it constrains
+      # `:tar` and says nothing about function steps.
+      caller = &Forecastle.generate_relup/1
+
+      assert [^caller, pre, :assemble, post, relup, :tar] =
+               Forecastle.steps([caller, :assemble, :tar])
+
+      assert pre == (&Forecastle.pre_assemble/1)
+      assert post == (&Forecastle.post_assemble/1)
+      assert relup == (&Forecastle.generate_relup/1)
+    end
+
+    test "hands an improper list back rather than raising out of Forecastle" do
+      # `Mix.Release.validate_steps!/1` refuses a malformed steps list by name,
+      # and that is a better error than anything raised from here would be: an
+      # `Enum` failure would name a module the project never mentioned. So the
+      # splice is written by hand, and the search for a caller-placed generation
+      # step has to be too - it walks the same possibly-improper list.
+      assert [_pre, :assemble, _post, appended | :nonsense] =
+               Forecastle.steps([:assemble | :nonsense])
+
+      assert appended == (&Forecastle.generate_relup/1)
+
+      assert [_pre, :assemble, _post, spliced, :tar | :nonsense] =
+               Forecastle.steps([:assemble, :tar | :nonsense])
+
+      assert spliced == (&Forecastle.generate_relup/1)
+
+      # And with a caller-placed step in front of the improper tail, where the
+      # search has to reach that tail to answer at all.
+      assert [_pre, :assemble, _post, placed | :nonsense] =
+               Forecastle.steps([:assemble, (&Forecastle.generate_relup/1) | :nonsense])
+
+      assert placed == (&Forecastle.generate_relup/1)
+    end
+
     test "is a no-op when there is no assemble step" do
       assert Forecastle.steps([:tar]) == [:tar]
+    end
+  end
+
+  describe "refuse_unpackaged_relup/1" do
+    test "does nothing when the release asks for no relup" do
+      # The reason this is a step rather than a refusal inside `steps/1`.
+      # `generate_relup/1` without `upgrade_from:` does nothing at all -
+      # documented, and the release assembles exactly as it would without the
+      # step - so a project whose steps put it after `:tar` and never asks for a
+      # relup has nothing wrong with what it produces, including one packaging a
+      # hand-written `relup`. `steps/1` is handed a list and cannot tell; this
+      # can, because it is handed the release.
+      release = release([])
+
+      assert Forecastle.refuse_unpackaged_relup(release) == release
+    end
+
+    test "names the placement when the release does ask for one" do
+      assert_raise Mix.Error, ~r/after :tar/, fn ->
+        Forecastle.refuse_unpackaged_relup(
+          release(upgrade_from: ["rel:some/release/1.0.0/sample"])
+        )
+      end
+    end
+
+    test "refuses a malformed option for what is wrong with the option" do
+      # `upgrade_from!/1` rather than a bare presence check, so a release naming
+      # nothing is told that rather than being told where its steps sit - the
+      # placement is not the first thing wrong with such a build.
+      assert_raise Mix.Error, ~r/upgrade_from: names no baselines/, fn ->
+        Forecastle.refuse_unpackaged_relup(release(upgrade_from: []))
+      end
     end
   end
 

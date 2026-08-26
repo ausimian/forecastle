@@ -946,6 +946,23 @@
 
 ### Fixed
 
+- `Forecastle.steps/1` no longer splices a second `&Forecastle.generate_relup/1`
+  into a steps list that already has one. A project that packs its own archive in
+  a step of its own is told to place generation itself, so the one documented
+  arrangement produced two — the summary printed twice, and the spliced step ran
+  *after* the packing, leaving the archive and the version path holding different
+  upgrade plans with nothing said about it. A generation step placed where its
+  relup can be packaged now keeps its position; one placed before `:assemble`
+  does not count, because it cannot generate anything there.
+- A `&Forecastle.generate_relup/1` placed after `:tar` is now refused by name,
+  before anything is assembled and again immediately before `:tar`. `mix release`
+  allows a function step on either side of `:tar`, but `:tar` packs the version
+  directory — so generation afterwards can never reach the archive, and the build
+  would announce the upgrade plan it had generated and exit 0 having shipped an
+  artefact with none in it. A release that sets no `:upgrade_from` is unaffected:
+  generation does nothing there, so the placement costs nothing and the build is
+  left alone — which is why the check happens twice, since a step of your own can
+  add the option after the first has passed.
 - `mix castle.relup` now refuses a baseline whose version is the version being
   generated for, naming the file. `:systools` accepts such a pair and generates
   an entry from the version to itself, and since `release_handler` selects an
