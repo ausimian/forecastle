@@ -829,8 +829,8 @@ successful invocation. Do not add a second announcement anywhere else.
 ends in a restart — `refute_all_hot/1` matters more now, not less.
 
 **And "after generation" was not far enough, which review round 4 found.** The
-verdict is *returned* by `plan!/5` and printed by `generate!/6` only once
-`write_relup!/2` has come back. An announcement is a claim about a file, and
+verdict is *returned* by `plan!/5` and printed by `generate!/7` only once
+`publish_relup!/3` has come back. An announcement is a claim about a file, and
 encoding, opening, writing, closing and renaming can each fail — every one of
 them leaving either no relup or, by the publication contract, the older one that
 was already there. Printed before publication, a run could report that every
@@ -839,6 +839,90 @@ describing something else. `relup_test.exs` pins it by standing a *directory*
 where the relup goes, which fails the rename and nothing before it, and asserting
 the all-hot line is absent. Do not move the printing back into the planning
 clauses.
+
+**`--dry-run` is that same ordering, stopped one step short**
+([forecastle#31](https://github.com/ausimian/forecastle/issues/31)). It is nearly
+free precisely *because* the verdict already waits for the generated plan:
+whatever the invocation would have done it still does, and the plan is then
+encoded and dropped instead of published. Nothing about the classification is
+re-derived for it, and nothing may be: a second opinion about what the relup
+would have said is one that can drift from what it says.
+
+**Say what a dry run does *per strategy*, and do not flatten it.** Review round 2
+was right that "the baselines are resolved, each edge is classified and
+`:systools` is asked for the hot half" describes `auto` and reads as though it
+described the mode. Only baseline resolution happens under all three: `--restart`
+reaches `plan_transitions/6`'s first clause, which builds the entries by hand and
+neither reads an appup nor calls `:systools`. So `--restart --dry-run` validates
+the two `.rel` files and nothing else, and an operator told otherwise would take
+it for appup validation it never performed. A dry run is worth exactly what the
+run it stands in for is worth, and saying so is the whole of the correction.
+
+**The notice says what the run did, never what the file holds.** It read
+"<path> is whatever it was before this run" until review round 3, and that is a
+claim about a moment that has already passed: nothing locks or snapshots the
+destination, so an ordinary run sharing the output directory — two CI jobs, a
+`mix release` alongside — can publish over it while the dry run is still
+generating, and the sentence would have been false as it was printed. "This run
+did not write `<path>`" has nothing for a concurrent writer to falsify, because
+a run that did not write is a fact about the run. The same rule the rest of this
+tree already follows: a question asked in one call and answered in another is a
+question about a moment that has passed.
+
+**A successful `--hot --dry-run` is not a one-line run.** `--hot` announces
+nothing of its own on success, which is why the notice has to stand on its own —
+but `silent` hands `:systools`' diagnostics back to `report/1` to forward, and
+those go to **standard error** through `Mix.shell().error/1` while the verdict
+and the notice go to standard output through `info/1`. A `bad_vsn` from a drifted
+appup tag reaches a dry run exactly as it reaches an ordinary one, which
+`relup_test.exs` now pins. Do not write that the notice is the only output, and
+do not invite a pipeline to parse the lines: the exit status is the machine
+answer.
+
+**Encoding is inside the dry run and publication is outside it, and that line is
+the point.** `encode!/1` is the last thing that can fail about the relup
+*itself*; opening, writing, closing and renaming are facts about a file, which a
+mode whose whole promise is that it writes nothing cannot go and find out. So the
+exit status is about **generation** — zero when the relup could have been
+generated, non-zero when generation would have failed — and the notice it prints
+claims only that. This is also why `--outdir` is still required to name a
+directory that exists: an ordinary run would have refused it, so a dry run that
+accepted it would answer a different question. The notice comes *after* the
+verdict, and it has to stand on its own, because `--hot` says nothing on success
+and `--hot --dry-run` is otherwise a silent exit 0.
+
+**Do not write that the exit status is the one the ordinary run would have had.**
+It was written that way once and review round 1 was right to call it: the gap is
+real and one-sided. Everything that refuses before the write refuses in a dry run
+too, so it never passes a plan an ordinary run would have refused — but a failure
+to *publish* is invisible to it, and a directory standing where the relup goes,
+an unwritable destination or a full disk each exit 0 under `--dry-run` and
+non-zero without it. `relup_test.exs` pins that deliberately, with the ordinary
+run of the same command as the control, so the divergence is a named boundary
+rather than something found later. Do not close it by checking the destination
+either: a `File.stat/1` is not a write and answers about a moment that has
+passed, so it would disguise the gap rather than remove it, and writing is the
+one thing this mode may not do.
+
+**"Writes nothing" is a promise about the relup and the directory it would have
+gone in, not about the run.** A dry run still resolves its baselines, and two of
+the three sources write while doing it: `tar:` unpacks the artefact into
+`_build/castle/baselines` and `ref:` builds the commit into the same place. Only
+`rel:` costs nothing, because it names a release already on disk. That is not a
+loophole to close: a baseline that cannot be resolved is a generation that would
+have failed, and the only way to say so is to resolve it. State the promise in
+those terms rather than as "a dry run writes nothing", which is false the moment
+anybody points one at a `tar:` spec.
+
+What *is* pinned is the output directory — `relup_test.exs` lists it rather than
+merely reading the relup, because publication renames a staging file over the
+destination and a run that got as far as staging would leave a `.tmp` behind even
+where the relup survived. Measured by hand as well, once, and recorded here
+rather than turned into a suite: a manifest of the whole fixture workspace —
+path, size and mtime to the nanosecond — is identical before and after a `rel:`
+dry run, and moves for the same command without the switch. The suite pins the
+output directory, which is the part a regression would break; the manifest is
+what says nothing *else* moved either.
 
 **Where the earlier plan for this change was wrong, so it is not re-derived.**
 This file used to carry a step-by-step account of what castle#14 had to add here,
@@ -1139,7 +1223,7 @@ coverage having compared nothing. So:
   is the last moment at which failing is free. `stage_baselines/1` resolves and
   stashes the spec-to-path map under `:forecastle_baselines`, dropped
   unconditionally first for the reason `stage_relup/1` drops its own key;
-  `generate!/6` takes that map, or `nil` to resolve for itself, which is what
+  `generate!/7` takes that map, or `nil` to resolve for itself, which is what
   `mix castle.relup` passes because its target is a path somebody typed and can
   be wrong. Raised in review, and the reasoning is in the next section.
 - **A spec that is not a spec is refused before `:assemble`, not after it.**
@@ -2672,7 +2756,7 @@ or `tar:` baseline. The generated file's own header says so.
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
 | `lib/mix/tasks/castle.appup.ex` | `mix castle.appup` — the read-only coverage check. Non-zero when a module that moved is mentioned nowhere |
 | `lib/mix/tasks/castle.appup.gen.ex` | `mix castle.appup.gen` — drafts the entry for a transition and writes or merges it into the appup source |
-| `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — the command line over `Forecastle.Relup`: argument handling, `--target`, `--outdir` and the strategy switches |
+| `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — the command line over `Forecastle.Relup`: argument handling, `--target`, `--outdir`, `--dry-run` and the strategy switches |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
@@ -2732,7 +2816,7 @@ directory to start from a clean slate.
 | `test/forecastle/castle_cli_test.exs` | `bin/castle` as a shell script, against a launcher stub that records its arguments |
 | `test/forecastle/env_script_test.exs` | The `env.sh` fragment as a shell script, sourced in a release-shaped directory with a launcher stub: the heart environment it leaves behind, and which provisional version each state of the two markers selects |
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
-| `test/forecastle/relup_test.exs` | `mix castle.relup` as a command, against three assembled releases: argument handling, exit status, and all three upgrade strategies |
+| `test/forecastle/relup_test.exs` | `mix castle.relup` as a command, against three assembled releases: argument handling, exit status, all three upgrade strategies, and `--dry-run` against an ordinary run of the same command |
 | `test/forecastle/assembly_relup_test.exs` | The relup a single `mix release` produces from `upgrade_from:` — in the version path and in the tarball — and what the option does when it names nothing |
 | `test/forecastle/baseline_test.exs` | The baseline grammar and all three sources. `tar:` against a release-shaped tree built in the test; `ref:` against a throwaway git repository holding a Mix project of its own |
 | `test/forecastle/appup_check_test.exs` | `mix castle.appup` as a command, against two assembled releases: what it reports, what it passes over, and the exit status |

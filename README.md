@@ -648,7 +648,9 @@ are read rather than made: `rel:` and `tar:` name something already built, while
 is a property of the spec you write, not of the task.
 
 It is also where a build insists on a strategy: `--hot` and `--restart` are the
-task's, and `upgrade_from:` always generates under `auto`.
+task's, and `upgrade_from:` always generates under `auto`. So is `--dry-run`,
+which reports what the relup would be and writes nothing - an assembly step whose
+job is to put a relup into a release has no use for a mode that produces none.
 
 If the generated file is in the project root, it will be copied during
 post-assembly to the release. That is where the task writes it by default;
@@ -797,6 +799,65 @@ for a pipeline that promises zero downtime.
 No appup is read - not for your own applications either - and `systools` is not
 involved at all. Use it when the upgrade instructions a change would need are
 not worth writing or maintaining.
+
+### Asking the question without writing the answer
+
+`--dry-run` does everything an ordinary run does except write the relup:
+
+```shell
+# can 1.0.0 be upgraded to 1.1.0 hot, and if not, which edge and why?
+> mix castle.relup --target ... --fromto ... --dry-run
+```
+
+It does everything the same invocation without the switch would have done, and
+then discards the plan. Nothing is written where the relup would have gone,
+including when one is already sitting there: the run does not touch that file,
+and leaves no staging file beside it.
+
+It costs nothing extra because the announcement already waits for the generated
+plan - an appup may ask for the emulator to be restarted by name, and nothing
+knows that until there is a script to look at. So what a dry run reports is what
+an ordinary run reports, per edge and per direction, arrived at by the same code.
+
+**What "everything" amounts to depends on the strategy**, and a dry run is worth
+exactly what the run it stands in for is worth. The baselines are resolved under
+all three. `auto` then classifies each edge and asks `systools` for whatever half
+it judged hot; `--hot` asks `systools` for the whole relup; `--restart` reads no
+appup at all and never reaches `systools`, because writing the entries by hand is
+the whole of what it does. So `--restart --dry-run` tells you the releases could
+be read and the entries built, and nothing whatever about appups.
+
+**The exit status is the other half of the answer, and it is about generation:**
+zero when the relup could have been generated, non-zero when generation would
+have failed. A dry run that cannot generate fails rather than reporting success
+with a caveat. Generation ends at the encoded bytes, which is the last step that
+is a property of the plan rather than of the destination.
+
+That is not quite "the status the same command without `--dry-run` would have
+had", and the gap is one-sided. Everything that refuses before the write refuses
+here too - an `--outdir` that is not a directory, a baseline that cannot be
+resolved, two baselines for one version, a `systools` failure, `--hot` over a
+transition that cannot be hot - so a dry run never reports success where an
+ordinary run would have refused the *plan*. What it cannot see is a failure to
+*publish* one: a directory standing where the relup goes, a destination that
+cannot be written, no space left. Those are found by writing, and writing is the
+one thing this mode does not do.
+
+It is orthogonal to the strategy and combines with either switch.
+`--hot --dry-run` is the pipeline's question asked before the pipeline runs.
+`--hot` announces nothing of its own on success, which is why the dry run prints
+a line at all - without it that run is a silent exit 0. It is not necessarily the
+*only* line, though: `systools` warnings still reach standard error under
+`--dry-run`, exactly as they would without it. Read the exit status, not the
+number of lines.
+
+"Writes nothing" is a promise about the relup and the directory it would have
+gone in, not about the run as a whole. A dry run still resolves its baselines,
+and resolving one writes: `tar:` unpacks the artefact into
+`_build/castle/baselines` and `ref:` checks the commit out and builds it into the
+same place, while `rel:` names a release already on disk and costs nothing. A
+baseline that cannot be resolved is a generation that would have failed, and
+saying so means resolving it.
 
 ### Which restart, and what the operator sees
 
