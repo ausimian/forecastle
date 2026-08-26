@@ -748,6 +748,7 @@ defmodule Forecastle.Appup.Source do
   end
 
   defp publish(path, text, attempts) do
+    path = target(path)
     staging = path <> ".castle-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 
     case File.write(staging, text, [:exclusive]) do
@@ -768,6 +769,33 @@ defmodule Forecastle.Appup.Source do
         File.rm(staging)
 
         {:error, "could not be written through #{Path.basename(staging)}: " <> format(reason)}
+    end
+  end
+
+  # **A rename replaces a directory entry, so renaming onto a symlink replaces
+  # the *link* and not what it points at.** Raised in review. `File.read/1`
+  # follows the link, so the merge would have been computed from the shared
+  # target and then written over the link - the target unchanged, the project
+  # silently no longer following it, and the run reporting a successful merge.
+  # That is the failure this whole task is built not to have, arriving through
+  # the filesystem instead of through the appup.
+  #
+  # So the link is followed to what it names, and the staging file is created
+  # beside *that* - which is also what keeps the rename on one filesystem.
+  # Bounded, because a symlink loop is a filesystem somebody has broken and not
+  # something to spin on; at the bound the link's own path is used, and the
+  # rename fails there with whatever the system says about it.
+  #
+  # `:einval` is what `read_link/1` answers for a path that is not a link, which
+  # is the ordinary case and the reason this is a `case` rather than a check.
+  defp target(path, depth \\ 8)
+
+  defp target(path, 0), do: path
+
+  defp target(path, depth) do
+    case File.read_link(path) do
+      {:ok, link} -> target(Path.expand(link, Path.dirname(path)), depth - 1)
+      {:error, _not_a_link} -> path
     end
   end
 
@@ -858,25 +886,14 @@ defmodule Forecastle.Appup.Source do
   # A version is written as a `~c` sigil, which is what Elixir 1.15 onwards
   # spells a charlist as and what `to_term/1` reads back.
   #
-  # A version that is not valid UTF-8 cannot be written that way and falls back
-  # to the list of integers it is - which is still a literal, so the file stays
-  # mergeable. That is unreachable through an application resource any tool
-  # writes, since `~tp` produces codepoints and `to_string/1` of those is valid;
-  # it takes a hand-written `.app` with a binary `vsn` to get there. It is here
-  # rather than left to raise because `chars/1` is what the merged term is built
-  # from, and a version this cannot write is one it must not claim to have
-  # written either.
-  defp charlist(vsn) do
-    if String.valid?(vsn) do
-      "~c" <> inspect(vsn)
-    else
-      inspect(chars(vsn), charlists: :as_lists, limit: :infinity)
-    end
-  end
+  # **There is no fallback for a version that is not valid UTF-8, because there
+  # is no such version by the time it gets here.** `Forecastle.Build.fetch_vsn!/2`
+  # refuses one at the point a version enters, once, so everything downstream can
+  # take a version as printable and writable. This used to carry an
+  # integer-list fallback of its own, and `chars/1` beside it to keep the
+  # rendering and the verification agreeing - both unreachable, and both a
+  # standing invitation to believe the refusal was not needed.
+  defp charlist(vsn), do: "~c" <> inspect(vsn)
 
-  # The one conversion, so that what is rendered and what `verify/2` compares it
-  # against cannot be two different charlists.
-  defp chars(vsn) do
-    if String.valid?(vsn), do: to_charlist(vsn), else: :binary.bin_to_list(vsn)
-  end
+  defp chars(vsn), do: to_charlist(vsn)
 end

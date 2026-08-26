@@ -685,7 +685,7 @@ defmodule Forecastle.Build do
   defp fetch_vsn!(opts, file) do
     case List.keyfind(opts, :vsn, 0) do
       {:vsn, vsn} when is_list(vsn) or is_binary(vsn) ->
-        to_string(vsn)
+        valid_vsn!(to_string(vsn), file)
 
       nil ->
         Mix.raise(
@@ -699,6 +699,32 @@ defmodule Forecastle.Build do
             "string. An appup entry is keyed by the version as it is written, so there is " <>
             "nothing to look one up by."
         )
+    end
+  end
+
+  # **A version that is not valid UTF-8 is refused here, once, rather than
+  # encoded at every place one is printed or written.** Raised in review, against
+  # `mix castle.appup.gen`: a version reaches a report heading, an appup source
+  # and a refusal message, and `Mix.shell().info/1` raises on invalid UTF-8 - so
+  # a run could write the file and then crash announcing it, leaving a changed
+  # source behind an incomplete report. Both tasks had the same exposure, because
+  # both print a heading built from this.
+  #
+  # It cannot arrive through any tool: `~tp` writes a charlist of codepoints and
+  # `List.to_string/1` of those is always valid. It takes a hand-written `.app`
+  # with a *binary* `vsn`. One refusal at the point a version enters is the whole
+  # of the answer, and it is what lets everything downstream take a version as
+  # printable and writable without a fallback of its own - the same shape as
+  # `bin/castle`'s `validate_vsn`, which refuses rather than encoding everywhere.
+  defp valid_vsn!(vsn, file) do
+    if String.valid?(vsn) do
+      vsn
+    else
+      Mix.raise(
+        "#{Path.relative_to_cwd(file)} names a version that is not valid UTF-8. It cannot be " <>
+          "printed, written into an appup, or compared as the string :systools compares it " <>
+          "as, so this refuses rather than carrying it into a report that would crash on it."
+      )
     end
   end
 end

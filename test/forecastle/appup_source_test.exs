@@ -190,6 +190,23 @@ defmodule Forecastle.AppupSourceTest do
     test "is absent when there is no file", ctx do
       assert Source.read(Path.join(ctx.tmp_dir, "nothing.exs")) == :absent
     end
+
+    test "a version that is not valid UTF-8 is refused before it can be printed", ctx do
+      # Refused by `Forecastle.Build.fetch_vsn!/2` at the point a version enters,
+      # which is what lets everything downstream take one as printable and
+      # writable. Asserted here through the `.app` because that is the only way
+      # such a version can arrive: `~tp` writes a charlist of codepoints, and
+      # `List.to_string/1` of those is always valid.
+      ebin = Path.join(ctx.tmp_dir, "probe_bad-1/ebin")
+      File.mkdir_p!(ebin)
+
+      resource = {:application, :probe_bad, [vsn: <<0xFF, 0xFE>>, modules: []]}
+      File.write!(Path.join(ebin, "probe_bad.app"), :io_lib.format(~c"~w.~n", [resource]))
+
+      assert_raise Mix.Error, ~r/not valid UTF-8/, fn ->
+        Forecastle.Build.side!(ebin, :probe_bad)
+      end
+    end
   end
 
   describe "the boundary of what counts as a literal" do
@@ -532,6 +549,28 @@ defmodule Forecastle.AppupSourceTest do
       assert Source.replace(literal, "merged\n") == :ok
       assert File.read!(path) == "merged\n"
       assert File.read!(squatter) == "somebody else's work in progress"
+    end
+
+    test "replace/2 writes through a symlink rather than over it", ctx do
+      # A rename replaces a directory entry, so renaming onto a symlink replaces
+      # the *link*. `File.read/1` follows it, so the merge would have been
+      # computed from the shared target and then written over the link - the
+      # target unchanged, the project silently no longer following it, and the
+      # run reporting a successful merge. Raised in review.
+      target = Path.join(ctx.tmp_dir, "shared.exs")
+      File.write!(target, ~s|{~c"0.1.1", [], []}\n|)
+
+      link = Path.join(ctx.tmp_dir, "appup.exs")
+      File.rm(link)
+      File.ln_s!(target, link)
+
+      {:literal, literal} = Source.read(link)
+
+      assert Source.replace(literal, "merged\n") == :ok
+
+      # The link is still a link, and what it names is what changed.
+      assert {:ok, ^target} = File.read_link(link)
+      assert File.read!(target) == "merged\n"
     end
 
     test "replace/2 keeps the file's mode" do
