@@ -28,7 +28,17 @@ defmodule Forecastle.RelupTest do
   split-and-merge, so that the merged plan can be asserted on as a term rather
   than through whatever the task prints, and publication, whose promise - that a
   failed run leaves the previous relup whole - can only be tested from inside the
-  window in which it could be broken.
+  window in which it could be broken. Both are `Forecastle.Relup`'s rather than
+  the task's, which is where the generation itself lives; the task is its
+  command line, and everything in this suite run as a command is asserting on
+  the pair.
+
+  `Forecastle.AssemblyRelupTest` is the other caller of that module - the step
+  that generates a relup into the release being assembled - and the two suites
+  divide by what they can reach. What is asserted here is what the task adds:
+  argument handling, `--outdir`, the three strategies and the exit status. What
+  is asserted there is that a `mix release` produces a relup at all, and what it
+  does when the option names nothing.
 
   Baseline specs are covered here only as far as the task's own part in them -
   that a bare path still means what it always meant, that `rel:` and `tar:` reach
@@ -43,7 +53,7 @@ defmodule Forecastle.RelupTest do
   use Forecastle.ReleaseCase
 
   alias Forecastle.Fixture
-  alias Mix.Tasks.Castle.Relup
+  alias Forecastle.Relup
 
   @from "0.1.0"
   @to "0.1.1"
@@ -184,6 +194,61 @@ defmodule Forecastle.RelupTest do
 
       assert {:ok, [{@to_vsn, [{@from_vsn, [], [_ | _]}], []}]} =
                :file.consult(to_charlist(ctx.relup))
+    end
+
+    test "two releases sharing one .rel file are still two baselines", ctx do
+      # The other side of the test above, and the hole a `.rel`-only identity
+      # left. Deduplication saw the same file - same device, same inode - and
+      # dropped one of the two, while the library directory each baseline is read
+      # from is derived from the *spelling* of whichever path survived. So which
+      # code tree the relup was generated against came down to the order the
+      # switches were written in, which is what the ambiguity refusal exists to
+      # prevent.
+      #
+      # The `.rel` is shared and the `lib/` deliberately is not, which is the
+      # whole point: the two roots agree on every application and version and
+      # share not one module.
+      impostor = Path.join(Fixture.workspace(), "relup-from-impostor")
+      File.rm_rf!(impostor)
+      on_exit(fn -> File.rm_rf!(impostor) end)
+
+      File.mkdir_p!(Path.join([impostor, "releases", @from]))
+      File.mkdir_p!(Path.join(impostor, "lib"))
+      File.ln_s!(rel(ctx.from, @from) <> ".rel", rel(impostor, @from) <> ".rel")
+
+      {output, status} =
+        relup(
+          ["--target", rel(ctx.to, @to), "--fromto", rel(ctx.from, @from)] ++
+            ["--fromto", rel(impostor, @from), "--outdir", @outdir],
+          @to
+        )
+
+      assert status != 0
+      assert output =~ "2 different baselines were named for the upgrade from #{@from}"
+      refute File.exists?(ctx.relup)
+    end
+
+    test "a baseline at the target version is refused, not generated as a self-transition", ctx do
+      # `:systools` accepts a from-release whose version equals the target and
+      # generates an entry from the version to itself, whose script carries
+      # nothing but `point_of_no_return`. `release_handler` selects an entry by
+      # the version it is upgrading *from* and will not unpack a version a
+      # deployment already has, so such an entry could never be used - and the
+      # run packaged it as the release's upgrade plan without a word.
+      #
+      # The way to reach it without meaning to is a release assembled twice into
+      # one path with `upgrade_from:` naming that path: `:assemble` replaces the
+      # directory, so the baseline and the target become the same release. The
+      # rule lives in `Forecastle.Relup`, so refusing it here refuses it there.
+      {output, status} =
+        relup(
+          ["--target", rel(ctx.to, @to), "--fromto", rel(ctx.to, @to)] ++ ["--outdir", @outdir],
+          @to
+        )
+
+      assert status != 0
+      assert output =~ "is version #{@to}, which is the version being generated for"
+      refute File.exists?(ctx.relup)
     end
 
     test "two different baselines for one version are refused, not silently picked", ctx do
@@ -760,6 +825,26 @@ defmodule Forecastle.RelupTest do
 
       assert File.read!(ctx.relup) == previous
       assert File.ls!(outdir(ctx)) == ["relup"], "a staging file was left behind"
+    end
+
+    test "says nothing about the strategy when the relup could not be published", ctx do
+      # An announcement is a claim about a file, so it has to come after the file
+      # exists. It used to be printed by the planning step, before encoding,
+      # opening, writing, closing and renaming had each had their chance to fail
+      # - so a run could report that every transition was a hot upgrade and then
+      # produce no relup at all.
+      #
+      # A directory standing where the relup goes is the cheapest way to fail the
+      # rename and nothing before it: the staging file writes perfectly well and
+      # cannot be renamed over a directory. Permissions would do it too, but not
+      # for a build running as root.
+      File.mkdir_p!(Path.join(ctx.relup, "occupied"))
+
+      {output, status} = relup(upgrade(ctx) ++ ["--outdir", @outdir], @to)
+
+      assert status != 0
+      assert output =~ "could not be renamed"
+      refute output =~ "every transition in this relup is a hot upgrade"
     end
 
     test "replaces the previous relup, and leaves nothing else behind", ctx do

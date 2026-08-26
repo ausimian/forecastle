@@ -7,14 +7,19 @@ build-time dependency — Forecastle is not intended to be taken directly.
 
 ## What it does
 
-`Forecastle.steps/1` wraps a Mix release's `:steps` list, injecting a
-`pre_assemble` and `post_assemble` hook around `:assemble`:
+`Forecastle.steps/1` wraps a Mix release's `:steps` list, injecting three hooks
+around `:assemble`:
 
-- **`pre_assemble/1`** — checks and stages any `relup`, and adds a `:preboot`
-  boot script that starts `:sasl`, `:compiler`, `:elixir` and `:castle`.
+- **`pre_assemble/1`** — checks and stages any `relup`, refuses a project-root
+  `relup` and an `upgrade_from:` option together, and adds a `:preboot` boot
+  script that starts `:sasl`, `:compiler`, `:elixir` and `:castle`.
 - **`post_assemble/1`** — writes `bin/castle` and `bin/start`, appends the Castle
   hook to the generated `env.sh`, and copies the `.rel` file and any staged
   `relup` into the release.
+- **`generate_relup/1`** — generates this release's relup from its
+  `upgrade_from:` option and writes it into the version path. Immediately before
+  `:tar`, *after* any function step the project put between `:assemble` and
+  `:tar`; see *The relup generated during assembly*.
 
 **Nothing here touches configuration, and nothing new may.** Forecastle used to
 intercept all of it: `:runtime_config_path` set to `false`, a substitute
@@ -788,8 +793,8 @@ because Castle could not *complete* such a transition — `heart:set_cmd/1` rais
 emitting a restart edge meant a routine invocation producing a relup that could
 not be installed. [castle#14](https://github.com/ausimian/castle/issues/14) and
 [#10](https://github.com/ausimian/forecastle/issues/10) closed that, and
-`settle_restarts!/2` is now the whole of the verdict: `([], [])` is the all-hot
-line and everything else is one `Mix.shell().info/1` naming both kinds.
+`restart_verdict/2` is now the whole of the verdict: `([], [])` is the all-hot
+line and everything else is one message naming both kinds.
 
 **A history worth keeping, because it constrains how the announcement is
 written.** An earlier revision of this work had a gate —
@@ -810,16 +815,28 @@ reboots into a temporary hybrid release whose version directory has no `env.sh`,
 no `elixir` and no `vm.args` — so there is nothing for the launcher to boot and
 Castle arms no marker for it.
 
-**One verdict per invocation.** A restart reaches an `auto` run two ways — `auto`
-classified the edge as one, or an appup named `restart_emulator` itself — and only
-the first is knowable before the relup exists. So nothing is settled until after
-generation: the all-hot line and the restart announcement both live in
-`settle_restarts!/2`, which runs there. Announcing from classification alone says
-every transition is hot and then reports a restart; that shipped once, and now
-that such a run *succeeds* it would print both from a successful invocation. Do
-not add a second announcement anywhere else. `relup_test.exs` asserts the
-all-hot line is absent from every `auto` case that ends in a restart —
-`refute_all_hot/1` matters more now, not less.
+**One verdict per invocation, and it is printed after the relup exists.** A
+restart reaches an `auto` run two ways — `auto` classified the edge as one, or an
+appup named `restart_emulator` itself — and only the first is knowable before the
+relup exists. So nothing is settled until after generation: the all-hot line and
+the restart announcement both come out of `restart_verdict/2`. Announcing from
+classification alone says every transition is hot and then reports a restart;
+that shipped once, and now that such a run *succeeds* it would print both from a
+successful invocation. Do not add a second announcement anywhere else.
+`relup_test.exs` asserts the all-hot line is absent from every `auto` case that
+ends in a restart — `refute_all_hot/1` matters more now, not less.
+
+**And "after generation" was not far enough, which review round 4 found.** The
+verdict is *returned* by `plan!/5` and printed by `generate!/6` only once
+`write_relup!/2` has come back. An announcement is a claim about a file, and
+encoding, opening, writing, closing and renaming can each fail — every one of
+them leaving either no relup or, by the publication contract, the older one that
+was already there. Printed before publication, a run could report that every
+transition was a hot upgrade and then produce no relup at all, or leave one
+describing something else. `relup_test.exs` pins it by standing a *directory*
+where the relup goes, which fails the rename and nothing before it, and asserting
+the all-hot line is absent. Do not move the printing back into the planning
+clauses.
 
 **Where the earlier plan for this change was wrong, so it is not re-derived.**
 This file used to carry a step-by-step account of what castle#14 had to add here,
@@ -879,6 +896,259 @@ with it, which is the hot edge in the merge test and the target of the tests
 about appup-supplied instructions. The `auto` cases that need a restart edge are
 made by rewriting `sample_dep`'s appup in the assembled target release, not by
 changing the fixture.
+
+## The relup generated during assembly
+
+`Forecastle.generate_relup/1` generates this release's relup from its
+`upgrade_from:` option and writes it into the version path.
+[forecastle#28](https://github.com/ausimian/forecastle/issues/28), and
+`design/upgrade-tooling.md` §1.2 and §D5 in ausimian/castle, are where the
+reasoning started.
+
+**What it removes is a double build that was mandatory and undocumented.**
+Generating a relup needs the target's `<name>.rel` and its `lib/<app>-<vsn>/ebin`
+directories, for the appup lookups — and those exist only *after* `:assemble`,
+while `stage_relup/1` reads the project-root `relup` *before* it. So a relup
+destined for a release meant `mix release`, then `mix castle.relup`, then
+`mix release --overwrite`, with a mutable file in the project root as the hand-off
+between two builds. Most of what defends that seam — `verify_relup!/2`'s version
+refusal, the staging-and-rename in `publish_relup!/3`, the `on_exit` cleanup in
+`Forecastle.ReleaseCase` — is correct and is paying for something that did not
+need to exist.
+
+**Between `post_assemble` and `:tar`, and that is the only interval that works.**
+Earlier and there is no `.rel` and no populated `lib/`; later and `:tar` has
+already packed the version directory without it. `:tar` packs `releases/<vsn>`
+wholesale (`Mix.Tasks.Release.make_tar/1`), so a relup written into the version
+path during the same run is in the artefact with no copying afterwards — which is
+the whole difference between this and the staged project-root one.
+
+**Within that interval it goes last, immediately before `:tar`, and the
+difference from "immediately after `post_assemble`" is not cosmetic.** It shipped
+the other way round for one round of review, and two independent adversarial
+passes found the same thing: `mix release` documents a function step between
+`:assemble` and `:tar` as *the* way to customise an assembled release, so such a
+step can change exactly what a relup would be generated from — an appup
+rewritten, a module replaced, something copied into `lib/`. Generating before it
+describes the tree as it was while `:tar` packages the tree as it became, which
+is an upgrade plan for contents that never shipped: §1.1's failure again, arrived
+at from a third direction. `before_tar/2` is the splice, and it is written by
+hand rather than through `Enum`/`List` so that an improper tail survives for
+`Mix.Release`'s own refusal to name.
+
+Mix's `validate_steps!/1` is what makes "before `:tar`" unambiguous — at most one
+`:tar`, and it must come after `:assemble`. With no `:tar` at all there is no
+packaging step to precede and generation is appended; a project that packs its
+own archive in a function step, which `Castle.customize/1` warns about rather
+than refuses, has to place the step itself, because nothing here can tell which
+of its steps does the packing.
+
+`forecastle_test.exs` asserts the *ordered* steps list rather than the presence
+of the step, including a case with a caller function between `:assemble` and
+`:tar` and one with no `:tar`. `assembly_relup_test.exs` pins the consequence on
+a real release: the fixture's `SAMPLE_STEPS=custom` mode puts
+`Sample.MixProject.remove_dep_appup/1` in that position, deleting the
+dependency's appup — the file `auto` consults to decide whether that
+application's version change can be hot — so generation before it writes a hot
+script and generation after it writes `restart_emulator`. The placement is
+therefore visible *in the packaged relup*, not only in the steps list. All three
+tests were checked to fail against the old splice.
+
+That mode is also the one place the fixture calls `Forecastle.steps/1` rather
+than spelling the list out, because there the splice is the thing under test. It
+is why the fixture's release definition is a `fn -> … end` thunk: Mix loads
+`mix.exs` before the path dependency on Forecastle is compiled, so capturing
+`&Forecastle.pre_assemble/1` is fine but *calling* `Forecastle.steps/1` raises
+`UndefinedFunctionError`. The thunk is what Castle's own documentation
+prescribes, for this exact reason.
+
+**Both callers go through `Forecastle.Relup`, and that is what the module is
+for.** The task and the step ask the same question about the same two releases,
+and a step that judged an edge hot while `mix castle.relup` restarted it — or
+the reverse — would be worse than having only one of them. What differs is where
+the target comes from, which baselines it is against and where the file goes,
+which is exactly what `generate!/5` takes; everything else is there once. Same
+doctrine as `Forecastle.Appup` and the same reason.
+
+**The strategy is `auto` and there is no option for the others.** `--hot` and
+`--restart` are refusals and insistences a *pipeline* makes, and a pipeline that
+wants one is running a command; the release option is what a project writes once
+in `mix.exs`. A second way to spell the strategy in the release definition would
+have to mean the same thing as the switches, which is a vocabulary to keep in
+step for no new capability.
+
+**A baseline at the target's own version is refused, in `read_from!/2` beside
+the release-name check.** `:systools` accepts such a pair and generates an entry
+from the version to itself, whose script carries nothing but
+`point_of_no_return`; `release_handler` selects an entry by the version it is
+upgrading *from* and will not unpack a version a deployment already has, so the
+entry could never be used and the build packaged it as the release's upgrade
+plan without a word. The way to reach it without meaning to is a release
+assembled twice into one path with `upgrade_from:` naming that path: `:assemble`
+replaces the directory, so baseline and target become the same release. Refused
+in the shared module rather than in the step, because the same spec typed at
+`mix castle.relup` is the same mistake. Review round 4.
+
+**Every baseline gets both directions.** `upgrade_from:` names releases this one
+can be upgraded *from*, and each is passed as both the up and the down list —
+`--fromto`, not `--upfrom`. A relup that cannot be rolled back is not much of an
+upgrade plan, and the option gives a project no way to say "no downgrade" because
+nothing has asked for one. `resolve_baselines!/1` resolves each distinct spec
+once, so passing the list twice costs nothing.
+
+### Absent, empty, and resolving to nothing
+
+**These are three different answers, and collapsing any two of them is how this
+would come to report success having done nothing.** That failure has happened in
+this tree three times — an `Application.spec` list a project can override, a
+regex blind to `defmodule(...)`, and a `rel:` baseline resolving to `/lib`, which
+exists on Linux, so every application read as removed and the run announced full
+coverage having compared nothing. So:
+
+- **No `upgrade_from:` at all is a documented no-op.** `upgrade_from!/1` answers
+  `:none` and the step returns the release untouched. A release that says nothing
+  about upgrading has to assemble exactly as it did before this existed, and
+  `assembly_relup_test.exs` asserts that on the baseline release it has to build
+  anyway — the *absence of a file*, not the return value.
+- **`upgrade_from: []` is a refusal.** It is a build asking for an upgrade plan
+  and naming nothing to generate one against: a list read out of the environment,
+  or filtered down to nothing by a `mix.exs` that computes it. Answering `[]` for
+  this and for the absent option alike would assemble a release with no relup in
+  it and say nothing, which is precisely the shape above. `upgrade_from!/1`
+  returns `:none | {:baselines, [binary(), ...]}` and **has no third answer** —
+  the distinction is in the return type rather than in whoever remembers to
+  check.
+- **Baseline resolution happens in `pre_assemble/1`, and the result is carried
+  forward.** It is the largest thing this feature can fail at — a `tar:` that is
+  not there, a `ref:` that does not exist or does not build — and `pre_assemble`
+  is the last moment at which failing is free. `stage_baselines/1` resolves and
+  stashes the spec-to-path map under `:forecastle_baselines`, dropped
+  unconditionally first for the reason `stage_relup/1` drops its own key;
+  `generate!/6` takes that map, or `nil` to resolve for itself, which is what
+  `mix castle.relup` passes because its target is a path somebody typed and can
+  be wrong. Raised in review, and the reasoning is in the next section.
+- **A spec that is not a spec is refused before `:assemble`, not after it.**
+  `baselines!/1` runs `Forecastle.Baseline.parse!/1` over every element, which is
+  the grammar and touches no filesystem — so `""`, `"tar:"` and a prefix naming
+  no source are all settled in `pre_assemble/1`. Being a non-empty list of
+  binaries was not enough: left to `resolve!/2`, each of those failed *after*
+  `:assemble` had created the version directory, and Mix does not tidy up after a
+  step of its own that raised, so the corrected retry finds it, declines to
+  overwrite it, and exits 0 having assembled nothing. Resolution deliberately
+  stays where it is — that half unpacks tarballs and builds commits, and belongs
+  beside the generation that needs the target.
+- **A second `upgrade_from:` is a refusal, not the first one winning.**
+  `Mix.Release` keeps options it does not recognise in the keyword list it was
+  given, and `Keyword.merge/2` preserves duplicate keys *within* the list merged
+  in — so a release definition built by joining lists, which is how this option is
+  most naturally added beside others, really can carry two. `Keyword.fetch/2`
+  would take the first and discard the rest silently, which is a build generating
+  against baselines the project did not settle on. `mix castle.relup` refuses a
+  repeated `--target` or `--outdir` for the same reason and this is the same rule.
+- **A baseline that resolves to nothing fails the build, by name.** `rel:`
+  touches no filesystem deliberately (see *Baselines*), so a spec pointing
+  nowhere reaches `read_rel!/1`, which names the `.rel` it could not read. One
+  level further in, a baseline whose library directory exists and holds no
+  applications is refused by `:systools` itself: it searches, finds only the
+  *target's* copy of each application and refuses on the version —
+  `sample: No valid version ("0.1.0") of .app file found`. `assembly_relup_test.exs`
+  asserts that exact refusal for **every** application the baseline names, not
+  merely a non-zero exit, because a test content with non-zero would go on
+  passing if this became some other failure or if the refusal ever reported one
+  application and skipped the rest.
+- **The target is not checked, and that is a boundary rather than a gap.** At
+  this point in the steps list the target is Mix's own output, so there is
+  nothing to check that `:assemble` has not already guaranteed. A hand-written
+  steps list that put the step elsewhere meets `read_rel!/1` naming the file it
+  could not read; `forecastle_test.exs` pins that, and pins that it happens
+  *before* any baseline is resolved, since resolving one can mean unpacking a
+  tarball or building a git ref.
+
+**Both refusals are read twice, deliberately.** `pre_assemble/1` reads the option
+and refuses a malformed one *before* `:assemble` has created anything, for the
+reason `stage_relup/1` gives about the project-root relup: Mix does not tidy up
+after a step of its own that raised, so a corrected retry without `--overwrite`
+finds the version directory, declines to overwrite it, and exits 0 having
+assembled nothing. `generate_relup/1` reads it again so that the step is right on
+its own rather than on the assumption that its neighbour ran. One function, two
+call sites — not two implementations.
+
+### What a late failure costs, and where the line is
+
+**Everything this feature can decide early now happens before `:assemble`**: the
+option shape, the spec grammar, a repeated option, the two-plans conflict, and —
+since review round 2 — baseline resolution, which is the expensive half and the
+one most likely to fail. What is left in the late half is reading the target's
+`.rel` and asking `:systools` for a script, and both of those *need* the
+assembled release. There is no earlier point for them.
+
+So a late failure is possible and its cost is stated rather than engineered
+away: the assembled release stays on disk without a relup, and the build must be
+retried with `--overwrite`. `assembly_relup_test.exs` pins that whole sequence —
+a hollow baseline fails after assembly, the version directory is still there, no
+relup is in it, and the same path retried with `--overwrite` and a resolvable
+baseline produces both the relup and a tarball containing it.
+
+**Two remedies were considered and refused.** Making a plain retry re-assemble is
+not Forecastle's to do: `Mix.Tasks.Release` decides whether to run the steps at
+all *before* any step is reached, so no step can influence it. And cleaning the
+release output on a late failure would mean deleting a directory tree at a path
+the user chose with `--path` and which Forecastle did not create — the same
+destructive-action objection that keeps `git worktree prune` out of the baseline
+resolver, for a failure mode Mix owns.
+
+One consequence worth knowing rather than fixing, and it predates this feature: a
+`mix release --overwrite` into a directory that already holds a release does not
+clear it, so a relup left by an *earlier* build survives into a build that
+generates none. `copy_relup/1` has always behaved that way when nothing was
+staged. Removing it would mean deleting a `relup` that a caller's own step may
+have written, which is the same objection again.
+
+**A caller step that rewrites `upgrade_from:` resolves late, and that is the
+boundary rather than a defect.** `Mix.Release` is a caller's to rewrite, and
+`generate_relup/1` re-reads the option rather than trusting what `pre_assemble/1`
+saw — so a step that adds a baseline leaves the staged map not answering for it.
+`staged_baselines/2` is what makes that safe: the map is used only where it
+covers *every* spec the step is about to generate from, and anything else
+re-resolves. That is the correct branch and not merely the safe one, because what
+the option says now is what the relup should be generated from; indexing into the
+stale map instead raised a `KeyError` naming a map, which is what review round 3
+found. Rejecting the mutation outright was the alternative and was refused: it
+would refuse a customisation Mix supports in order to protect an optimisation.
+
+What such a build cannot have is early resolution of a baseline nobody had
+mentioned by `pre_assemble/1`. It is resolved late and a failure there is retried
+with `--overwrite`, exactly as the `:systools` half is. **This is the third
+appearance of one class — work that can only happen after `:assemble` — and the
+answer is deliberately structural rather than another special case: everything
+nameable before `:assemble` is settled there, the irreducible remainder is listed
+above, and its cost is documented and tested rather than engineered around. Do
+not reopen it with a fourth narrower case.**
+
+**A project-root `relup` beside `upgrade_from:` is a refusal, not a precedence
+rule.** They are two upgrade plans for one release and only one file can be in
+the version path, so picking one silently discards the other and which one was
+discarded is invisible in the assembled release. `refuse_hand_written_relup!/0`
+names both, from `stage_baselines/1` and again from `generate_relup/1`. Note the ordering that makes this reachable: the step runs *after*
+`copy_relup/1`, so if a precedence rule were ever wanted the generated one would
+win by construction — which is exactly why there is a refusal instead.
+
+**The recursion guard belongs to Castle, and this half deliberately does not read
+it.** Building a `ref:` baseline runs that commit's own `mix.exs`, which sets
+this option again and would ask for a baseline of a baseline;
+`Forecastle.Baseline`'s `refuse_recursion!/1` refuses that on `CASTLE_BASELINE`,
+and its message says `Castle.customize/1` is where the variable is read. That is
+the right side for it — the recursion arrives through Castle's entry point — and
+a second check here would be the same decision made in two places. A project that
+sets the option directly and names a `ref:` baseline meets the resolver's own
+refusal, which is loud.
+
+**The fixture sets the option directly and names the step functions by hand.**
+`test/fixtures/sample/mix.exs` does not go through `Castle.customize/1`, so this
+half is testable without Castle's API — castle#34 is a separate issue and lands
+after this. It is also why the fixture's `steps/0` writes the list out rather
+than calling `Forecastle.steps/1`: a splice bug would otherwise produce both
+sides of the comparison.
 
 ## Baselines
 
@@ -940,12 +1210,30 @@ one module — which is the entire reason `tar:` is recommended over `ref:`.
 What *is* collapsed first is one release reached two ways. `rel:` hands back the
 path it was given, deliberately, so a release arrives under as many names as
 there are ways to write it — `./rel/…` and its absolute form, and a symlinked
-spelling of the same tree. `baseline_identity/1` settles that with the `.rel`
-file's device and inode, which is the same file by the only definition that does
-not depend on how it was reached, falling back to `Path.expand/1` where the file
-cannot be read (and `read_rel!/1` a moment later says why). A textual comparison
-was not enough: it saw a symlinked spelling as a second baseline and refused a
-command that named one release twice and meant it.
+spelling of the same tree. `baseline_identity/1` settles that with device and
+inode, which is the same file by the only definition that does not depend on how
+it was reached, falling back to `Path.expand/1` where the file cannot be stat'd
+(and `read_rel!/1` a moment later says why). A textual comparison was not
+enough: it saw a symlinked spelling as a second baseline and refused a command
+that named one release twice and meant it.
+
+**The identity is the `.rel` file *and* the library directory, and the pair is
+the point.** Keyed on the `.rel` alone, what it left was a false *dedup* rather
+than a false ambiguity, and that is the worse direction: `lib_dir/1` derives the
+code tree from the spelling of whichever path survived, so two release roots
+sharing one `.rel` — a symlink or a hard link to the same file — while holding
+different `lib/` trees collapsed into a single baseline, and *which* code tree
+the relup was generated against then came down to the order the switches were
+written in. That is the failure `refuse_ambiguous!/3` exists to prevent,
+arriving underneath it. Raised in review and fixed; `relup_test.exs` pins it with
+two roots sharing a symlinked `.rel` and holding different `lib/` trees, and the
+case was checked to pass — silently generating against one of them — against the
+`.rel`-only key.
+
+The library directory is compared by inode rather than by `Path.expand/1` for
+the same reason the `.rel` is: a symlinked spelling of one tree expands to two
+different strings, so a textual comparison there would refuse the
+one-release-reached-two-ways case that dedup exists for.
 
 **Every cache entry is immutable, and its existence is the whole of the
 question.** Nothing is built or unpacked in place: the work happens in a staging
@@ -1696,9 +1984,10 @@ tree.
 | `lib/forecastle.ex` | Release step hooks (the whole of the build-time logic) |
 | `lib/forecastle/baseline.ex` | The baseline resolver — `rel:`, `tar:` and `ref:` specs, and the cache under `_build/castle/baselines` |
 | `lib/forecastle/appup.ex` | Reading appups and asking them what `systools` asks: the from-version matching, what an instruction covers, and which applications the project owns the appups for |
+| `lib/forecastle/relup.ex` | Generating a relup: resolving baselines, classifying each transition, the three strategies, the announcement and the atomic publication. Shared by the task and the assembly step |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
 | `lib/mix/tasks/castle.appup.ex` | `mix castle.appup` — the read-only coverage check. Non-zero when a module that moved is mentioned nowhere |
-| `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — chooses an upgrade strategy per transition, and writes the relup |
+| `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — the command line over `Forecastle.Relup`: argument handling, `--target`, `--outdir` and the strategy switches |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
@@ -1753,6 +2042,7 @@ directory to start from a clean slate.
 | `test/forecastle/env_script_test.exs` | The `env.sh` fragment as a shell script, sourced in a release-shaped directory with a launcher stub: the heart environment it leaves behind, and which provisional version each state of the two markers selects |
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
 | `test/forecastle/relup_test.exs` | `mix castle.relup` as a command, against three assembled releases: argument handling, exit status, and all three upgrade strategies |
+| `test/forecastle/assembly_relup_test.exs` | The relup a single `mix release` produces from `upgrade_from:` — in the version path and in the tarball — and what the option does when it names nothing |
 | `test/forecastle/baseline_test.exs` | The baseline grammar and all three sources. `tar:` against a release-shaped tree built in the test; `ref:` against a throwaway git repository holding a Mix project of its own |
 | `test/forecastle/appup_check_test.exs` | `mix castle.appup` as a command, against two assembled releases: what it reports, what it passes over, and the exit status |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
