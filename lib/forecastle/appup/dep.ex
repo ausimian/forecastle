@@ -78,6 +78,9 @@ defmodule Forecastle.Appup.Dep do
       compile. A binary key *is* a regular expression to
       `appup_search_for_version/2`, which raises on one it cannot compile, so
       asking once per file is what keeps that out of the middle of a build.
+      `Forecastle.Appup.uncompilable_key/1` is where that rule lives, beside the
+      `script/2` that raises, because `mix castle.appup.gen` reads the same
+      sources and met the same exception naming nothing.
     * two entries for one application that can both be selected for one version.
     * an appup the application itself ships that cannot be read, or that holds
       either of the two above - its entries are merged into what is placed, so
@@ -467,20 +470,18 @@ defmodule Forecastle.Appup.Dep do
   defp entry?(_element), do: false
 
   # **A from-version written as a regular expression has to be one, and the check
-  # is here so that nothing downstream has to rescue.**
-  # `appup_search_for_version/2` runs a binary key with
-  # `re:run(BaseVsn, Vsn, [unicode, …])`, which *raises* `ArgumentError` on a
-  # pattern it cannot compile - measured on OTP 28.3 against `"0\\.1\\.["`. Every
-  # question this module asks of an entry goes through that function, so an
+  # is here so that nothing downstream has to rescue.** `Appup.uncompilable_key/1`
+  # is where the rule lives, beside the `script/2` that raises on one - every
+  # question this module asks of an entry goes through that call, so an
   # uncompilable key would otherwise come back out of a `mix release` as a bare
   # argument error with nothing pointing at the file that holds it. Asked once,
-  # per file, with the same option the search runs under.
+  # per file.
   defp refuse_bad_pattern!(entries, path) do
-    case Enum.find(entries, &uncompilable?/1) do
+    case Appup.uncompilable_key(entries) do
       nil ->
         :ok
 
-      {pattern, _script} ->
+      pattern ->
         Mix.raise(
           "#{shorten(path)} keys an entry on #{inspect(pattern)}, which is not a regular " <>
             "expression re can compile. A from-version given as a binary is one - that is how " <>
@@ -489,12 +490,6 @@ defmodule Forecastle.Appup.Dep do
         )
     end
   end
-
-  defp uncompilable?({vsn, _script}) when is_binary(vsn) do
-    match?({:error, _reason}, :re.compile(vsn, [:unicode]))
-  end
-
-  defp uncompilable?(_entry), do: false
 
   # Asked the way `release_handler` asks it rather than by comparing strings, so
   # a from-version written as a regular expression counts as naming the one the

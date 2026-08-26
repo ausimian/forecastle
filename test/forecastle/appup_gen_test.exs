@@ -420,6 +420,21 @@ defmodule Forecastle.AppupGenTest do
       assert output =~ ~s|is tagged ~c"0.9.9", but this transition goes to #{@to}|
     end
 
+    test "refuses a source keyed on a pattern re cannot compile, by name", ctx do
+      # Raised in review. `appup_search_for_version/2` raises rather than answers
+      # on a pattern it cannot compile, and every question asked of an entry goes
+      # through it - so this came back as a bare ArgumentError out of the middle
+      # of a run, naming nothing, while assembly refuses the same file by name.
+      write_dep_source!("sample_dep-0.1.9-#{@to}.exs", regex_appup(~S(0\\.1\\.[)))
+
+      {output, status} = gen(both(ctx, "sample_dep"), "generated.exs")
+
+      assert status != 0, "an uncompilable pattern reached the search:\n\n#{output}"
+      assert output =~ "sample_dep-0.1.9-#{@to}.exs keys an entry on"
+      assert output =~ "not a regular expression re can compile"
+      refute output =~ "ArgumentError"
+    end
+
     test "refuses a mistagged sibling rather than passing over it", ctx do
       # Ignoring it would be worse than either answer: this run would draft an
       # entry beside it, and fixing the tag afterwards would produce exactly the

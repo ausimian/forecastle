@@ -296,6 +296,35 @@ defmodule Forecastle.Appup do
   def vsn({appup_vsn, _up, _down}), do: appup_vsn
 
   @doc """
+  The first entry key `script/2` could not match with, or `nil`.
+
+  **A from-version given as a binary is a regular expression, and
+  `appup_search_for_version/2` *raises* on one it cannot compile** - measured on
+  OTP 28.3, where `"0\\\\.1\\\\.["` comes back as an `ArgumentError` out of
+  `re:run/3` rather than as an answer. Every question asked of an appup here goes
+  through `script/2`, so a caller that has not asked this first meets that
+  exception in the middle of whatever it was doing, naming nothing.
+
+  It lives beside `script/2` because it is a fact about that same call, and it is
+  asked with the option that call runs under - so the two cannot disagree about
+  which keys are usable, which is the whole reason the reading lives in one
+  module.
+  """
+  @spec uncompilable_key([entry()]) :: binary() | nil
+  def uncompilable_key(entries) do
+    case Enum.find(entries, &uncompilable?/1) do
+      {pattern, _script} -> pattern
+      nil -> nil
+    end
+  end
+
+  defp uncompilable?({vsn, _script}) when is_binary(vsn) do
+    match?({:error, _reason}, :re.compile(vsn, [:unicode]))
+  end
+
+  defp uncompilable?(_entry), do: false
+
+  @doc """
   The script for a from-version, selected the way `systools_relup` selects it,
   and expanded the way `systools_rc` expands it.
 

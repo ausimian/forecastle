@@ -393,7 +393,7 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # towards both coverage and multiplicity. A destination that computes is refused
   # by `write_plan/2` whatever this answers, so it contributes nothing here.
   defp destination_matches({:literal, literal}, path, from_vsn, to_vsn) do
-    selecting(tagged!(literal, path, to_vsn), path, from_vsn)
+    selecting(usable!(literal, path, to_vsn), path, from_vsn)
   end
 
   defp destination_matches(_read, _path, _from_vsn, _to_vsn), do: []
@@ -438,7 +438,7 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   defp matches!(file, from_vsn, to_vsn) do
     case Source.read(file) do
       {:literal, literal} ->
-        selecting(tagged!(literal, file, to_vsn), file, from_vsn)
+        selecting(usable!(literal, file, to_vsn), file, from_vsn)
 
       :absent ->
         []
@@ -466,6 +466,29 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # rule above exists to refuse. A file misnamed altogether is a different case
   # and is left to the build - it names no transition, so it is not in this
   # application's set at all.
+  defp usable!(literal, file, to_vsn) do
+    {_tag, up, dn} = term = tagged!(literal, file, to_vsn)
+
+    case Appup.uncompilable_key(up ++ dn) do
+      nil ->
+        term
+
+      pattern ->
+        Mix.raise(
+          "#{Path.relative_to_cwd(file)} keys an entry on #{inspect(pattern)}, which is not a " <>
+            "regular expression re can compile. A from-version given as a binary is one - " <>
+            "that is how release_handler selects an entry - so asking whether it answers for " <>
+            "this transition would raise rather than answer. #{shipped_by()} Nothing was " <>
+            "written."
+        )
+    end
+  end
+
+  defp shipped_by do
+    "mix release refuses the same file, so it is named here rather than met in the middle of " <>
+      "a run."
+  end
+
   defp tagged!(literal, file, to_vsn) do
     wanted = to_charlist(to_vsn)
 
