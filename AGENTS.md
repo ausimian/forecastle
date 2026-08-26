@@ -11,11 +11,13 @@ build-time dependency — Forecastle is not intended to be taken directly.
 around `:assemble`:
 
 - **`pre_assemble/1`** — checks and stages any `relup`, refuses a project-root
-  `relup` and an `upgrade_from:` option together, and adds a `:preboot` boot
-  script that starts `:sasl`, `:compiler`, `:elixir` and `:castle`.
+  `relup` and an `upgrade_from:` option together, reads and checks the appup
+  sources in `rel/appups`, and adds a `:preboot` boot script that starts
+  `:sasl`, `:compiler`, `:elixir` and `:castle`.
 - **`post_assemble/1`** — writes `bin/castle` and `bin/start`, appends the Castle
-  hook to the generated `env.sh`, and copies the `.rel` file and any staged
-  `relup` into the release.
+  hook to the generated `env.sh`, copies the `.rel` file and any staged `relup`
+  into the release, and places the staged `rel/appups` sources at
+  `lib/<app>-<vsn>/ebin/<app>.appup`.
 - **`generate_relup/1`** — generates this release's relup from its
   `upgrade_from:` option and writes it into the version path. Immediately before
   `:tar`, *after* any function step the project put between `:assemble` and
@@ -2392,11 +2394,91 @@ not.
   the first appup for a project that has already set the key needs an explicit
   `--to`. Leaving the key unset until there is a file to name is the other way
   round it, and is what the report tells a project with no key to do afterwards.
-- **An application that is neither this project nor an umbrella child has no
-  source here to write.** Its entry is printed. Umbrella children are reached
-  through `Mix.Project.in_project/3`, because the `:appup` key is in the child's
-  own `mix.exs` and there is no other way to ask; there is no umbrella fixture
-  here, so that path is exercised by no test.
+- **An application that is neither this project nor an umbrella child is written
+  to `rel/appups/<app>-<from>-<to>.exs`**, which `Forecastle.Appup.Dep` owns; see
+  *Appups for applications this project does not own*. Umbrella children are
+  reached through `Mix.Project.in_project/3`, because the `:appup` key is in the
+  child's own `mix.exs` and there is no other way to ask; there is no umbrella
+  fixture here, so that path is exercised by no test.
+
+## Appups for applications this project does not own
+
+`rel/appups/<app>-<from>-<to>.exs` is where a project puts an appup for a
+dependency, and `Forecastle.Appup.Dep` is what reads it in `pre_assemble/1` and
+places it at `lib/<app>-<vsn>/ebin/<app>.appup` in `post_assemble/1`.
+[forecastle#30](https://github.com/ausimian/forecastle/issues/30), and
+`design/upgrade-tooling.md` §5.5 in ausimian/castle, are where the reasoning
+started.
+
+**The consuming half already existed, which is the whole reason this is small.**
+`Forecastle.Relup`'s `appup_gap/4` reads the *target release's* copy of a
+dependency's appup and honours an entry matching this from-version whoever wrote
+it, precisely because such an entry *is* an instruction for this transition. What
+was missing was a project-owned place to put one.
+
+**Decided: `mix castle.appup.gen --app <dep>` writes there rather than printing,
+and the argument is in what the refusal it replaced actually said.** That refusal
+was "a dependency has no source here to write" — an observation about a missing
+destination, not a policy about dependencies. `rel/appups` is that destination,
+so the premise is gone. Consistency then argues the same way round: for an owned
+application the task writes, and printing for a dependency would leave the merge
+case dead and a copy-this-out-of-your-terminal workflow beside the good one. D2
+is satisfied identically — the output is source a person reviews and commits,
+nothing generates an appup during assembly, and assembly places a file somebody
+wrote. Do not turn it back into a print.
+
+**The filename is read against the release rather than parsed, and that is a rule
+rather than a convenience.** A version may contain a `-` (`1.7.0-rc.2`), so
+splitting `<app>-<from>-<to>` on dashes is a guess. Both ends are already known:
+for every application `A` the release carries at version `V`, the name is matched
+by anchoring `"A-"` at the front and `"-V"` at the back, and what is left is the
+from-version. Exact whatever either version contains. A name matching no
+application at that application's version is the **stale** case and is refused —
+that is the acceptance criterion, and the message names the version the release
+actually carries.
+
+**Never into `deps/`.** `deps/` and `_build`'s copy of a dependency are shared by
+every release built from the tree, and by other projects where the build cache is
+shared. Nothing here writes outside `Mix.Release.path`.
+
+**Every refusal is made before `:assemble`**, for the reason `stage_relup/1`
+gives at length: a raise afterwards leaves the version directory behind, and the
+corrected retry then declines to overwrite it and exits 0 having assembled
+nothing. `stage_dep_appups/1` reads and checks; `place_dep_appups/1` only writes
+bytes that were already checked, which is also why the bytes are produced early —
+these files are arbitrary Elixir evaluated for their value, so a second read is
+not necessarily a second read of what was checked.
+
+**Two files for one application are merged, in the order the names sort**, since
+a release upgradeable from more than one baseline needs an entry per baseline and
+a release has one appup per application to hold them. That order is stated rather
+than incidental, because `appup_search_for_version/2` takes the *first* entry
+that matches. Two entries keyed by the same from-version are refused — that is
+where the order decides the answer. Two *regular expression* keys that overlap
+are **not** refused, and that is a boundary rather than a gap: whether two
+regexes can match the same version is not decidable here, and answering it
+approximately is the shape of guess this tree does not make.
+
+**A file covering only one direction is deliberately not refused.** An appup with
+an upgrade entry and no downgrade is a legitimate thing to write, `auto`
+classifies each direction on its own, and the restart it makes of the other is
+announced there.
+
+**Dotfiles are ignored and everything else must be a `.exs` file.** A misspelled
+extension is the case worth refusing — passing it over quietly leaves somebody
+with an appup they wrote, a build that succeeded and a restart nobody can account
+for — while `.DS_Store` and `.gitkeep` belong to the filesystem and the editor.
+
+**The directory is a fixed path rather than `:rel_templates_path`.** That option
+belongs to one release, and `mix castle.appup.gen` has no release to read it
+from. Two answers to "where do the dependency appups live" that could disagree is
+one more than a writer and a reader of the same directory can have, and the half
+that disagreed would write a file no build ever reads.
+
+**One boundary that is stated rather than closed:** `mix castle.appup --app <dep>`
+reads the appup out of the build `--to` names, and a project-supplied one is only
+ever in an assembled release — so checking one means pointing `--to` at a `rel:`
+or `tar:` baseline. The generated file's own header says so.
 
 ## Layout
 
@@ -2407,6 +2489,7 @@ not.
 | `lib/forecastle/appup.ex` | Reading appups and asking them what `systools` asks: the from-version matching, what an instruction covers, and which applications the project owns the appups for |
 | `lib/forecastle/appup/draft.ex` | The decision table — behaviours out of the beam's `Attr` chunk — and the comments that go beside each drafted instruction |
 | `lib/forecastle/appup/source.ex` | Reading and rewriting an appup *source* file: whether its AST is a pure literal, and splicing a from-version entry into one that is |
+| `lib/forecastle/appup/dep.ex` | The appups a project supplies for applications it does not own: the `rel/appups` directory, reading a name against the versions the release carries, and placing the result into the assembled release |
 | `lib/forecastle/build.ex` | Reading one build of an application and diffing two of them: the library-directory refusals, the `ebin` discovery, the `.app` resource, and the module fingerprints. Shared by the check and the generator |
 | `lib/forecastle/relup.ex` | Generating a relup: resolving baselines, classifying each transition, the three strategies, the announcement and the atomic publication. Shared by the task and the assembly step |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
@@ -2417,7 +2500,7 @@ not.
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
-| `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it |
+| `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it, and which ships no appup of its own when `SAMPLE_DEP_APPUP=none` |
 | `test/support` | The workspace the fixture is built in, the case template for tests that build it, and the helpers that drive one once it is built |
 
 ## Working on this project
@@ -2478,7 +2561,8 @@ directory to start from a clean slate.
 | `test/forecastle/appup_check_test.exs` | `mix castle.appup` as a command, against two assembled releases: what it reports, what it passes over, and the exit status |
 | `test/forecastle/appup_draft_test.exs` | The decision table, against module attribute lists built in the test — plus the two rows that are measured rather than stated: `code_change/3` against real compiled modules, and the American `-behavior` spelling against real Erlang |
 | `test/forecastle/appup_source_test.exs` | The line between an appup that states a term and one that computes it, against real files in a scratch directory, and what a merge does to the file it merges into |
-| `test/forecastle/appup_gen_test.exs` | `mix castle.appup.gen` as a command, against two assembled releases: the three writing cases, everything it refuses, and `mix castle.appup` run over the output |
+| `test/forecastle/appup_gen_test.exs` | `mix castle.appup.gen` as a command, against two assembled releases: the three writing cases, everything it refuses, what it writes for a dependency, and `mix castle.appup` run over the output |
+| `test/forecastle/dep_appup_test.exs` | `rel/appups` through real assemblies: the same transition built with a project-supplied appup and without, everything the assembly step refuses, and the merge of two sources for one application |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 
