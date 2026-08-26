@@ -42,6 +42,7 @@ defmodule Mix.Tasks.Castle.Relup do
     - `--outdir` - the directory to write the relup. Defaults to the current directory
     - `--hot` - require every transition to be a hot upgrade
     - `--restart` - make every transition a full emulator restart
+    - `--dry-run` - generate the relup, report what it would be, and write nothing
 
   The `--fromto`, `--upfrom` and `--downto` switches may be specified zero or more
   times and have the following behaviour:
@@ -173,6 +174,76 @@ defmodule Mix.Tasks.Castle.Relup do
   `:systools` is not involved at all, which is the only way to be certain which
   of OTP's two emulator-restart instructions ends up in the relup.
 
+  ## Asking the question without writing the answer
+
+  `--dry-run` does everything the same invocation without it would have done,
+  except publish the relup - and the plan is then discarded. It answers *can
+  1.0.0 be upgraded to 1.1.0 hot, and if not, which edge and why*, before any
+  appup has been written and without disturbing whatever relup is already in the
+  output directory.
+
+  It costs nothing extra, because the verdict already waits for the generated
+  plan: an appup may ask for the emulator to be restarted by name, and nothing
+  knows that until there is a script to look at. So what a dry run reports is
+  what an ordinary run reports, per edge and per direction, arrived at by the
+  same code rather than by a second opinion that could drift from it.
+
+  **What "everything" amounts to depends on the strategy, and a dry run is worth
+  exactly what the run it stands in for is worth.** The baselines are resolved
+  under all three. `auto` then classifies each edge and asks `:systools` for
+  whatever half it judged hot; `--hot` asks `:systools` for the whole relup;
+  `--restart` reads no appup at all and never reaches `:systools`, because
+  writing the entries by hand is the whole of what that strategy does. So
+  `--restart --dry-run` says that the releases could be read and the entries
+  built, and nothing whatever about appups - not because the mode skipped a step,
+  but because `--restart` does not look either.
+
+  **The exit status is the other half of the answer, and it is about
+  generation.** Zero when the relup could have been generated, non-zero when
+  generation would have failed - a dry run that cannot generate fails rather than
+  reporting success with a caveat. Generation ends at the encoded bytes, which is
+  the last step that is a property of the plan rather than of the destination.
+
+  That is deliberately *not* "the status the same command without `--dry-run`
+  would have had", and the gap is one-sided and worth naming. Everything that
+  refuses before the write refuses here too: an `--outdir` that is not a
+  directory, a baseline that cannot be resolved, two baselines for one version, a
+  baseline at the target's own version, a `:systools` failure, an appup naming
+  `restart_new_emulator`, `--hot` over a transition that cannot be hot. So a dry
+  run never reports success where an ordinary run would have refused the *plan*.
+  What it cannot see is a failure to *publish* one - a directory standing where
+  the relup goes, a destination that cannot be written, no space left - because
+  those are found by writing and writing is the one thing this mode does not do.
+  A dry run exits 0 in front of each of them, which is said here rather than left
+  to be discovered.
+
+  Checking the destination instead of writing to it would not close that gap, it
+  would disguise it: a `File.stat/1` is not a write, and it answers about a
+  moment that has passed by the time the ordinary run happens. A stated boundary
+  is worth more than a partial promise.
+
+  It is orthogonal to the strategy and combines with either switch.
+  `--hot --dry-run` is the pipeline's question asked before the pipeline runs:
+  could every transition be hot? `--hot` announces nothing of its own on success,
+  which is the whole reason the notice exists - without it, such a run is a
+  silent exit 0.
+
+  That is not the same as a run that prints one line, and a pipeline must not
+  read it as one. `silent` hands `:systools`' own diagnostics back to be
+  forwarded rather than printed by it, so a warning - `bad_vsn` from an appup
+  whose version tag has drifted, an ERTS change - still reaches standard error
+  under `--dry-run`, exactly as it would without. **The exit status is the
+  machine-readable answer; the output is for a person.**
+
+  **\"Writes nothing\" is a promise about the relup, not about the run.** A dry
+  run still resolves its baselines, and resolving one writes: `tar:` unpacks the
+  artefact into `_build/castle/baselines` and `ref:` checks the commit out and
+  builds it into the same place. Only `rel:`, which names a release already
+  sitting on disk, costs nothing at all. That is not a loophole. A baseline that
+  cannot be resolved is a generation that would have failed, and the only way to
+  say so is to resolve it. What is untouched is the relup and the directory it
+  would have gone in.
+
   ## Which instruction, and what the operator sees
 
   OTP has two emulator-restart instructions, and they are different transitions
@@ -218,7 +289,8 @@ defmodule Mix.Tasks.Castle.Relup do
     outdir: :keep,
     target: :keep,
     hot: :count,
-    restart: :count
+    restart: :count,
+    dry_run: :count
   ]
 
   @impl Mix.Task
@@ -232,6 +304,7 @@ defmodule Mix.Tasks.Castle.Relup do
     # rather than about anything on disk, and `Forecastle.Relup` cannot say it in
     # terms of switches because the assembly step reaches the same code with none.
     strategy = fetch_strategy!(args)
+    dry_run? = dry_run?(args)
     outdir = get_outdir(args)
     target = fetch_target!(args)
 
@@ -242,8 +315,8 @@ defmodule Mix.Tasks.Castle.Relup do
     # `nil` for the resolved baselines: this task reads the target first, because
     # `--target` is a path somebody typed and resolving a baseline can take
     # minutes. The assembly step resolves ahead of time instead, for the reasons
-    # `Forecastle.Relup.generate!/6` gives.
-    Forecastle.Relup.generate!(target, up_specs, down_specs, nil, strategy, outdir)
+    # `Forecastle.Relup.generate!/7` gives.
+    Forecastle.Relup.generate!(target, up_specs, down_specs, nil, strategy, outdir, dry_run?)
   end
 
   defp refuse_no_baselines!([], []) do
@@ -282,15 +355,36 @@ defmodule Mix.Tasks.Castle.Relup do
           do: {key, switch, Keyword.fetch!(cmdline_args, key)}
 
     case given do
-      [] -> :auto
-      [{key, switch, count}] -> once!(key, switch, count)
-      _both -> Mix.raise("--hot and --restart ask for opposite things and cannot be combined")
+      [] ->
+        :auto
+
+      [{key, switch, count}] ->
+        once!(switch, count)
+        key
+
+      _both ->
+        Mix.raise("--hot and --restart ask for opposite things and cannot be combined")
     end
   end
 
-  defp once!(key, _switch, 1), do: key
+  # `:count` for the same reasons the strategy switches are, and it is not the
+  # strategy: a dry run is orthogonal to which relup would have been written, so
+  # `--hot --dry-run` asks whether every transition could be hot without
+  # generating anything, which is the question a pipeline has before it runs.
+  defp dry_run?(cmdline_args) do
+    case Keyword.fetch(cmdline_args, :dry_run) do
+      :error ->
+        false
 
-  defp once!(_key, switch, count) do
+      {:ok, count} ->
+        once!("--dry-run", count)
+        true
+    end
+  end
+
+  defp once!(_switch, 1), do: :ok
+
+  defp once!(switch, count) do
     Mix.raise("#{switch} may be given once, but was given #{count} times")
   end
 
