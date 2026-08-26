@@ -118,9 +118,15 @@ defmodule Sample.MixProject do
   # as close as this can get to dropping the key, and it is close enough - the
   # compiler reads it through `Mix.Project.config()[:appup]`, which cannot tell
   # the two apart.
+  #
+  # "false" is a *different value* that the compiler treats the same way - it
+  # reads the key with `if src = config[:appup]`, so any falsy one means it
+  # compiles nothing. `mix castle.appup.gen` has to agree with it about that, and
+  # once read `nil` as unset and `false` as configured.
   defp appup do
     case System.get_env("SAMPLE_APPUP", "appup.exs") do
       "none" -> nil
+      "false" -> false
       path -> path
     end
   end

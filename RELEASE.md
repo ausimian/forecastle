@@ -560,6 +560,114 @@
   for the application that is not a directory at all, where nothing else in the
   library directory is. Each would otherwise make the application look as though
   the transition added or removed it, which needs no appup and passes.
+- `mix castle.appup.gen`, which takes the same arguments and the same diff as the
+  check above and drafts the appup entry for the transition, writing it into the
+  appup source or merging it into the one that is there.
+
+      mix castle.appup.gen --from <spec> [--to <spec>] [--app <app>]...
+
+  `.gen.` is Elixir's idiom for *this writes source you will review and commit*,
+  which is exactly what this is. Nothing generates an appup during assembly and
+  nothing here changes that: the `:appup` compiler is untouched and the file it
+  compiles stays the single source of truth. The check and the generator read
+  both builds through one module, so they cannot disagree about which modules
+  moved.
+
+  **What decides the instruction is the behaviour in the beam, and nothing else.**
+  A changed module that implements `Supervisor` or `supervisor` gets
+  `{:update, M, :supervisor}`; one implementing `GenServer`, `gen_server`,
+  `gen_statem`, `gen_event` or `gen_fsm` gets `{:update, M, {:advanced, []}}`;
+  anything else gets `{:load_module, M}`. A module in the new build and not the
+  old gets `{:add_module, M}`, and one in the old and not the new
+  `{:delete_module, M}`. Both attribute spellings are read, including the
+  American `-behavior` an Erlang dependency may have been written with.
+
+  It deliberately does **not** classify on `code_change/3` being exported: Elixir
+  injects an overridable one into every `use GenServer` module, and the injected
+  one cannot be told from a hand-written one at a release's beams, where the
+  documentation chunk and the abstract code have both been stripped. A module
+  that hand-writes `code_change/3` without declaring a behaviour is therefore a
+  `load_module`, which is the honest answer rather than a guess.
+
+  **Every instruction is written with the comments that say what could not be
+  decided**, because a draft that hides its uncertainty is worse than no draft.
+  The `Extra` term in an `{:advanced, Extra}` is always `[]` and nothing can
+  derive it. A `{:update, M, :supervisor}` re-reads `init/1` and reconciles child
+  *specs*; it does not upgrade the children, which need instructions of their
+  own. `update` only reaches processes found through the supervision tree, so a
+  process nobody supervises keeps its old code silently while the entry looks as
+  though it covered it. And the ordering is stable rather than correct:
+  `add_module` comes first and `delete_module` last, which is the decidable part,
+  while the dependency ordering between two changed modules is not computed.
+
+  Three more are said where they apply. An instruction naming a module the
+  application's own `.app` does not list is drafted with the reason it cannot
+  work: `:systools` resolves object code through that list, so such an
+  instruction fails the whole relup with `no_such_module`, and the fix is the
+  list rather than the instruction. An advanced update on a module that exports
+  no `code_change` says so: the callback is optional in every behaviour that
+  calls it, so `@behaviour GenServer` without `use`, and any Erlang callback
+  module, can declare the behaviour and export neither — and the install then
+  fails with `undef`. Every behaviour the module declares is asked for its own
+  arity, since `gen_server` and `gen_event` call `code_change/3` while
+  `gen_statem` and `gen_fsm` call `code_change/4`, and which one a running
+  process asks for is not visible in a beam. And a module whose behaviour *role*
+  differs between the two
+  builds is drafted for what it becomes, with a note that the process running now
+  was started by the old code and that what it should become is not something an
+  instruction decides.
+
+  All three still draft the instruction. Leaving one out silently is the failure
+  this tooling exists to catch, arriving from the other direction, and refusing a
+  whole entry over one module would take the rest of the application with it.
+
+  **An appup that computes is refused rather than rewritten.** An appup source is
+  arbitrary Elixir evaluated for its value, so flattening one into a static term
+  would silently discard the logic that decides what it produces. Three cases,
+  and the third is what makes the other two safe: no appup yet writes one; an
+  appup whose syntax tree is a pure literal gains the entry and the diff is
+  printed; an appup that computes anything at all is left alone and the entry is
+  printed for you to merge by hand. Which of the two a file is gets decided on
+  its parsed syntax tree rather than guessed at from its text.
+
+  A merge inserts the entry as text and touches nothing else, so comments,
+  formatting and hand-written entries all survive — including the comments a
+  previous run wrote. An entry that is already there for the same from-version is
+  never rewritten: once a transition has instructions, they are yours. Where only
+  one direction is missing, only that one is added, and the report says so.
+
+  Every result is parsed and read back before it reaches the file: unless it
+  reads as exactly the entry that was drafted, nothing is written and the run
+  says so. What comes out is itself a pure literal, so the next run can merge
+  into it.
+
+  Writing is separate and careful, because verifying the text says nothing about
+  the file. A first appup is created exclusively, so a file that appeared while
+  the run was working is refused rather than replaced — and a write that fails
+  after the file has been created takes it away again, rather than leaving a
+  half-written appup the next build cannot evaluate. A merge is written through
+  a staging file beside the source and renamed on, keeping the source's mode, so
+  a failure part way through cannot leave it neither what it was nor what it was
+  going to be — and the bytes are compared against what was read first, so an
+  edit made while the run was working is refused rather than discarded.
+
+  **A run that has nothing to write says so rather than reporting success.**
+  Nothing moved while the version did writes the entry with an empty script and a
+  comment saying that an empty script is the instruction that nothing has to be
+  loaded — `:systools` refuses an edge with no entry for the from-version
+  outright, so the entry is still required. An appup that already covers the
+  transition in both directions is reported and left alone. And it exits non-zero
+  rather than writing anything for an application in one build and not the other,
+  one whose version did not move, one whose build holds no beams, or an appup it
+  will not rewrite.
+
+  It writes the file named by the `:appup` project key. Where there is no key it
+  writes `appup.exs` beside `mix.exs` and tells you to add the key and the
+  `:appup` compiler. An application that is neither this project nor an umbrella
+  child of it — a dependency — has no source here to write, so its entry is
+  printed instead.
+
+  The output is a draft. Read the comments, then run `mix castle.appup` over it.
 - A release may now name the versions it can be upgraded from, with an
   `upgrade_from:` release option, and a single `mix release` then produces a
   tarball with the relup already in it. The value is a list of the same baseline
