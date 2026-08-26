@@ -2111,6 +2111,16 @@ both the same way made every `~c` carrying an escape disagree with
 merged wrongly, which is the cross-check earning its keep rather than an argument
 for not having found it.
 
+**A `<<…>>` bitstring needs its own clause too**, which Codex raised on the PR.
+`Extra` is an arbitrary term, so `{:advanced, <<1, 2>>}` is an ordinary thing for
+an appup to carry, and it parses to a `{:<<>>, …}` rather than to a plain binary —
+so without a clause the whole file read as computed and the documented merge case
+failed on a literal. Only whole literal bytes are taken. A `::` segment falls
+through, which is what keeps an *interpolated string* refused since that parses
+to a `<<>>` as well; and an integer outside `0..255` falls through rather than
+having Elixir's truncation rule reproduced by hand. Both are narrower than
+`Macro.quoted_literal?/1`, which is the direction this is allowed to be wrong in.
+
 The term that is merged into comes from `Code.eval_file/1` — the same call the
 `:appup` compiler makes, so it is what the build will produce — and it is
 compared against what `to_term/1` read. A disagreement is a refusal rather than a

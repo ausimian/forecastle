@@ -246,6 +246,34 @@ defmodule Forecastle.Appup.Source do
     {:ok, to_charlist(text)}
   end
 
+  # A bitstring written in `<<…>>` syntax. `Extra` is an arbitrary term, so
+  # `{:advanced, <<1, 2>>}` is a perfectly ordinary thing for an appup to carry -
+  # and without this it read as computed and the file was refused, which is the
+  # documented merge case failing on a literal. Raised in review.
+  #
+  # **Only whole bytes, and only literal ones.** A segment carrying a `::` - a
+  # size, a type, or the `Kernel.to_string/1` call an interpolation expands to -
+  # is not a literal and falls through, which is what keeps an interpolated
+  # string refused: that parses to a `<<>>` too. An integer outside `0..255`
+  # falls through as well: Elixir truncates it, with a warning, and reproducing a
+  # truncation rule by hand is the kind of modelling this module refuses
+  # elsewhere. Both are narrower than `Macro.quoted_literal?/1`, which is the
+  # direction this is allowed to be wrong in.
+  def to_term({:<<>>, _meta, segments}) do
+    Enum.reduce_while(segments, {:ok, <<>>}, fn segment, {:ok, acc} ->
+      case to_term(segment) do
+        {:ok, byte} when is_integer(byte) and byte in 0..255 ->
+          {:cont, {:ok, <<acc::binary, byte>>}}
+
+        {:ok, binary} when is_binary(binary) ->
+          {:cont, {:ok, <<acc::binary, binary::binary>>}}
+
+        _computed_or_out_of_range ->
+          {:halt, :error}
+      end
+    end)
+  end
+
   def to_term({:{}, _meta, args}) do
     with {:ok, terms} <- all(args), do: {:ok, List.to_tuple(terms)}
   end

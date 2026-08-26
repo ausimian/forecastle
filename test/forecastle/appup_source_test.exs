@@ -75,6 +75,17 @@ defmodule Forecastle.AppupSourceTest do
       assert {:literal, %{term: {_vsn, [{_from, [instruction]}], []}}} = Source.read(path)
       assert instruction == {:update, M, {:advanced, %{a: {1, 2}}}}
     end
+
+    test "reads a bitstring Extra term", ctx do
+      # `Extra` is an arbitrary term, so `<<1, 2>>` is an ordinary thing for an
+      # appup to carry - and it parses to a `{:<<>>, …}` rather than to a plain
+      # binary, so without a clause of its own the whole file read as computed
+      # and the documented merge case failed on a literal. Raised in review.
+      path = write!(ctx, ~s|{~c"1", [{~c"0", [{:update, M, {:advanced, <<1, "ab">>}}]}], []}\n|)
+
+      assert {:literal, %{term: {_vsn, [{_from, [instruction]}], []}}} = Source.read(path)
+      assert instruction == {:update, M, {:advanced, <<1, "ab">>}}
+    end
   end
 
   describe "a file that computes its appup" do
@@ -111,6 +122,20 @@ defmodule Forecastle.AppupSourceTest do
 
       assert {:literal, _read} = Source.read(literal)
       assert {:computed, _phrase} = Source.read(modified)
+    end
+
+    test "is refused for a bitstring segment that is not a whole literal byte", ctx do
+      # The two ways a `<<…>>` stops being something this reproduces exactly: a
+      # `::` segment, which is a size, a type, or the call an interpolation
+      # expands to; and an integer Elixir would truncate. Both are narrower than
+      # `Macro.quoted_literal?/1`, which is the direction this is allowed to be
+      # wrong in - and the first is what keeps an interpolated string refused,
+      # since that parses to a `<<>>` as well.
+      for extra <- ["<<1::4>>", "<<256>>", "<<x::binary>>"] do
+        path = write!(ctx, ~s|{~c"1", [{~c"0", [{:update, M, {:advanced, #{extra}}}]}], []}\n|)
+
+        assert {:computed, _phrase} = Source.read(path)
+      end
     end
 
     test "is refused for an interpolated string", ctx do
