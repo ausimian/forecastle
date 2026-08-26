@@ -136,8 +136,9 @@ defmodule Sample.MixProject do
   end
 
   # Switched by the test suite: the same fixture is assembled with Forecastle,
-  # without it so the two launchers can be compared, and with a caller-supplied
-  # step of its own between `:assemble` and `:tar`.
+  # without it so the two launchers can be compared, with a caller-supplied step
+  # of its own between `:assemble` and `:tar`, and as a project that packs its
+  # own archive.
   #
   # The default spells the step functions out rather than taking them from
   # `Forecastle.steps/1`, and the list is what that function builds: this is the
@@ -149,12 +150,38 @@ defmodule Sample.MixProject do
       "mix" ->
         [:assemble, :tar]
 
-      # The one mode that goes through `Forecastle.steps/1` deliberately, because
+      # The two modes that go through `Forecastle.steps/1` deliberately, because
       # where the splice puts relup generation is exactly what it is for. Every
       # other mode spells the list out so that a splice bug cannot produce both
       # sides of the comparison.
       "custom" ->
         Forecastle.steps([:assemble, &Sample.MixProject.remove_dep_appup/1, :tar])
+
+      # The arrangement Forecastle documents for a project that packs its own
+      # archive: no `:tar`, generation placed by hand in front of the step that
+      # packs, because nothing in `steps/1` can tell which step that is. Run
+      # through `steps/1` on purpose - whether it adds a second generation step
+      # after the packing is the whole of what this mode exists to show.
+      "packing" ->
+        Forecastle.steps([:assemble, &Forecastle.generate_relup/1, &Sample.MixProject.pack/1])
+
+      # A list `mix release` accepts and `Forecastle.steps/1` refuses: generation
+      # after `:tar`, where the relup it writes can never be packaged. Also
+      # through `steps/1`, because the refusal is what is under test.
+      "after-tar" ->
+        Forecastle.steps([:assemble, :tar, &Forecastle.generate_relup/1])
+
+      # The same misplacement, reached by a release that named no baselines when
+      # the build started and had one added by a step of its own. A `Mix.Release`
+      # is the caller's to rewrite, so the guard that runs before `:assemble`
+      # passes and the one immediately before `:tar` is the only thing left.
+      "after-tar-late" ->
+        Forecastle.steps([
+          :assemble,
+          &Sample.MixProject.add_upgrade_from/1,
+          :tar,
+          &Forecastle.generate_relup/1
+        ])
 
       _default ->
         [
@@ -189,6 +216,67 @@ defmodule Sample.MixProject do
     end
 
     Enum.each(appups, &File.rm!/1)
+
+    release
+  end
+
+  @doc """
+  A caller-supplied step that adds `upgrade_from:` to a release that did not have
+  it, which `mix release` permits: the `Mix.Release` handed between steps is the
+  project's to rewrite, and `Forecastle` says so itself about the baselines it
+  stashes in `pre_assemble/1`.
+
+  It exists so that a build can reach `:tar` having become one that asks for a
+  relup *after* the guard that runs before `:assemble` has already passed it.
+
+  The spec comes from the environment rather than being computed, so that the
+  test naming it decides what the build asks for.
+  """
+  def add_upgrade_from(%Mix.Release{options: options} = release) do
+    spec = System.fetch_env!("SAMPLE_LATE_UPGRADE_FROM")
+
+    %Mix.Release{release | options: Keyword.put(options, :upgrade_from, [spec])}
+  end
+
+  @doc """
+  A caller-supplied step that packs the release's own archive, in the shape
+  Forecastle documents: no `:tar`, and `&Forecastle.generate_relup/1` placed by
+  hand in front of this.
+
+  **It slims the tree before packing it**, and that is what makes the placement
+  observable rather than merely asserted. Appups are what `auto` consults while
+  deciding whether an application's version change can be hot, and nothing reads
+  them at upgrade time - so a packaging step that does not ship them is a
+  reasonable one, and it is precisely why generation has to come first. Generated
+  before this step, the transition is a hot upgrade; generated after it, with the
+  dependency's appup gone, the same transition is `restart_emulator`.
+
+  So a second, spliced generation step running after this one leaves the archive
+  holding one upgrade plan and the version path holding a different one, which is
+  what `Forecastle.AssemblyRelupTest` asserts cannot happen.
+
+  The archive is named after the release directory rather than after the release,
+  so that two builds into the same workspace cannot write over each other's.
+  """
+  def pack(%Mix.Release{path: path} = release) do
+    remove_dep_appup(release)
+
+    # Built before the archive is opened, so that the archive - a sibling of the
+    # release directory, not a member of it - cannot pack itself.
+    members = Enum.map(File.ls!(path), &{Path.join(path, &1), &1})
+
+    archive = path <> ".tar.gz"
+    File.rm(archive)
+
+    {:ok, tar} = :erl_tar.open(to_charlist(archive), [:write, :compressed])
+
+    try do
+      Enum.each(members, fn {source, name} ->
+        :ok = :erl_tar.add(tar, to_charlist(source), to_charlist(name), [])
+      end)
+    after
+      :ok = :erl_tar.close(tar)
+    end
 
     release
   end

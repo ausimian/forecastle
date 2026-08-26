@@ -943,6 +943,90 @@ own archive in a function step, which `Castle.customize/1` warns about rather
 than refuses, has to place the step itself, because nothing here can tell which
 of its steps does the packing.
 
+**A caller-placed `&Forecastle.generate_relup/1` is honoured rather than
+duplicated, and that is [#38](https://github.com/ausimian/forecastle/issues/38).**
+The splice used to append unconditionally, so the *one* arrangement the paragraph
+above prescribes — pack your own archive, place generation in front of it — was
+the arrangement that got two. Not merely the summary printed twice: the spliced
+one ran after the packing step, so the archive held the relup from the first run
+and the version path the one from the second, and a packing step that touched the
+tree on its way past made them different plans in silence — §1.1's failure again,
+from a fourth direction. `place_generation/1` is the guard, and `generates_relup?/1`
+is hand-written for `before_tar/2`'s reason: it walks the same possibly-improper
+list, and `Enum` there would raise out of Forecastle instead of letting
+`Mix.Release` refuse the list by name.
+
+**Only a step after `:assemble` counts**, which `Mix.Release.validate_steps!/1`
+does not settle — it constrains `:tar` and says nothing about function steps. The
+deciding reason is that a `generate_relup/1` before `:assemble` cannot generate
+anything: it reads `<name>.rel` out of `version_path`, which Mix has not written
+yet, so `read_rel!/1` refuses that file by name. Counting it would skip the splice
+on the strength of a step that generates nothing, trading a build that fails
+loudly for one that assembles a release with no relup and says nothing. It is
+also the segment `before_tar/2` already searches, and it keeps `Enum` away from
+the improper tail.
+
+**A placement after `:tar` is guarded, and it is the only placement `steps/1` has
+anything to say about.** `validate_steps!/1` allows function steps on either side
+of `:tar`, so `[:assemble, :tar, &Forecastle.generate_relup/1]` is a list Mix
+assembles happily — and honouring it means `:tar` packing the version directory
+before anything has written a relup into it, then generation writing one into the
+assembled release, announcing it, and the build exiting 0 having shipped an
+archive with no upgrade plan. §1.1's failure wearing a success. The first round of
+adversarial review on #38 caught exactly this: the change had honoured it, and the
+unit test had codified it. Splicing a *second* step before `:tar` instead is no
+better — one plan in the archive, another in the version path, nothing saying
+which — so it is named rather than resolved, the same call the module makes about
+a hand-written `relup` beside `upgrade_from:`.
+
+**It is named by a step rather than from `steps/1`, and the second review round is
+why.** `steps/1` is handed a list; whether the placement costs anything is a fact
+about the *release*. Without `upgrade_from:` generation does nothing at all —
+documented, and asserted — so refusing in `steps/1` failed builds whose output had
+nothing wrong with it, including one packaging a hand-written `relup`.
+`Forecastle.refuse_unpackaged_relup/1` is spliced in instead and asks the release.
+
+**It is spliced twice, and the third review round is why.** A `Mix.Release` is
+the caller's to rewrite — `staged_baselines/1` says so itself about a step adding
+a baseline to `upgrade_from:` — so a single check up front passes for a release
+that names nothing *yet*, and a step adding the option afterwards reaches `:tar`
+with the placement never re-examined: archive packed, relup generated into the
+release behind it, plan announced, exit 0. So one guard before `:assemble`, where
+a refusal costs no build and no resolved baseline, and one immediately before
+`:tar`, which is the packaging boundary and the only position sure of the options
+as they finally are. Same doctrine as `refuse_hand_written_relup!/0` being called
+from both `stage_baselines/1` and `generate_relup/1`: early because failing is
+free there, late so the step is right on its own. The early one is *not* ahead of
+every step — the caller's own pre-`:assemble` steps come first, because `steps/1`
+has never inserted anything in front of those, and one of them adding the option
+is exactly what the second guard covers.
+
+Early because resolving a baseline can mean unpacking an artefact or building a
+git ref, and before `:assemble` for the reason `stage_relup/1` and
+`stage_baselines/1` both give: Mix does not tidy up after a step of its own that
+raised, so a refusal afterwards leaves a version directory that a retry declines
+to overwrite before exiting 0. The late guard pays that price deliberately — an
+assembled release needing `--overwrite` is the lesser of the two, the greater
+being a shipped archive announced as carrying a plan it does not carry.
+
+**What the guards deliberately do not close is
+[#40](https://github.com/ausimian/forecastle/issues/40).** A step *after* `:tar`
+that sets `upgrade_from:` is past both of them and past the packing, and the
+fourth review round on #38 named it. It is left where it is because it is not
+about a caller-placed generation step at all: with generation in its ordinary
+position and the mutating step after `:tar`, the same build exits 0 with **no
+relup anywhere and nothing printed** — the worse half, and identical on
+`feature/upgrade-tooling` before this change, which was checked by running one
+fixture against both revisions. Closing it here would mean refusing every steps
+list with a function step after `:tar`, which refuses builds that have nothing to
+do with relups; #40 is about what `upgrade_from:` means once the pipeline has
+started, which is a decision, not a patch.
+
+A step *before* `:assemble` is deliberately not guarded at all: `read_rel!/1`
+already refuses it by name, before `:assemble` has created anything, and a second
+check would be the same decision made in two places. An after-`:tar` step has
+nothing downstream that could notice it, which is why it needs something here.
+
 `forecastle_test.exs` asserts the *ordered* steps list rather than the presence
 of the step, including a case with a caller function between `:assemble` and
 `:tar` and one with no `:tar`. `assembly_relup_test.exs` pins the consequence on
@@ -954,7 +1038,36 @@ script and generation after it writes `restart_emulator`. The placement is
 therefore visible *in the packaged relup*, not only in the steps list. All three
 tests were checked to fail against the old splice.
 
-That mode is also the one place the fixture calls `Forecastle.steps/1` rather
+The duplicate has the same shape of coverage. `forecastle_test.exs` asserts the
+ordered list for a caller-placed step with and without a `:tar`, before
+`:assemble`, and against an improper tail, plus the guard for a step after
+`:tar` — and that a caller step after `:tar` which is *not* generation is left
+alone, since this is about one capture in one position rather than about steps
+after `:tar`. `refuse_unpackaged_relup/1` has its own describe block: the no-op
+without `upgrade_from:`, the named refusal with it, and a malformed option
+refused for what is wrong with the option rather than for where the step sits.
+`assembly_relup_test.exs`
+pins it on a real build through the fixture's `SAMPLE_STEPS=packing` mode, which
+is the documented arrangement itself — no `:tar`, generation placed by hand, and
+`Sample.MixProject.pack/1` packing the archive. **That step slims the tree before
+packing it**, dropping the dependency's appup for the same reason
+`remove_dep_appup/1` does, so the two generations would disagree rather than
+merely repeat: the archived and on-disk relups are asserted *identical*, and
+against the old splice they were a hot script and a `restart_emulator` one. The
+verdict count is asserted alongside, so two generations that happened to agree
+would still fail. Checked to fail against the old splice. A third mode,
+`SAMPLE_STEPS=after-tar`, is the guard on a real build, and it is assembled
+*twice*: once naming a baseline, where the run fails in the first step with no
+release directory and — the assertion that matters — no archive for a pipeline to
+pick up and ship; and once naming none, where the same steps list assembles
+cleanly and the tarball is asserted to hold no relup. The pair is what says the
+guard asks the release rather than the list. A fourth mode,
+`SAMPLE_STEPS=after-tar-late`, is the second guard: `Sample.MixProject.add_upgrade_from/1`
+gives the release a baseline *after* the early guard has passed it, and the
+assertion is that the build fails with no tarball — the release directory does
+exist there, because that refusal necessarily lands after `:assemble`.
+
+Those four modes are the only places the fixture calls `Forecastle.steps/1` rather
 than spelling the list out, because there the splice is the thing under test. It
 is why the fixture's release definition is a `fn -> … end` thunk: Mix loads
 `mix.exs` before the path dependency on Forecastle is compiled, so capturing
@@ -1148,7 +1261,8 @@ refusal, which is loud.
 half is testable without Castle's API — castle#34 is a separate issue and lands
 after this. It is also why the fixture's `steps/0` writes the list out rather
 than calling `Forecastle.steps/1`: a splice bug would otherwise produce both
-sides of the comparison.
+sides of the comparison. The `custom`, `packing`, `after-tar` and `after-tar-late`
+modes are the deliberate exceptions — there the splice *is* what is under test.
 
 ## Baselines
 

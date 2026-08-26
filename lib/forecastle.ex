@@ -9,12 +9,188 @@ defmodule Forecastle do
   def steps(tasks \\ [:assemble, :tar]) when is_list(tasks) do
     if idx = Enum.find_index(tasks, &match?(:assemble, &1)) do
       {pre, [:assemble | post]} = Enum.split(tasks, idx)
+      {guard, post} = place_generation(post)
 
       pre ++
+        guard ++
         [&__MODULE__.pre_assemble/1, :assemble, &__MODULE__.post_assemble/1] ++
-        before_tar(post, &__MODULE__.generate_relup/1)
+        post
     else
       tasks
+    end
+  end
+
+  # Generation is spliced in only where the caller has not placed it, and the
+  # caller's placement stands where they have.
+  #
+  # The one arrangement this module sends a project to by hand - packing its own
+  # archive in a function step, and placing `generate_relup/1` before it because
+  # nothing here can tell which step does the packing - is exactly the
+  # arrangement a blind splice duplicates. Two generations is not merely the
+  # summary printed twice. The spliced one runs *after* the caller's step, so the
+  # archive holds the relup from the first run and `version_path` holds the one
+  # from the second, and a packing step that changed the tree on its way past
+  # makes those two different upgrade plans with nothing said about it.
+  #
+  # **Only a step after `:assemble` counts**, which is a decision rather than a
+  # side effect of where the search happens to look. `Mix.Release.validate_steps!/1`
+  # does not settle it: it allows at most one `:tar` and requires it after
+  # `:assemble`, and says nothing at all about function steps. Three reasons, in
+  # the order they carry weight:
+  #
+  #   * A `generate_relup/1` before `:assemble` cannot generate anything. It
+  #     reads `<name>.rel` out of `version_path`, which Mix has not written yet,
+  #     so `read_rel!/1` refuses that file by name - which is the documented
+  #     answer to a steps list that put the step somewhere else. Counting it
+  #     would mean skipping the splice on the strength of a step that generates
+  #     nothing, turning a build that fails loudly into one that assembles a
+  #     release with no relup in it and says nothing.
+  #   * It is the same segment `before_tar/2` already searches, for the same
+  #     reason: what is being decided is where generation goes among the steps
+  #     that shape the assembled release.
+  #   * It keeps `Enum` away from a possibly-improper tail. `pre` is a proper
+  #     list by construction - `Enum.split/2` built it - but `tasks` is not, and
+  #     scanning the whole of it would reintroduce exactly what `before_tar/2` is
+  #     written by hand to avoid.
+  #
+  # **A placement after `:tar` is neither honoured nor doubled: it is guarded**,
+  # and that is the one placement this has anything to say about.
+  #
+  # `Mix.Release.validate_steps!/1` allows function steps on either side of
+  # `:tar`, so `[:assemble, :tar, &Forecastle.generate_relup/1]` is a list Mix
+  # accepts - and honouring it means `:tar` packing the version directory before
+  # anything has written a relup into it. The build then generates one into the
+  # assembled release, prints `auto: every transition in this relup is a hot
+  # upgrade`, and exits 0 having shipped an archive with no upgrade plan in it:
+  # the failure this whole feature exists to remove, wearing a success. Splicing
+  # a *second* step before `:tar` instead - which is what the unconditional
+  # splice did - is no better: the archive gets one plan, the version path gets
+  # another, and nothing says which is which.
+  #
+  # So neither, and it is named instead. That is the same call the module makes
+  # about a hand-written `relup` beside `upgrade_from:`: two answers, no reason
+  # to prefer either, and the discarded one invisible in the assembled release.
+  #
+  # **But it is named by a step rather than from here**, because whether that
+  # placement costs anything is a fact about the release and `steps/1` is handed
+  # a list. Without `upgrade_from:` generation does nothing at all - documented,
+  # and the release assembles exactly as it would without the step - so refusing
+  # here would fail a build with nothing wrong with what it produced, including
+  # one packaging a hand-written `relup`. `refuse_unpackaged_relup/1` asks the
+  # release instead.
+  #
+  # **And it is spliced twice**, for the reason `refuse_hand_written_relup!/0` is
+  # called twice: a `Mix.Release` is the caller's to rewrite, and this module
+  # already says elsewhere that a step which adds a baseline to `upgrade_from:`
+  # is a thing that happens. One check up front would pass for a release that
+  # named nothing yet, and a step adding the option afterwards would then reach
+  # `:tar` with the placement never re-examined - packing an archive, generating
+  # a relup into the release behind it, and exiting 0. So:
+  #
+  #   * once before `:assemble`, where a refusal costs no build and no resolved
+  #     baseline - the ordinary case, and the only one worth failing early; and
+  #   * once immediately before `:tar`, which is the packaging boundary and the
+  #     only position that can be sure. Nothing is packed without it having run
+  #     against the options as they finally are.
+  #
+  # The early one is not ahead of *every* step: the caller's own pre-`:assemble`
+  # steps come first, because `steps/1` has never inserted anything in front of
+  # those. One of them adding the option is exactly what the second guard is for.
+  #
+  # What neither guard can see is a step *after* `:tar` setting the option: both
+  # have run by then and the archive is packed. That is
+  # [#40](https://github.com/ausimian/forecastle/issues/40) rather than anything
+  # here, and it is left there deliberately - it is not about a caller-placed
+  # generation step at all. A project whose mutating step follows `:tar` reaches
+  # the same end with generation in its ordinary position, and reaches it with
+  # *no* relup anywhere and nothing printed, which is the worse half. Closing it
+  # from here would mean refusing every list with a function step after `:tar`,
+  # which refuses builds that have nothing to do with relups.
+  #
+  # A step *before* `:assemble` is deliberately not guarded at all.
+  # `Forecastle.Relup.read_rel!/1` already refuses it by name, and does so before
+  # `:assemble` has created anything, so a second check would be the same
+  # decision made in two places. An after-`:tar` step is the one with nothing
+  # downstream that could notice it, which is why it needs something here.
+  defp place_generation(post) do
+    cond do
+      generates_after_tar?(post) ->
+        {[&__MODULE__.refuse_unpackaged_relup/1],
+         before_tar(post, &__MODULE__.refuse_unpackaged_relup/1)}
+
+      generates_relup?(post) ->
+        {[], post}
+
+      true ->
+        {[], before_tar(post, &__MODULE__.generate_relup/1)}
+    end
+  end
+
+  # Hand-written for `before_tar/2`'s reason and one of their own: an improper
+  # tail is not a list to search, and complaining about it is not their business
+  # either - `steps/1` hands the malformed list back for `Mix.Release` to refuse
+  # by name. Reaching the tail means no generation step was found, which is the
+  # answer `[]` gives too, so the two share a clause.
+  #
+  # Equality rather than a guard, because a capture is a term: two occurrences of
+  # `&Forecastle.generate_relup/1` are the same external fun, so a project that
+  # wrote the capture is recognised. One that wrapped it - `fn release ->
+  # Forecastle.generate_relup(release) end` - is not, and cannot be: nothing here
+  # can see inside an anonymous function. That project gets the unconditional
+  # splice's behaviour, and the remedy is to place the capture rather than a
+  # wrapper around it.
+  defp generates_relup?([step | post]) do
+    step == (&__MODULE__.generate_relup/1) or generates_relup?(post)
+  end
+
+  defp generates_relup?(_tail), do: false
+
+  # `Mix.Release.validate_steps!/1` allows at most one `:tar`, so the first one
+  # is the only one, and everything beyond it is the unpackageable half.
+  defp generates_after_tar?([:tar | post]), do: generates_relup?(post)
+  defp generates_after_tar?([_other | post]), do: generates_after_tar?(post)
+  defp generates_after_tar?(_tail), do: false
+
+  @doc false
+  # Spliced in twice by `steps/1`, and only when the project put
+  # `generate_relup/1` after `:tar`. What it refuses, and why it is a step at all
+  # rather than a refusal in `steps/1`, is in `place_generation/1`; what belongs
+  # here is why the two positions are the two positions.
+  #
+  # The first is ahead of `pre_assemble/1`, which resolves the baselines -
+  # unpacking an artefact, or building a git ref, minutes of work for a build
+  # that is going to be refused - and ahead of `:assemble`, which is the half
+  # that matters: Mix does not tidy up after a step of its own that raised, so a
+  # refusal afterwards leaves a version directory that a corrected retry without
+  # `--overwrite` declines to overwrite, and that retry then exits 0 having
+  # assembled nothing. The same argument `stage_relup/1` and `stage_baselines/1`
+  # make about their own checks.
+  #
+  # The second is immediately before `:tar`, and it is the one that cannot be
+  # dropped: a caller step between the two can add `upgrade_from:` to a release
+  # that named nothing when the first ran. It costs an assembled release that a
+  # retry has to `--overwrite`, which is the lesser of the two prices - the
+  # greater being a shipped archive announced as carrying an upgrade plan it does
+  # not carry.
+  #
+  # `upgrade_from!/1` rather than a bare `Keyword.has_key?/2`, so that a release
+  # naming nothing, or naming something malformed, is refused for what is wrong
+  # with it rather than for where the step sits.
+  @spec refuse_unpackaged_relup(Mix.Release.t()) :: Mix.Release.t()
+  def refuse_unpackaged_relup(%Mix.Release{} = release) do
+    case upgrade_from!(release) do
+      :none ->
+        release
+
+      {:baselines, _specs} ->
+        Mix.raise(
+          "the release steps put &Forecastle.generate_relup/1 after :tar, where the relup it " <>
+            "writes cannot be packaged. :tar packs the version directory, so the archive is " <>
+            "built before generation has written anything into it - and the build would " <>
+            "still announce the upgrade plan it generated, and succeed, having shipped an " <>
+            "artefact with none in it. Move the step before :tar, or drop :tar and pack your " <>
+            "own archive in a step with generation in front of it."
+        )
     end
   end
 
@@ -40,7 +216,9 @@ defmodule Forecastle do
   # appended and the relup describes the finished tree. A project that packs its
   # own archive in a function step - which `Castle.customize/1` warns about
   # rather than refuses - has to place `generate_relup/1` itself, because nothing
-  # here can tell which of its steps does the packing.
+  # here can tell which of its steps does the packing. Nothing reaches here when
+  # it has: `place_generation/1` hands the caller's list straight back, so the
+  # arrangement this paragraph prescribes is not also duplicated by it.
   #
   # Written by hand rather than through `Enum`/`List` so that an improper tail
   # survives: `steps/1` hands a malformed list back for `Mix.Release` to refuse
@@ -92,7 +270,13 @@ defmodule Forecastle do
 
   `steps/1` places it *last* of the steps that shape the release - after any
   function step of the project's own - so that the relup describes the tree that
-  is packaged rather than the tree as it was partway through building it.
+  is packaged rather than the tree as it was partway through building it. A
+  project that placed this step itself keeps its own placement instead, and gets
+  no second one: a project packing its own archive has to put generation in
+  front of the step that packs, and that is the arrangement, not a mistake to
+  correct. Placed *after* `:tar`, where the relup could never be packaged, it is
+  refused rather than honoured or doubled - but only where the release asks for a
+  relup at all, which `refuse_unpackaged_relup/1` is what decides.
 
   `:upgrade_from` is a list of baseline specs - `rel:`, `tar:` or `ref:`, the
   grammar `Forecastle.Baseline` documents - naming the releases this one can be
