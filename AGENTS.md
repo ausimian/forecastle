@@ -2441,13 +2441,27 @@ actually carries.
 every release built from the tree, and by other projects where the build cache is
 shared. Nothing here writes outside `Mix.Release.path`.
 
-**Every refusal is made before `:assemble`**, for the reason `stage_relup/1`
-gives at length: a raise afterwards leaves the version directory behind, and the
-corrected retry then declines to overwrite it and exits 0 having assembled
-nothing. `stage_dep_appups/1` reads and checks; `place_dep_appups/1` only writes
-bytes that were already checked, which is also why the bytes are produced early —
-these files are arbitrary Elixir evaluated for their value, so a second read is
-not necessarily a second read of what was checked.
+**Every refusal that *can* be made before `:assemble` is**, for the reason
+`stage_relup/1` gives at length: a raise afterwards leaves the version directory
+behind, and the corrected retry then declines to overwrite it and exits 0 having
+assembled nothing. `stage_dep_appups/1` reads and checks; `place_dep_appups/1`
+only writes bytes that were already checked, which is also why the bytes are
+produced early — these files are arbitrary Elixir evaluated for their value, so a
+second read is not necessarily a second read of what was checked.
+
+**Two refusals cannot be, and saying otherwise was a review finding rather than
+a rounding error.** Both are in `write!/2`, both cost a build, and both need
+`mix release --overwrite` on the retry:
+
+- an application named by a source that has no `lib/<app>-<vsn>/ebin` in the
+  assembled release. Reachable rather than theoretical: `Mix.Release.copy_app/2`
+  copies nothing for an OTP application when the release brings no ERTS of its
+  own, since the deployment then takes those from the host.
+- anything at the destination that is not the copy Mix made of the build's own
+  appup — see the interposed-appup paragraph below.
+
+`README.md` and `RELEASE.md` name both, and must go on naming both: a refusal
+whose cost is a rebuild is worth documenting as one.
 
 **Two files for one application are merged, in the order the names sort**, since
 a release upgradeable from more than one baseline needs an entry per baseline and
@@ -2490,17 +2504,37 @@ version skipped a shipped *regular expression* — so a project source named for
 concrete collision at a version a source names, not the undecidable case.
 
 **What is at the destination has to be the copy Mix made of what was merged, and
-anything else is a refusal — the one refusal that cannot be made early.**
-`:assemble` copies the applications and *then* copies the release's overlays over
-them, so a `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup`, or any step Mix runs
-in between, installs upgrade instructions after everything here was read.
-Reconciling them instead would mean doing the collision refusals after
-`:assemble` and modelling where an overlay came from; refusing says what happened
-and leaves the choice to the author. The bytes read in `pre_assemble/1` are
-carried through and compared, which also closes the two-reads window in
-`shipped!/2`: a file that changed between its read and its consult cannot match
-at the destination either. `Forecastle.ReleaseCase` clears `rel/overlays` for the
-same reason it clears `rel/appups`.
+anything else is a refusal.** `:assemble` copies the applications and *then*
+copies the release's overlays over them, so a
+`rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup`, or any step Mix runs in between,
+installs upgrade instructions after everything here was read. Reconciling them
+instead would mean doing the collision refusals after `:assemble` and modelling
+where an overlay came from; refusing says what happened and leaves the choice to
+the author. The bytes read in `pre_assemble/1` are carried through and compared,
+which also closes the two-reads window in `shipped!/2`: a file that changed
+between its read and its consult cannot match at the destination either.
+`Forecastle.ReleaseCase` clears `rel/overlays` for the same reason it clears
+`rel/appups`.
+
+**It is asked of the link rather than of what the link points at, and a later
+round found that too.** `File.cp_r!/2` copies a symlink *as a symlink* and
+`copy_overlays/1` calls it that way, so an overlay can leave one at the
+destination — and reading through it answered about something else entirely. A
+dangling one read as `:enoent` and passed for "no appup here"; one pointing at
+the dependency's *build* appup read back exactly the staged bytes and passed for
+"Mix copied it", after which the write would have followed it and put this
+project's instructions into the shared build. `File.lstat/1` decides, and
+anything that is not a regular file is refused. The write then goes to a staging
+name in the same directory, created exclusively, and is renamed on — `rename/2`
+replaces the *link* rather than following it, so the check and the write answer
+about the same name, and a truncating write cannot leave a partial appup in a
+release.
+
+**`:enoent` from `File.ls/1` on `rel/appups` is two states, and reading it as one
+was the same mistake one directory out.** That call follows a directory symlink,
+so `rel/appups -> ../shared/appups` with the target missing answers exactly as an
+absent directory does — and a project that *has* appups would have assembled a
+release with none of them and nothing said. `File.lstat/1` tells the two apart.
 
 **The generator's file name is built out of two version strings, so it is checked
 to be a name.** `Forecastle.Build` refuses a version that is not valid UTF-8 or

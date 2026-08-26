@@ -723,13 +723,15 @@
   build names the shipped file, says how many of its entries were kept, and names
   every one your entries override.
 
-  One refusal comes *after* assembly, because nothing before it can be sure: an
+  Two refusals come *after* assembly, because nothing before it can be sure: an
   appup at `lib/<app>-<vsn>/ebin/<app>.appup` that is not the copy Mix made of
-  the build's own. `mix release` copies the applications and then copies the
-  release's overlays over them, so a
-  `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup` is a second answer to what that
-  application's upgrade instructions are, and writing over it is how the other
-  one disappears.
+  the build's own — or is not a regular file at all, since `mix release`
+  preserves an overlay's symlinks — and an application named by a source that has
+  no `lib/<app>-<vsn>/ebin` in the assembled release, which is what a release
+  built with `include_erts: false` does with OTP's own applications. Both leave
+  the release directory behind, so the corrected retry needs
+  `mix release --overwrite`; without it `mix release` assembles nothing and exits
+  zero.
 
   One boundary worth knowing: `mix castle.appup --app <dep>` reads the appup out
   of the build `--to` names, and a project-supplied one is only ever in an

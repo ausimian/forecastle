@@ -83,19 +83,20 @@ defmodule Forecastle.Appup.Dep do
   `auto` classifies each direction on its own, and the restart it makes of the
   other direction is announced there rather than hidden.
 
-  Two refusals are made *after* assembly, because nothing before it can be sure,
-  and both cost a build:
+  Two refusals are made *after* assembly, because nothing before it can be sure.
+  Both cost a build, and the corrected retry needs `mix release --overwrite`:
 
     * an application named by a source that has no `lib/<app>-<vsn>/ebin` in the
       assembled release. Reachable rather than theoretical -
       `Mix.Release.copy_app/2` copies nothing for an OTP application when the
       release brings no ERTS of its own, since the deployment then takes those
       from the host.
-    * an appup at the destination that is not the copy Mix made of the build's
-      own. `:assemble` copies the applications and *then* copies the release's
-      overlays over them, so a `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup` is
-      a second answer to what this application's upgrade instructions are, and
-      writing over it is how the other one disappears. See `verify_staged!/2`.
+    * anything at the destination that is not the copy Mix made of the build's
+      own appup, a symlink included. `:assemble` copies the applications and
+      *then* copies the release's overlays over them - preserving symlinks - so a
+      `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup` is a second answer to what
+      this application's upgrade instructions are, and writing over it is how the
+      other one disappears. See `verify_staged!/2`.
 
   ## Two files for one application are merged, in name order
 
@@ -216,11 +217,32 @@ defmodule Forecastle.Appup.Dep do
       {:ok, entries} ->
         entries |> Enum.sort() |> Enum.flat_map(&source!(dir, &1))
 
+      # **`:enoent` is two states, and reading it as one was a review finding.**
+      # `File.ls/1` follows a directory symlink, so a checked-in
+      # `rel/appups -> ../shared/appups` whose target is not there answers exactly
+      # as an absent directory does - and a project that has appups would then
+      # have assembled a release with none of them and nothing said. Asked of the
+      # link, the two are told apart.
+      {:error, :enoent} ->
+        no_directory!(dir)
+
+      {:error, reason} ->
+        Mix.raise("#{shorten(dir)} could not be read: #{format(reason)}")
+    end
+  end
+
+  defp no_directory!(dir) do
+    case File.lstat(dir) do
       {:error, :enoent} ->
         []
 
-      {:error, reason} ->
-        Mix.raise("#{shorten(dir)} could not be read: #{:file.format_error(reason)}")
+      _link ->
+        Mix.raise(
+          "#{shorten(dir)} is a link to somewhere that is not there, so this build would " <>
+            "assemble with none of the appups it names and say nothing about it. A project " <>
+            "with no dependency appups has no directory at all; one that has them has to be " <>
+            "able to read it."
+        )
     end
   end
 
@@ -634,7 +656,7 @@ defmodule Forecastle.Appup.Dep do
     if File.dir?(ebin) do
       verify_staged!(file, placement.staged)
       announce(placement, file)
-      File.write!(file, placement.bytes)
+      publish!(file, placement.bytes)
     else
       Mix.raise(
         "this release has no #{Path.relative_to(ebin, path)} to place " <>
@@ -661,26 +683,40 @@ defmodule Forecastle.Appup.Dep do
   # equal, and Mix copied it; anything else, and something put a second answer in
   # the release. It also closes the two-reads window in `shipped!/2`, since a file
   # that changed between its read and its consult cannot match here either.
+  # **Asked of the link rather than of what it points at, which a review round
+  # found this getting wrong.** `File.cp_r!/2` copies a symlink *as a symlink* by
+  # default and `copy_overlays/1` calls it that way, so an overlay can leave one
+  # at the destination - and a `File.read/1` that followed it answered about
+  # something else entirely. A dangling one read as `:enoent` and passed for "no
+  # appup here", and one pointing at the dependency's *build* appup read back the
+  # staged bytes and passed for "Mix copied it" - after which the write would have
+  # followed it and put this project's instructions into the shared build, which
+  # is the one thing this feature must never do.
   defp verify_staged!(file, staged) do
-    case {File.read(file), staged} do
-      {{:ok, bytes}, bytes} ->
-        :ok
-
-      {{:error, :enoent}, nil} ->
-        :ok
-
-      {{:ok, _other}, nil} ->
-        Mix.raise(interposed(file, "appeared during :assemble"))
-
-      {{:ok, _other}, _staged} ->
-        Mix.raise(interposed(file, "changed during :assemble"))
-
-      {{:error, :enoent}, _staged} ->
-        Mix.raise(interposed(file, "was taken away during :assemble"))
-
-      {{:error, reason}, _staged} ->
-        Mix.raise("#{shorten(file)} could not be read: #{format(reason)}")
+    case File.lstat(file) do
+      {:error, :enoent} -> absent!(file, staged)
+      {:ok, %File.Stat{type: :regular}} -> regular!(file, staged)
+      {:ok, %File.Stat{type: type}} -> Mix.raise(not_regular(file, type))
+      {:error, reason} -> Mix.raise("#{shorten(file)} could not be read: #{format(reason)}")
     end
+  end
+
+  defp absent!(_file, nil), do: :ok
+  defp absent!(file, _staged), do: Mix.raise(interposed(file, "was taken away during :assemble"))
+
+  defp regular!(file, staged) do
+    case {File.read!(file), staged} do
+      {bytes, bytes} -> :ok
+      {_other, nil} -> Mix.raise(interposed(file, "appeared during :assemble"))
+      {_other, _staged} -> Mix.raise(interposed(file, "changed during :assemble"))
+    end
+  end
+
+  defp not_regular(file, type) do
+    "#{shorten(file)} is a #{type} rather than the regular file Mix copies an ebin entry as, " <>
+      "so something else in this build put it there - `File.cp_r!/2` copies a symlink as a " <>
+      "symlink, and a release overlay is copied over lib/ after the applications are. " <>
+      "Writing it would follow it, out of the release and into whatever it names."
   end
 
   defp interposed(file, became) do
@@ -690,6 +726,57 @@ defmodule Forecastle.Appup.Dep do
       "answers to what this application's upgrade instructions are, and writing over one of " <>
       "them is how the other disappears without a word. Take it out, or move its entries " <>
       "into #{shorten(dir())}."
+  end
+
+  # **Staged in the same directory and renamed on, which is how
+  # `Forecastle.Appup.Source` publishes a merged source and `Forecastle.Relup` a
+  # relup, and here it buys two things rather than one.** `File.write!/2` opens
+  # for writing, which truncates, so a failure part way through would leave a
+  # partial appup in the release that `systools` cannot read. And `rename/2`
+  # replaces the *link* rather than following it, so nothing between
+  # `verify_staged!/2` and the write can turn the destination into a path out of
+  # the release: the check answers about the name, and so does the write.
+  #
+  # The staging name is created exclusively and carries a unique integer, so a
+  # name already there - a leftover, or something planted at a guessable one - is
+  # refused rather than opened, and two builds sharing a tree cannot share a
+  # staging file.
+  defp publish!(file, bytes) do
+    staging = "#{file}.forecastle-#{System.unique_integer([:positive])}"
+
+    case :file.open(staging, [:binary, :write, :exclusive]) do
+      {:ok, fd} ->
+        fill!(file, staging, fd, bytes)
+
+      {:error, reason} ->
+        Mix.raise("#{shorten(staging)} could not be created: #{format(reason)}")
+    end
+  end
+
+  # Past the open this owns the staging file, so every path out of here either
+  # renames it onto the destination or takes it away again.
+  defp fill!(file, staging, fd, bytes) do
+    written = :file.write(fd, bytes)
+    closed = :file.close(fd)
+
+    case {written, closed} do
+      {:ok, :ok} -> rename!(file, staging)
+      {{:error, reason}, _closed} -> discard!(staging, reason)
+      {:ok, {:error, reason}} -> discard!(staging, reason)
+    end
+  end
+
+  defp rename!(file, staging) do
+    case File.rename(staging, file) do
+      :ok -> :ok
+      {:error, reason} -> discard!(staging, reason)
+    end
+  end
+
+  defp discard!(staging, reason) do
+    _ = File.rm(staging)
+
+    Mix.raise("#{shorten(staging)} could not be written: #{format(reason)}")
   end
 
   defp announce(placement, file) do

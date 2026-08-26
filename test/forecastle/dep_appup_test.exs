@@ -239,6 +239,40 @@ defmodule Forecastle.DepAppupTest do
       assert output =~ "a release overlay is copied over lib/"
     end
 
+    test "a symlink an overlay left where the appup goes, whatever it points at" do
+      # Raised in review, and the sharper half of the case above. `File.cp_r!/2`
+      # copies a symlink *as a symlink*, so an overlay can leave one here - and
+      # reading through it answered about something else: a dangling one read as
+      # "no appup here", and one pointing at the dependency's own build appup read
+      # back exactly the staged bytes and passed for "Mix copied it". The write
+      # would then have followed it, out of the release and into the shared build.
+      write_source!("sample_dep-#{@from}-#{@to}.exs", source(@from, @to))
+      link_overlay!("lib/sample_dep-#{@to}/ebin/sample_dep.appup", "../../../nowhere.appup")
+
+      {_path, output, status} = assemble("dep-appup-overlay-link")
+
+      assert status != 0, "a symlink at the destination was written through:\n\n#{output}"
+      assert output =~ "is a symlink rather than the regular file Mix copies an ebin entry as"
+      refute File.exists?(Path.join(Fixture.workspace(), "nowhere.appup"))
+    end
+
+    test "a rel/appups that is a link to somewhere that is not there" do
+      # `File.ls/1` follows a directory symlink, so a checked-in
+      # `rel/appups -> ../shared/appups` whose target is missing in CI answers
+      # exactly as an absent directory does - and the release would assemble with
+      # none of the appups it names, silently, which is the whole failure this
+      # feature exists to remove.
+      clear!()
+      File.ln_s!("../does-not-exist", appups_dir())
+      on_exit(&clear!/0)
+
+      {path, output, status} = assemble("dep-appup-dangling-dir")
+
+      assert status != 0, "a dangling rel/appups was read as an empty one:\n\n#{output}"
+      assert output =~ "is a link to somewhere that is not there"
+      refute File.exists?(path)
+    end
+
     test "a file in the directory that is not an appup source at all" do
       # A misspelled extension is the case worth refusing. Passing it over
       # quietly would leave somebody with an appup they wrote, a build that
@@ -417,6 +451,19 @@ defmodule Forecastle.DepAppupTest do
 
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, contents)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    path
+  end
+
+  # An overlay entry that is a *symlink*, which is what `File.cp_r!/2` carries
+  # into the release rather than dereferencing.
+  defp link_overlay!(relative, target) do
+    root = Path.join(Fixture.workspace(), "rel/overlays")
+    path = Path.join(root, relative)
+
+    File.mkdir_p!(Path.dirname(path))
+    File.ln_s!(target, path)
     on_exit(fn -> File.rm_rf!(root) end)
 
     path

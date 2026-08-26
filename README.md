@@ -513,13 +513,22 @@ before `:assemble`, so a corrected retry has no half-built release in its way:
 - anything in `rel/appups` that is not a `.exs` file. Dotfiles are the exception,
   so `.gitkeep` and `.DS_Store` are ignored.
 
-One refusal comes *after* assembly, because nothing before it can be sure: an
-appup at `lib/<app>-<vsn>/ebin/<app>.appup` that is not the copy Mix made of the
-build's own. `mix release` copies the applications and then copies the release's
-overlays over them, so a `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup` is a
-second answer to what that application's upgrade instructions are — and writing
-over it is how the other one disappears. Take the overlay out, or move its
-entries into `rel/appups`.
+Two refusals come *after* assembly, because nothing before it can be sure. Both
+leave the release directory behind, so the corrected retry needs
+`mix release --overwrite` — without it `mix release` assembles nothing and exits
+zero:
+
+- an appup at `lib/<app>-<vsn>/ebin/<app>.appup` that is not the copy Mix made of
+  the build's own, or that is not a regular file at all. `mix release` copies the
+  applications and then copies the release's overlays over them — preserving
+  symlinks — so a `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup` is a second
+  answer to what that application's upgrade instructions are, and writing over it
+  is how the other one disappears. Take the overlay out, or move its entries into
+  `rel/appups`;
+- an application named by a source that has no `lib/<app>-<vsn>/ebin` in the
+  assembled release, which is what a release built with `include_erts: false`
+  does with OTP's own applications: the deployment takes those from the host, so
+  there is nothing in the release to place an appup in.
 
 A file covering only one direction is *not* refused: an appup with an upgrade
 entry and no downgrade is a legitimate thing to write, and `auto` classifies each
