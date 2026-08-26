@@ -748,13 +748,14 @@ defmodule Forecastle.Appup.Source do
   end
 
   defp publish(path, text, attempts) do
-    path = target(path)
-    staging = path <> ".castle-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+    with {:ok, path} <- target(path) do
+      staging = path <> ".castle-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 
-    case File.write(staging, text, [:exclusive]) do
-      :ok -> rename(path, staging)
-      {:error, :eexist} -> publish(path, text, attempts - 1)
-      {:error, reason} -> {:error, "could not be written: " <> format(reason)}
+      case File.write(staging, text, [:exclusive]) do
+        :ok -> rename(path, staging)
+        {:error, :eexist} -> publish(path, text, attempts - 1)
+        {:error, reason} -> {:error, "could not be written: " <> format(reason)}
+      end
     end
   end
 
@@ -783,20 +784,38 @@ defmodule Forecastle.Appup.Source do
   # So the link is followed to what it names, and the staging file is created
   # beside *that* - which is also what keeps the rename on one filesystem.
   # Bounded, because a symlink loop is a filesystem somebody has broken and not
-  # something to spin on; at the bound the link's own path is used, and the
-  # rename fails there with whatever the system says about it.
+  # something to spin on.
+  #
+  # **At the bound this refuses rather than returning the path it stopped on.**
+  # Raised in review. That path is one `read_link/1` has just answered for, so
+  # it is known to *be* a link, and handing it to the rename is the finding at
+  # the top of this comment arrived at from the other side: the chain broken,
+  # the shared file at its end untouched, and `:ok` reported. Nothing downstream
+  # catches it, because there is nothing to catch - the exclusive create, the
+  # stat, the chmod and the rename all succeed. A rename onto a link is an
+  # ordinary operation, and only declining to hand it one stops this.
+  #
+  # The bound is spent on links followed, not on calls made, so a chain of
+  # exactly @link_depth still resolves; @link_depth + 1 is what refuses.
   #
   # `:einval` is what `read_link/1` answers for a path that is not a link, which
   # is the ordinary case and the reason this is a `case` rather than a check.
-  defp target(path, depth \\ 8)
+  @link_depth 8
 
-  defp target(path, 0), do: path
+  defp target(path, depth \\ @link_depth)
 
   defp target(path, depth) do
     case File.read_link(path) do
+      {:ok, _link} when depth == 0 -> {:error, too_many_links()}
       {:ok, link} -> target(Path.expand(link, Path.dirname(path)), depth - 1)
-      {:error, _not_a_link} -> path
+      {:error, _not_a_link} -> {:ok, path}
     end
+  end
+
+  defp too_many_links do
+    "is reached through more than #{@link_depth} symlinks, so where the merge would land " <>
+      "could not be established. Nothing was written; point the :appup key at the file " <>
+      "itself, or shorten the chain"
   end
 
   defp copy_mode(path, staging) do

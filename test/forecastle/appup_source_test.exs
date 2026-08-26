@@ -603,6 +603,45 @@ defmodule Forecastle.AppupSourceTest do
       assert File.read!(target) == "merged\n"
     end
 
+    test "replace/2 follows a chain up to the bound", ctx do
+      # The bound is spent on links followed, not on calls made, so a chain of
+      # exactly the bound resolves to the file at its end. Pinned alongside the
+      # refusal below because the two share one clause, and a fix to either that
+      # moves the boundary by one would otherwise go unnoticed.
+      target = chain!(ctx, 8)
+
+      {:literal, literal} = Source.read(Path.join(ctx.tmp_dir, "link8"))
+
+      assert Source.replace(literal, "merged\n") == :ok
+      assert File.read!(target) == "merged\n"
+    end
+
+    test "replace/2 refuses a chain past the bound rather than breaking it", ctx do
+      # Raised in review. Stopping at the bound and returning the path it
+      # stopped on is the finding above arrived at from the other side: that
+      # path is one `read_link/1` has just answered for, so the rename replaces
+      # a *link* with the merged file. Nothing fails on its own - the exclusive
+      # create, the stat, the chmod and the rename all succeed - so a run that
+      # reported `:ok` would leave the chain broken and the shared file at its
+      # end untouched. Only refusing stops it.
+      target = chain!(ctx, 9)
+      link = Path.join(ctx.tmp_dir, "link9")
+      intermediate = Path.join(ctx.tmp_dir, "link1")
+
+      {:literal, literal} = Source.read(link)
+
+      assert {:error, phrase} = Source.replace(literal, "merged\n")
+      assert phrase =~ "reached through more than 8 symlinks"
+
+      # Nothing was written, and every link in the chain is still a link.
+      assert File.read!(target) == ~s|{~c"0.1.1", [], []}\n|
+      assert {:ok, _} = File.read_link(intermediate)
+      assert {:ok, _} = File.read_link(link)
+
+      # Nor was a staging file left beside any of them.
+      assert Enum.empty?(Path.wildcard(Path.join(ctx.tmp_dir, "*.castle-*")))
+    end
+
     test "replace/2 keeps the file's mode" do
       # The rename replaces the inode, so a source somebody had made
       # group-writable for a shared checkout would otherwise come back with this
@@ -666,5 +705,19 @@ defmodule Forecastle.AppupSourceTest do
     File.write!(path, source)
 
     path
+  end
+
+  # `shared.exs` with `link1` naming it, `link2` naming `link1`, and so on, so
+  # `linkN` is reached through exactly N links. The links are relative, which is
+  # how `target/2` is made to expand each one against its own directory.
+  defp chain!(ctx, n) do
+    target = write!(ctx, ~s|{~c"0.1.1", [], []}\n|, "shared.exs")
+
+    Enum.each(1..n, fn i ->
+      name = if i == 1, do: "shared.exs", else: "link#{i - 1}"
+      File.ln_s!(name, Path.join(ctx.tmp_dir, "link#{i}"))
+    end)
+
+    target
   end
 end
