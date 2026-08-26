@@ -513,6 +513,14 @@ before `:assemble`, so a corrected retry has no half-built release in its way:
 - anything in `rel/appups` that is not a `.exs` file. Dotfiles are the exception,
   so `.gitkeep` and `.DS_Store` are ignored.
 
+One refusal comes *after* assembly, because nothing before it can be sure: an
+appup at `lib/<app>-<vsn>/ebin/<app>.appup` that is not the copy Mix made of the
+build's own. `mix release` copies the applications and then copies the release's
+overlays over them, so a `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup` is a
+second answer to what that application's upgrade instructions are — and writing
+over it is how the other one disappears. Take the overlay out, or move its
+entries into `rel/appups`.
+
 A file covering only one direction is *not* refused: an appup with an upgrade
 entry and no downgrade is a legitimate thing to write, and `auto` classifies each
 direction on its own and announces the restart it makes of the other.

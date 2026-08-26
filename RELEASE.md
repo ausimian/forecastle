@@ -723,6 +723,14 @@
   build names the shipped file, says how many of its entries were kept, and names
   every one your entries override.
 
+  One refusal comes *after* assembly, because nothing before it can be sure: an
+  appup at `lib/<app>-<vsn>/ebin/<app>.appup` that is not the copy Mix made of
+  the build's own. `mix release` copies the applications and then copies the
+  release's overlays over them, so a
+  `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup` is a second answer to what that
+  application's upgrade instructions are, and writing over it is how the other
+  one disappears.
+
   One boundary worth knowing: `mix castle.appup --app <dep>` reads the appup out
   of the build `--to` names, and a project-supplied one is only ever in an
   assembled release — so point `--to` at a `rel:` or `tar:` baseline to check it.

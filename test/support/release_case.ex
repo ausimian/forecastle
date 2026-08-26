@@ -44,6 +44,14 @@ defmodule Forecastle.ReleaseCase do
     on_exit(fn -> File.rm_rf(appups) end)
     File.rm_rf!(appups)
 
+    # And `rel/overlays`, which Mix copies over `lib/` during `:assemble`: one
+    # left behind plants files in every release another suite assembles, and
+    # `Forecastle.Appup.Dep` refuses a build whose dependency appup an overlay
+    # replaced - so a stray one fails suites that never heard of it.
+    overlays = Path.join(workspace, "rel/overlays")
+    on_exit(fn -> File.rm_rf(overlays) end)
+    File.rm_rf!(overlays)
+
     {:ok, workspace: workspace}
   end
 

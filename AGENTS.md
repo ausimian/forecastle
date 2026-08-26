@@ -2482,6 +2482,36 @@ requirement is that it not be silent. Everything the dependency shipped is still
 in the placed file, behind the project's entries: one rule, with no second rule
 about which shipped entries survive.
 
+**Which shipped entries are shadowed is asked at the probes, not of the shipped
+keys, and asking it the other way round was a hole a later round found.**
+Iterating the shipped entries and keeping only the ones whose key is a concrete
+version skipped a shipped *regular expression* — so a project source named for
+0.1.0 placed in front of a shipped `0\.1\..*` overrode it in silence. That is a
+concrete collision at a version a source names, not the undecidable case.
+
+**What is at the destination has to be the copy Mix made of what was merged, and
+anything else is a refusal — the one refusal that cannot be made early.**
+`:assemble` copies the applications and *then* copies the release's overlays over
+them, so a `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup`, or any step Mix runs
+in between, installs upgrade instructions after everything here was read.
+Reconciling them instead would mean doing the collision refusals after
+`:assemble` and modelling where an overlay came from; refusing says what happened
+and leaves the choice to the author. The bytes read in `pre_assemble/1` are
+carried through and compared, which also closes the two-reads window in
+`shipped!/2`: a file that changed between its read and its consult cannot match
+at the destination either. `Forecastle.ReleaseCase` clears `rel/overlays` for the
+same reason it clears `rel/appups`.
+
+**The generator's file name is built out of two version strings, so it is checked
+to be a name.** `Forecastle.Build` refuses a version that is not valid UTF-8 or
+that carries control characters — those reach a report and a terminal — and says
+nothing about path separators, which reach nothing anywhere else and reach the
+filesystem here: a `.app` naming its version `2.0/x/../../../../config/runtime`
+made `mix castle.appup.gen` create and write `config/runtime.exs`. Checked by
+expansion rather than by looking for separators, because that is the question the
+filesystem will answer and a `..` is not a separator. `bin/castle` refuses a path
+separator in a version one layer out, for the same reason.
+
 **A file covering only one direction is deliberately not refused.** An appup with
 an upgrade entry and no downgrade is a legitimate thing to write, `auto`
 classifies each direction on its own, and the restart it makes of the other is

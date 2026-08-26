@@ -476,9 +476,37 @@ defmodule Mix.Tasks.Castle.Appup.Gen do
   # transition the file is for: nothing about a dependency's appup is keyed to a
   # `:appup` project key that could name it.
   defp dependency_path(app, from_vsn, to_vsn) do
-    path = Path.join(Dep.dir(), "#{app}-#{from_vsn}-#{to_vsn}.exs")
+    dir = Dep.dir()
+    path = Path.join(dir, "#{app}-#{from_vsn}-#{to_vsn}.exs")
+
+    confined!(path, dir, from_vsn, to_vsn)
 
     {path, {:dependency, app, to_vsn}, dependency_notes(app, to_vsn)}
+  end
+
+  # **The name is built out of two version strings, so it has to be checked to be
+  # a name. Raised in review.** `Forecastle.Build` refuses a version that is not
+  # valid UTF-8 or that carries control characters, because those reach a report
+  # and a terminal - it says nothing about path separators, which reach nothing
+  # anywhere else. Here they reach the filesystem: a `.app` naming its version
+  # `2.0/x/../../../../config/runtime` makes this create and write
+  # `config/runtime.exs`, which is a file outside the appup directory altogether
+  # and one the project may already have.
+  #
+  # Checked by expansion rather than by looking for separators, because that is
+  # the same question the filesystem will answer and a `..` is not a separator.
+  # `bin/castle` refuses a path separator in a version for the same reason, one
+  # layer out: a version that names a directory is not a version.
+  defp confined!(path, dir, from_vsn, to_vsn) do
+    if Path.dirname(Path.expand(path)) != Path.expand(dir) do
+      Mix.raise(
+        "#{from_vsn} and #{to_vsn} do not make a file name in #{Path.relative_to_cwd(dir)}: " <>
+          "#{Path.relative_to_cwd(Path.expand(path))} is somewhere else. An appup for a " <>
+          "dependency is named for its transition, so a version carrying a path separator or " <>
+          "a .. would put the source outside the directory the build reads - or over a file " <>
+          "that is already there. Nothing was written."
+      )
+    end
   end
 
   defp umbrella_path(app) do

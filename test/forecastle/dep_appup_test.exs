@@ -223,6 +223,22 @@ defmodule Forecastle.DepAppupTest do
       refute File.exists?(path)
     end
 
+    test "an appup a release overlay put into the assembled tree" do
+      # Raised in review, and the one refusal that cannot be made before
+      # `:assemble`: Mix copies the applications and *then* copies the release's
+      # overlays over them, so an overlay can install upgrade instructions of its
+      # own after everything this staged was read. Writing over them is how a
+      # supported transition disappears without a word.
+      write_source!("sample_dep-#{@from}-#{@to}.exs", source(@from, @to))
+      write_overlay!("lib/sample_dep-#{@to}/ebin/sample_dep.appup", overlay_appup())
+
+      {_path, output, status} = assemble("dep-appup-overlay")
+
+      assert status != 0, "an overlay's appup was written over:\n\n#{output}"
+      assert output =~ "appeared during :assemble"
+      assert output =~ "a release overlay is copied over lib/"
+    end
+
     test "a file in the directory that is not an appup source at all" do
       # A misspelled extension is the case worth refusing. Passing it over
       # quietly would leave somebody with an appup they wrote, a build that
@@ -309,6 +325,23 @@ defmodule Forecastle.DepAppupTest do
               ]} = :file.consult(to_charlist(placed))
     end
 
+    test "is overridden where its own key is a pattern too, and says so" do
+      # Raised in review, and the case that asking the question of the *shipped
+      # keys* skipped: a shipped key that is a binary is a regular expression, so
+      # `0\.1\..*` is overridden by a project entry named for 0.1.0 without ever
+      # being a concrete version anybody could iterate. Asked at the probe, with
+      # the function that selects, it is the same question either way round.
+      write_dep_appup!("regex_appup.exs", regex_source(~S(0\\.1\\..*), @to))
+      write_source!("sample_dep-#{@from}-#{@to}.exs", source(@from, @to))
+
+      {_path, output, status} =
+        assemble("dep-appup-shipped-regex", @to, shipping_dep("regex_appup.exs"))
+
+      assert status == 0, "the assembly failed:\n\n#{output}"
+      assert output =~ "the upgrade entry it holds for #{@from} is overridden"
+      assert output =~ "the downgrade entry it holds for #{@from} is overridden"
+    end
+
     test "is overridden where the project supplies one for the same transition, and says so" do
       # The other half, and it is deliberate rather than tolerated: supplying an
       # appup for a transition a dependency already covers is how a project
@@ -374,6 +407,25 @@ defmodule Forecastle.DepAppupTest do
 
   defp clear!, do: File.rm_rf!(appups_dir())
 
+  # `rel/overlays` is Mix's own: everything under it is copied over the release
+  # root during `:assemble`, after the applications have been copied into `lib/`.
+  # Taken away again, because it would otherwise plant this file in every release
+  # another suite assembles.
+  defp write_overlay!(relative, contents) do
+    root = Path.join(Fixture.workspace(), "rel/overlays")
+    path = Path.join(root, relative)
+
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, contents)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    path
+  end
+
+  defp overlay_appup do
+    ~s|{~c"#{@to}", [{~c"0.0.1", [{:load_module, SampleDep}]}], [{~c"0.0.1", []}]}.\n|
+  end
+
   ## Assembling
 
   # Deliberately not `ReleaseCase.assemble!/1`: every case in the second describe
@@ -430,10 +482,22 @@ defmodule Forecastle.DepAppupTest do
   # `@build_root`: the `:appup` compiler writes `sample_dep.appup` into whichever
   # build tree it runs in, and leaving one there would make the assertion that
   # nothing was written into the shared build depend on the order the cases ran.
-  defp shipping_dep do
+  defp shipping_dep(source \\ "appup.exs") do
     [
-      {"SAMPLE_DEP_APPUP", "appup.exs"},
+      {"SAMPLE_DEP_APPUP", source},
       {"MIX_BUILD_ROOT", Path.join(Fixture.workspace(), "#{@build_root}-shipping-#{@to}")}
     ]
+  end
+
+  # An appup source in the dependency's own project, which its `:appup` key names
+  # through `SAMPLE_DEP_APPUP`. The `:appup` compiler rewrites the output on every
+  # build, so cases sharing a build root do not have to sort themselves out.
+  defp write_dep_appup!(name, contents) do
+    path = Path.join([Fixture.workspace(), "dep", name])
+
+    File.write!(path, contents)
+    on_exit(fn -> File.rm(path) end)
+
+    path
   end
 end

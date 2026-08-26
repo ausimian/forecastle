@@ -336,6 +336,33 @@ defmodule Forecastle.AppupGenTest do
       assert Path.wildcard(Path.join(Fixture.workspace(), "deps/**/*.appup")) == []
     end
 
+    test "refuses a version that would put the file somewhere other than rel/appups", ctx do
+      # Raised in review. The name is built out of two version strings, and
+      # `Forecastle.Build` refuses a version that is not valid UTF-8 or that
+      # carries control characters but says nothing about path separators -
+      # which reach nothing anywhere else and reach the filesystem here. A `.app`
+      # naming its version this way would have had the task create and write
+      # `config/runtime.exs`.
+      root = dep_copy!(ctx.to, "gen-escaping-vsn")
+      set_dep_vsn!(root, "2.0/x/../../../../config/runtime")
+
+      # The fixture has one, which is the point rather than an inconvenience: the
+      # path this escapes to is a file the project already owns.
+      runtime = Path.join(Fixture.workspace(), "config/runtime.exs")
+      before = File.read!(runtime)
+
+      {output, status} =
+        gen(
+          ["--from", "rel:" <> rel(ctx.from, @from), "--to", "rel:" <> rel(root, @to)] ++
+            ["--app", "sample_dep"],
+          "generated.exs"
+        )
+
+      assert status != 0, "a version naming a path was written to:\n\n#{output}"
+      assert output =~ "do not make a file name in rel/appups"
+      assert File.read!(runtime) == before, "the fixture's own config/runtime.exs was rewritten"
+    end
+
     test "never rewrites an entry it already has, the same as for an owned application", ctx do
       gen!(both(ctx, "sample_dep"), "generated.exs")
       output = gen!(both(ctx, "sample_dep"), "generated.exs")
@@ -512,6 +539,38 @@ defmodule Forecastle.AppupGenTest do
     on_exit(fn -> File.write!(file, original) end)
 
     File.write!(file, IO.iodata_to_binary(:io_lib.format(~c"~tp.~n", [appup])))
+  end
+
+  # The same shape as `lib_copy!/2` for the dependency instead of the project's
+  # own application, which is what the cases about a dependency's source need.
+  defp dep_copy!(release, into) do
+    root = Path.join(Fixture.workspace(), into)
+    File.rm_rf!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    File.mkdir_p!(Path.join(root, "lib"))
+
+    File.cp_r!(
+      Path.join(release, "lib/sample_dep-#{@to}"),
+      Path.join(root, "lib/sample_dep-#{@to}")
+    )
+
+    root
+  end
+
+  # The version in the `.app` resource, which is what `Forecastle.Build` reads and
+  # what the task names the file after - the directory keeps its own name, since
+  # nothing resolves an application by it.
+  defp set_dep_vsn!(root, app_vsn) do
+    file = Path.join(root, "lib/sample_dep-#{@to}/ebin/sample_dep.app")
+    {:ok, [{:application, app, opts}]} = :file.consult(to_charlist(file))
+
+    File.write!(
+      file,
+      IO.iodata_to_binary(
+        :io_lib.format(~c"~tp.~n", [{:application, app, Keyword.put(opts, :vsn, ~c"#{app_vsn}")}])
+      )
+    )
   end
 
   defp set_app_vsn!(root, vsn, app_vsn) do

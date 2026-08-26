@@ -83,12 +83,19 @@ defmodule Forecastle.Appup.Dep do
   `auto` classifies each direction on its own, and the restart it makes of the
   other direction is announced there rather than hidden.
 
-  One refusal is made *after* assembly, because nothing before it can be sure: an
-  application named by a source that has no `lib/<app>-<vsn>/ebin` in the
-  assembled release. That is reachable rather than theoretical -
-  `Mix.Release.copy_app/2` copies nothing for an OTP application when the release
-  brings no ERTS of its own, since the deployment then takes those from the host -
-  so it is named rather than modelled here, and it costs a build.
+  Two refusals are made *after* assembly, because nothing before it can be sure,
+  and both cost a build:
+
+    * an application named by a source that has no `lib/<app>-<vsn>/ebin` in the
+      assembled release. Reachable rather than theoretical -
+      `Mix.Release.copy_app/2` copies nothing for an OTP application when the
+      release brings no ERTS of its own, since the deployment then takes those
+      from the host.
+    * an appup at the destination that is not the copy Mix made of the build's
+      own. `:assemble` copies the applications and *then* copies the release's
+      overlays over them, so a `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup` is
+      a second answer to what this application's upgrade instructions are, and
+      writing over it is how the other one disappears. See `verify_staged!/2`.
 
   ## Two files for one application are merged, in name order
 
@@ -137,6 +144,7 @@ defmodule Forecastle.Appup.Dep do
           vsn: binary(),
           bytes: binary(),
           sources: [binary()],
+          staged: binary() | nil,
           notes: [binary()]
         }
 
@@ -450,7 +458,8 @@ defmodule Forecastle.Appup.Dep do
           paths
         ),
       sources: paths,
-      notes: shipped_notes(app, shipped, %{up: up, down: dn})
+      staged: staged(shipped),
+      notes: shipped_notes(app, shipped, %{up: up, down: dn}, probes)
     }
   end
 
@@ -518,26 +527,41 @@ defmodule Forecastle.Appup.Dep do
   # before `:assemble`. An appup that is there and cannot be read is refused: this
   # is about to write over it, and discarding something unreadable is no better
   # than discarding something readable.
+  # The bytes are kept beside the term, and both are read here, because they are
+  # what `write!/2` compares the assembled copy against - see `verify_staged!/2`.
+  # Reading the bytes first and consulting the path afterwards is two reads of one
+  # file, which is exactly the exposure that comparison closes: a file that
+  # changed in between makes the assembled copy disagree with what is held here,
+  # and that is a refusal.
   defp shipped!(app, app_dir) do
     file = Path.join([app_dir, "ebin", "#{app}.appup"])
 
-    if File.exists?(file) do
-      case Appup.read(file) do
-        {:ok, appup} ->
-          {file, appup}
+    case File.read(file) do
+      {:ok, bytes} -> {file, bytes, consulted!(app, file)}
+      {:error, :enoent} -> nil
+      {:error, reason} -> Mix.raise("#{shorten(file)} could not be read: #{format(reason)}")
+    end
+  end
 
-        {:error, phrase} ->
-          Mix.raise(
-            "#{phrase}, and this build is about to place a project-supplied appup over it. " <>
-              "What it holds cannot be carried across, and writing over it would take " <>
-              "whatever #{app} shipped away without a word."
-          )
-      end
+  defp consulted!(app, file) do
+    case Appup.read(file) do
+      {:ok, appup} ->
+        appup
+
+      {:error, phrase} ->
+        Mix.raise(
+          "#{phrase}, and this build is about to place a project-supplied appup beside it. " <>
+            "What it holds cannot be carried across, and writing the file would take whatever " <>
+            "#{app} shipped away without a word."
+        )
     end
   end
 
   defp kept(nil, _direction), do: []
-  defp kept({_file, appup}, direction), do: Appup.entries(appup, direction)
+  defp kept({_file, _bytes, appup}, direction), do: Appup.entries(appup, direction)
+
+  defp staged(nil), do: nil
+  defp staged({_file, bytes, _appup}), do: bytes
 
   # **The project's entries go first, so where both describe one transition the
   # project's is the one selected - deliberately, and said rather than left to be
@@ -547,13 +571,17 @@ defmodule Forecastle.Appup.Dep do
   # dependency. What must not happen is it being *silent*, so every shipped entry
   # this shadows is named.
   #
-  # Shadowing is asked only of a shipped key that is a concrete version. Whether a
-  # project entry can select a shipped *pattern* is the undecidable half again,
-  # and an unanswerable question is not worth a wrong answer: the entry is kept
-  # either way, after the project's.
-  defp shipped_notes(_app, nil, _project), do: []
+  # **Shadowing is asked at the probes rather than of the shipped keys, and asking
+  # it the other way round was a hole found in review.** Iterating the shipped
+  # entries and keeping only the ones whose key is a concrete version skipped a
+  # shipped *regular expression* - so a project source named for 0.1.0 placed in
+  # front of a shipped `0\.1\..*` overrode it in silence, which is a concrete
+  # collision at a version a source names rather than the undecidable case. Asked
+  # at a probe, with the function that selects, both sides are covered whichever
+  # of them is the pattern.
+  defp shipped_notes(_app, nil, _project, _probes), do: []
 
-  defp shipped_notes(app, {file, appup}, project) do
+  defp shipped_notes(app, {file, _bytes, appup}, project, probes) do
     counts =
       for direction <- [:up, :down] do
         {direction, Appup.entries(appup, direction)}
@@ -564,17 +592,17 @@ defmodule Forecastle.Appup.Dep do
     [
       "#{app} ships an appup of its own at #{shorten(file)}: its #{total} entries are kept, " <>
         "after the ones above."
-      | overridden(counts, project)
+      | overridden(counts, project, probes)
     ]
   end
 
-  defp overridden(counts, project) do
+  defp overridden(counts, project, probes) do
     for {direction, entries} <- counts,
-        {vsn, _script} <- entries,
-        is_list(vsn),
-        selectable(project[direction], to_string(vsn)) > 0 do
-      "the #{word(direction)} entry it holds for #{vsn} is overridden by the one above, which " <>
-        "is what supplying an appup for a transition means."
+        probe <- probes,
+        selectable(project[direction], probe) > 0,
+        selectable(entries, probe) > 0 do
+      "the #{word(direction)} entry it holds for #{probe} is overridden by the one above, " <>
+        "which is what supplying an appup for a transition means."
     end
   end
 
@@ -604,6 +632,7 @@ defmodule Forecastle.Appup.Dep do
     file = Path.join(ebin, "#{app}.appup")
 
     if File.dir?(ebin) do
+      verify_staged!(file, placement.staged)
       announce(placement, file)
       File.write!(file, placement.bytes)
     else
@@ -618,6 +647,51 @@ defmodule Forecastle.Appup.Dep do
     end
   end
 
+  # **What is at the destination has to be the copy Mix made of the file this
+  # merged, and anything else is a refusal. Raised in review.** `:assemble` copies
+  # the applications and *then* copies the release's overlays over the tree, so a
+  # `rel/overlays/lib/<app>-<vsn>/ebin/<app>.appup` - or any step Mix runs in
+  # between - can install upgrade instructions of its own here. Writing over them
+  # is how a supported transition disappears without a word, which is the failure
+  # this whole feature is built to remove, and reconciling them instead would mean
+  # doing the collision refusals after `:assemble` and modelling where an overlay
+  # came from.
+  #
+  # So the bytes read in `pre_assemble/1` are compared against what is there:
+  # equal, and Mix copied it; anything else, and something put a second answer in
+  # the release. It also closes the two-reads window in `shipped!/2`, since a file
+  # that changed between its read and its consult cannot match here either.
+  defp verify_staged!(file, staged) do
+    case {File.read(file), staged} do
+      {{:ok, bytes}, bytes} ->
+        :ok
+
+      {{:error, :enoent}, nil} ->
+        :ok
+
+      {{:ok, _other}, nil} ->
+        Mix.raise(interposed(file, "appeared during :assemble"))
+
+      {{:ok, _other}, _staged} ->
+        Mix.raise(interposed(file, "changed during :assemble"))
+
+      {{:error, :enoent}, _staged} ->
+        Mix.raise(interposed(file, "was taken away during :assemble"))
+
+      {{:error, reason}, _staged} ->
+        Mix.raise("#{shorten(file)} could not be read: #{format(reason)}")
+    end
+  end
+
+  defp interposed(file, became) do
+    "#{shorten(file)} #{became}, so it is not the copy Mix made of the build's own appup and " <>
+      "something else in this build put upgrade instructions there - a release overlay is " <>
+      "copied over lib/ after the applications are, and is how that happens. That is two " <>
+      "answers to what this application's upgrade instructions are, and writing over one of " <>
+      "them is how the other disappears without a word. Take it out, or move its entries " <>
+      "into #{shorten(dir())}."
+  end
+
   defp announce(placement, file) do
     Mix.shell().info(
       "* placing #{Enum.map_join(placement.sources, ", ", &shorten/1)} into #{shorten(file)}"
@@ -627,4 +701,6 @@ defmodule Forecastle.Appup.Dep do
   end
 
   defp shorten(path), do: Path.relative_to_cwd(path)
+
+  defp format(reason), do: :file.format_error(reason)
 end
