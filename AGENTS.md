@@ -3004,6 +3004,13 @@ Three decisions in it are worth not relitigating:
   *relative* `RELEASE_VM_ARGS`, which `Forecastle.UpgradeTest` covers on
   purpose, and a probe made from the wrong directory cannot resolve it and reads
   as "nothing running".
+- **The release's name comes out of the `.rel` term, not off its filename.**
+  *An unpacked release holds two `.rel` files* above is the reason: the
+  compatibility copy is called `<name>-<vsn>.rel`, `Forecastle.Baseline`
+  de-duplicates the two on their consulted term, and `Path.wildcard/1` sorts the
+  copy first — so the basename names a launcher, `bin/my_app-1.0.0`, that does
+  not exist, and every command the deployment makes fails on it. The term says
+  what the release is called and the filename only sometimes does.
 - **The deadlines fail the test and stop nothing**, which is stated in
   `start!/2` rather than left to be discovered. Closing the port behind
   `System.cmd/3` does not terminate the program on the other end of it, and

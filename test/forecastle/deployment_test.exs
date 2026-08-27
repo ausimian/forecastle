@@ -247,6 +247,28 @@ defmodule Forecastle.DeploymentTest do
       assert File.exists?(Path.join(into, "releases/1.0.0/my_app.rel"))
     end
 
+    test "names the release out of the .rel term, not off the filename", ctx do
+      # An unpacked release holds two `.rel` files: Mix's `<name>.rel` and the
+      # `<name>-<vsn>.rel` that `release_handler` copies in beside it,
+      # byte-identical. `Forecastle.Baseline` de-duplicates on the consulted term
+      # and `Path.wildcard/1` sorts the compatibility copy first, so it is the
+      # one that comes back - and its basename names a launcher, `bin/my_app-
+      # 1.0.0`, that does not exist. Every command the deployment made would fail
+      # on it.
+      write_rel!(Path.join(ctx.tree, "releases/1.0.0/my_app-1.0.0.rel"))
+      tarball = tar_up!(ctx.tree, Path.join(@root, "source/unpacked-1.0.0.tar.gz"))
+
+      assert Deployment.deploy!("tar:#{tarball}", Path.join(@root, "deployed-unpacked")).name ==
+               "my_app"
+
+      # And named directly, so the case does not rest on which of the two the
+      # resolver happened to pick.
+      assert Deployment.deploy!(
+               "rel:#{ctx.tree}/releases/1.0.0/my_app-1.0.0",
+               Path.join(@root, "deployed-compat")
+             ).name == "my_app"
+    end
+
     test "keeps the launcher executable", ctx do
       # The whole point of a deployment is that it can be started, and a
       # launcher copied without its mode cannot be. Asserted rather than left to
@@ -583,9 +605,7 @@ defmodule Forecastle.DeploymentTest do
     rel_path = Path.join(tree, "releases/1.0.0/my_app")
     write_rel!(rel_path <> ".rel")
 
-    tarball = Path.join(dir, "my_app-1.0.0.tar.gz")
-    members = for entry <- ~w(bin lib releases), do: {~c"#{entry}", ~c"#{Path.join(tree, entry)}"}
-    :ok = :erl_tar.create(to_charlist(tarball), members, [:compressed])
+    tarball = tar_up!(tree, Path.join(dir, "my_app-1.0.0.tar.gz"))
 
     # The baseline cache is deliberately left alone. It is content-keyed and
     # nothing here writes into it - which is the thing one of these tests exists
@@ -650,6 +670,17 @@ defmodule Forecastle.DeploymentTest do
     {out, 0} = System.cmd("sh", ["-c", "sleep 1 >/dev/null 2>&1 & echo $!"])
 
     String.trim(out)
+  end
+
+  # Named members rather than a `cd` into the tree, because `:erl_tar.create/3`
+  # otherwise resolves its file list against the working directory - which this
+  # suite must not move.
+  defp tar_up!(tree, tarball) do
+    File.rm(tarball)
+    members = for entry <- ~w(bin lib releases), do: {~c"#{entry}", ~c"#{Path.join(tree, entry)}"}
+    :ok = :erl_tar.create(to_charlist(tarball), members, [:compressed])
+
+    tarball
   end
 
   # A real release term, because a version directory can hold more than one

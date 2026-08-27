@@ -209,10 +209,10 @@ defmodule Forecastle.Deployment do
     root = Path.expand("../../..", baseline.rel_path)
     into = Path.expand(into)
 
-    deployment = new(into, Path.basename(baseline.rel_path), opts)
-
     refuse_unusable!(spec, baseline.rel_path, root)
     refuse_overlap!(spec, root, into)
+
+    deployment = new(into, release_name!(spec, baseline.rel_path), opts)
     refuse_running!(deployment)
 
     File.rm_rf!(into)
@@ -271,6 +271,32 @@ defmodule Forecastle.Deployment do
       )
     else
       _not_running -> :ok
+    end
+  end
+
+  # **Out of the term, not off the filename**, because an unpacked release holds
+  # two `.rel` files and the filenames are not both the release's name.
+  # `release_handler:do_unpack_release/4` copies `releases/<name>-<vsn>.rel` into
+  # the version directory beside Mix's own `<name>.rel`, byte-identical - see
+  # *An unpacked release holds two `.rel` files* in `AGENTS.md` - and
+  # `Forecastle.Baseline` may hand back either, since it de-duplicates on the
+  # consulted term and `Path.wildcard/1` sorts `my_app-1.0.0.rel` ahead of
+  # `my_app.rel`. Taking the basename of that one names the launcher
+  # `bin/my_app-1.0.0`, which does not exist, and every command this deployment
+  # makes fails on it.
+  #
+  # The term says what the release is called and the filename only sometimes
+  # does, so the term is what is read.
+  defp release_name!(spec, rel_path) do
+    case :file.consult(to_charlist(rel_path <> ".rel")) do
+      {:ok, [{:release, {name, _vsn}, _erts, _apps} | _]} ->
+        to_string(name)
+
+      _unreadable ->
+        Mix.raise(
+          "#{spec} resolved to #{rel_path}.rel, which does not read as a release: " <>
+            "expected a `{release, {Name, Vsn}, {erts, _}, _}` term."
+        )
     end
   end
 
