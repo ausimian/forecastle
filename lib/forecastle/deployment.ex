@@ -567,9 +567,24 @@ defmodule Forecastle.Deployment do
   is an `on_exit` callback: a suite that failed part way through may have left
   nothing to stop, and a teardown that raised there would report itself instead
   of the failure that got it here.
+
+  **It is bounded, and of all the rpcs here this is the one that has to be.**
+  `bin/<name> stop` is an rpc to `System.stop/0`, so a node that accepted a
+  distribution connection and then wedged never answers it - and the reason that
+  matters more here than elsewhere is *where* this is called from. Every other
+  command runs inside a test, under the module's ExUnit timeout; a teardown runs
+  after one, and what it would bury is the failure that had just been reported.
+  A suite whose `await_boot!/2` correctly timed out would sit in teardown for the
+  whole module timeout and then finish with an `on_exit callback` error, which
+  says nothing about the boot.
+
+  Answers `:timeout` in that case, which is neither a stop nor a failure to find
+  anything to stop, and should not be mistaken for either.
   """
-  @spec stop(t(), env()) :: {binary(), non_neg_integer()}
-  def stop(%__MODULE__{} = deployment, env \\ []), do: launcher(deployment, ["stop"], env)
+  @spec stop(t(), env()) :: {binary(), non_neg_integer()} | :timeout
+  def stop(%__MODULE__{name: name} = deployment, env \\ []) do
+    within(deployment, Path.join(deployment.root, "bin/#{name}"), ["stop"], env, @probe_timeout)
+  end
 
   @doc """
   The operating system pid of the running release, as the release reports it.

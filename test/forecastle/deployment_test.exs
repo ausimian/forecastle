@@ -114,6 +114,23 @@ defmodule Forecastle.DeploymentTest do
       assert {_output, 7} = Deployment.castle(deployment, ["releases"])
     end
 
+    test "stopping is bounded, because a teardown is not inside a test", ctx do
+      # `bin/<name> stop` is an rpc to `System.stop/0`, so a node that accepted a
+      # connection and then wedged never answers it. Every other command here
+      # runs inside a test and is bounded by the module timeout; this one is
+      # documented for `on_exit`, which runs *after* one - so an unbounded stop
+      # buries the failure that had just been reported under a teardown error
+      # that says nothing about it.
+      stub!(ctx.tree, "my_app", "sleep 60\n")
+
+      deployment = Deployment.new(ctx.tree, "my_app")
+
+      {elapsed, result} = :timer.tc(fn -> Deployment.stop(deployment) end)
+
+      assert result == :timeout
+      assert elapsed < 30_000_000, "waited #{div(elapsed, 1_000_000)}s on a 60s sleep"
+    end
+
     test "stopping tolerates a system that is not running", ctx do
       # It belongs in an `on_exit`, where a setup that died half way through may
       # have left nothing to stop - and a teardown that raised there would
