@@ -27,7 +27,7 @@ defmodule Forecastle.RestartUpgradeTest do
       fragment selects the provisional one, and only when Castle's own marker
       agrees with OTP's.
     * nothing in the release restarts it. The test is the supervisor; see
-      `Forecastle.Deployment.install_supervised!/3`.
+      `Forecastle.Deployment.install_supervised/3`.
 
   The rollback half is exercised before the commit half, and in that order for a
   reason: a provisional release that is killed before `Castle.commit/1` has to
@@ -189,7 +189,7 @@ defmodule Forecastle.RestartUpgradeTest do
     # selects the provisional version on the way back up, and nothing has been
     # committed - so what a crash from here has to do is come back on @from.
     {provisional_output, provisional_status} =
-      Deployment.install_supervised!(deploy, @to, @restart_env)
+      Deployment.install_supervised(deploy, @to, @restart_env)
 
     provisional = %{
       output: provisional_output,
@@ -221,7 +221,7 @@ defmodule Forecastle.RestartUpgradeTest do
 
     # And again, from the release that came back, this time through to a commit.
     {installed_output, installed_status} =
-      Deployment.install_supervised!(deploy, @to, @restart_env)
+      Deployment.install_supervised(deploy, @to, @restart_env)
 
     installed = %{output: installed_output, status: installed_status}
 

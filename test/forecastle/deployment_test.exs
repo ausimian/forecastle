@@ -72,37 +72,51 @@ defmodule Forecastle.DeploymentTest do
   describe "installing while acting as the supervisor" do
     setup :release_tree
 
+    # An install can fail on either side of the reboot, and the two are not the
+    # same failure: one leaves the node running and the other is reported after
+    # it has come back. Both are driven against stubs rather than a release,
+    # because what is being asserted is what this function does with each answer
+    # - `Forecastle.RestartUpgradeTest` is where a real transition lives.
+
     test "reports what an install that never rebooted said", ctx do
-      # The failure this used to swallow. `bin/castle install` polls the system
-      # for the version it installed and cannot be answered until the release is
-      # started again, which is this function's job and happens afterwards - so
-      # an install that has already exited has exited about a failure, and it is
-      # holding the only account of it. Waiting on the process alone spent thirty
-      # seconds and then reported that a process was still running.
+      # The near side, and the failure this used to swallow. `bin/castle
+      # install` polls the system for the version it installed and cannot be
+      # answered until the release is started again - which is this function's
+      # own next line - so an install that has already exited has exited about a
+      # failure, and it is holding the only account of it. Waiting on the
+      # process alone spent thirty seconds and then reported that a process was
+      # still running.
       #
-      # The stubs are what make this assertable without a release: a launcher
-      # that answers `pid` with this VM's own operating system process, which is
-      # certainly alive, and a `bin/castle` that refuses the way Castle would.
-      File.write!(Path.join(ctx.tree, "bin/castle"), """
-      #!/bin/sh
-      echo "Nothing to install: 1.1.0 has not been unpacked."
-      exit 3
-      """)
+      # This VM's own operating system process stands in for a node that never
+      # went away, since it certainly does not.
+      deployment = stubbed!(ctx.tree, System.pid(), ~s|echo "Nothing to unpack."\nexit 3\n|)
 
-      File.chmod!(Path.join(ctx.tree, "bin/castle"), 0o755)
+      assert_raise ExUnit.AssertionError, ~r/Nothing to unpack/, fn ->
+        Deployment.install_supervised(deployment, "1.1.0")
+      end
+    end
 
-      File.write!(Path.join(ctx.tree, "bin/my_app"), """
-      #!/bin/sh
-      [ "$1" = "pid" ] && echo "$STUB_PID"
-      exit 0
-      """)
-
-      File.chmod!(Path.join(ctx.tree, "bin/my_app"), 0o755)
-
+    test "hands back a status from the far side of the reboot", ctx do
+      # The other side, which is the one a bang name is doing work for. The
+      # process goes, the release is started again, and `bin/castle install`
+      # then reports that the version it installed is not the one running - a
+      # provisional release that rolled back on the way up.
       deployment =
-        Deployment.new(ctx.tree, "my_app", env: [{"STUB_PID", System.pid()}])
+        stubbed!(ctx.tree, transient_pid(), ~s|sleep 2\necho "1.1.0 is not running."\nexit 4\n|)
 
-      assert_raise ExUnit.AssertionError, ~r/Nothing to install/, fn ->
+      assert {output, 4} = Deployment.install_supervised(deployment, "1.1.0")
+      assert output =~ "1.1.0 is not running."
+    end
+
+    test "raises on it under the bang, which is the whole of the difference", ctx do
+      # Returning the tuple under a bang name is what let a test written the way
+      # the documentation suggests - `install_supervised!/3` in place of
+      # `castle!/3` - carry on to `commit` and assert against a system the
+      # install had already given up on.
+      deployment =
+        stubbed!(ctx.tree, transient_pid(), ~s|sleep 2\necho "1.1.0 is not running."\nexit 4\n|)
+
+      assert_raise RuntimeError, ~r/1\.1\.0 is not running/, fn ->
         Deployment.install_supervised!(deployment, "1.1.0")
       end
     end
@@ -278,6 +292,15 @@ defmodule Forecastle.DeploymentTest do
       assert {"ERL_OTP#{:erlang.system_info(:otp_release)}_FLAGS", nil} in Deployment.scrubbed_env()
     end
 
+    test "unsets the build environment the release is being started from" do
+      # A deployed release is started with no Mix and no `MIX_ENV`; a release
+      # started from a test run inherits `test`, measured on the generated
+      # launcher. Nothing Mix or Forecastle writes reads it - what it changes is
+      # whatever the project's own `config/runtime.exs` makes of it, and that is
+      # the one file a project routinely shares between a Mix run and a release.
+      assert {"MIX_ENV", nil} in Deployment.scrubbed_env()
+    end
+
     test "unsets what would redirect the launcher to another project's args file" do
       # Sharper than an extra flag: these do not add anything, they send the
       # launcher to a different `vm.args` entirely, which presents as a bug in
@@ -349,6 +372,33 @@ defmodule Forecastle.DeploymentTest do
     on_exit(fn -> File.rm_rf!(@root) end)
 
     {:ok, tree: tree, rel_path: rel_path, tarball: tarball}
+  end
+
+  # A launcher that answers `pid` with whatever the deployment carries, and a
+  # `bin/castle` with the given body. Between them they are enough to drive
+  # `install_supervised/3` through every answer it has to tell apart, with no
+  # release and no node.
+  defp stubbed!(tree, pid, castle_body) do
+    stub!(tree, "my_app", ~s|[ "$1" = "pid" ] && echo "$STUB_PID"\nexit 0\n|)
+    stub!(tree, "castle", castle_body)
+
+    Deployment.new(tree, "my_app", env: [{"STUB_PID", pid}])
+  end
+
+  defp stub!(tree, name, body) do
+    path = Path.join(tree, "bin/#{name}")
+
+    File.write!(path, "#!/bin/sh\n" <> body)
+    File.chmod!(path, 0o755)
+  end
+
+  # An operating system process that is alive now and gone in about a second,
+  # which is what a reboot looks like from outside. Its output is detached so
+  # that `System.cmd/3` returns as soon as the shell that started it does.
+  defp transient_pid do
+    {out, 0} = System.cmd("sh", ["-c", "sleep 1 >/dev/null 2>&1 & echo $!"])
+
+    String.trim(out)
   end
 
   # A real release term, because a version directory can hold more than one

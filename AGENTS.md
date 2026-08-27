@@ -2979,11 +2979,11 @@ Three decisions in it are worth not relitigating:
   `<root>-next` as being inside `<root>`, and misses a root of `/` entirely,
   since `/` with a separator appended is `//`.
 - **There is no one call that installs both kinds of transition.** A hot upgrade
-  never leaves its operating system process, so `install_supervised!/3` would
+  never leaves its operating system process, so `install_supervised/3` would
   wait for an exit that is not coming; a restart transition reboots and nothing
   in the release starts it again, so `castle!/3` alone would hang. Which one a
   transition is comes from the relup, and the caller knows because the caller
-  asked for it. `install_supervised!/3` watches the install task *while* it
+  asked for it. `install_supervised/3` watches the install task *while* it
   waits for the process, because `bin/castle install` cannot be answered until
   the release has been started again — which is that function's own next line —
   so an install that has already exited has exited about a failure and is
@@ -2998,6 +2998,17 @@ The environment scrub has one home now, `Forecastle.Deployment.scrubbed_env/1`,
 and `Forecastle.Fixture` reads it from there. Two copies of that list is how the
 two drift, and what drifting costs is a `-heart` reaching a release the fragment
 then adds another to — a hang, printing nothing.
+
+**`MIX_ENV` is in that list, and its being there is a deliberate change from
+what these suites used to do.** `Forecastle.Fixture` set `MIX_ENV=prod` on every
+command, launcher invocations included, because one function served both the
+builds and the runs; a deployment taking the variable from the caller instead
+inherited `test`, measured on the generated launcher. Neither is what a deployed
+release sees, which is nothing at all — there is no Mix. Nothing Mix or
+Forecastle writes reads the variable, so what it changes is whatever the
+*project's* `config/runtime.exs` makes of it, and that file is the one place a
+project routinely shares between a Mix run and a release. So it is unset rather
+than restored to `prod`, and the e2e suites run without it.
 
 `Forecastle.DownstreamUpgradeTest` is the check on the acceptance criterion
 rather than a restatement of it: everything it does below the build is shipped
@@ -3106,7 +3117,7 @@ configures distribution without one.
 `refute provisional.os_pid == booted.os_pid` against the hot suite's
 `assert installed.os_pid == booted.os_pid` — and it has one thing no other suite
 does: **it is the supervisor.** Nothing in the release restarts it after
-`init:reboot()`, deliberately, so `Forecastle.Deployment.install_supervised!/3`
+`init:reboot()`, deliberately, so `Forecastle.Deployment.install_supervised/3`
 runs `bin/castle install` in a task, waits for the old *operating system process*
 to go, and starts the release again. Waiting on the process rather than on the
 node matters: a node that has stopped answering rpc is not necessarily one that

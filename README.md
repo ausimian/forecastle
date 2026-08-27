@@ -974,16 +974,54 @@ defmodule MyApp.UpgradeTest do
     {:ok, deployment: deployment}
   end
 
-  test "kept counting across the upgrade", %{deployment: deployment} do
-    assert Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.count())") == "1"
+  test "moved to 1.1.0 and took the count with it", %{deployment: deployment} do
+    assert Deployment.rpc!(deployment, "IO.puts(inspect(MyApp.Counter.info()))") ==
+             ~s({"1.1.0", 1})
+
+    assert Deployment.version(deployment) == "1.1.0"
   end
 end
 ```
 
-`castle!/3` raises on a non-zero exit, so an `unpack` or an `install` that failed
-is a failure of the setup rather than something an assertion further down has to
-notice. `@moduletag :upgrade` and an `ExUnit.start(exclude: [:upgrade])` keep it
-out of the ordinary `mix test` run; it boots a node, so it does not belong there.
+`castle!/3` raises on a non-zero exit, so an `unpack`, `install` or `commit` that
+failed is a failure of the setup rather than something an assertion further down
+has to notice. `@moduletag :upgrade` and an `ExUnit.start(exclude: [:upgrade])`
+keep it out of the ordinary `mix test` run; it boots a node, so it does not
+belong there.
+
+### Assert the code as well as the state
+
+**A count that survived is not evidence that anything moved.** An appup that does
+not mention a module leaves that module's *old* code serving calls, with the new
+code sitting on disk beside it — the failure `mix castle.appup` exists to catch,
+and the one an upgrade test asserting only the count would pass, because
+unchanged code preserves a count perfectly.
+
+So `info/0` above reports the version alongside the count, and reports it from a
+literal the module carries:
+
+```elixir
+defmodule MyApp.Counter do
+  use GenServer
+
+  @vsn_tag Mix.Project.config()[:version]
+
+  @doc "`{the version compiled into the code serving this call, count}`"
+  def info, do: GenServer.call(__MODULE__, :info)
+
+  def handle_call(:info, _from, state), do: {:reply, {@vsn_tag, state.count}, state}
+end
+```
+
+`@vsn_tag` is compiled into whichever copy of the module is executing the call,
+so an old one says this process is still running old code. Reading the version
+from `Application.spec/2` — or from `Deployment.version/1`, which is what the
+second assertion does — answers about the *release*, and a release moves whether
+or not any particular module did. That is why the example asserts both: they are
+different questions, and only the first is about the code.
+
+`mix castle.appup` catches the same failure before an upgrade is ever attempted.
+This catches it afterwards, in a system that took one.
 
 ### Where the release under test comes from
 
@@ -1018,6 +1056,13 @@ relup, and `auto` decides it at generation time; `mix castle.relup --hot` fails
 rather than degrading, which puts the failure on the build instead of on an
 assertion much further down.
 
+`install_supervised!/3` raises the way `castle!/3` does, and what it is usually
+raising about is on the far side of the reboot: `bin/castle install` polls for
+the version it installed *after* the release has come back, so a provisional
+release that rolled back on the way up is reported there and nowhere earlier.
+`Deployment.install_supervised/3` returns `{output, status}` for a test that
+wants to assert on the status itself.
+
 ### What it does for you, and what it does not
 
 `setup_all` puts a `:scratch` directory in the context, one per test module,
@@ -1025,12 +1070,15 @@ under `_build/castle/deployments`. It is emptied when the module starts and left
 behind when it finishes: a deployment that failed to upgrade is the evidence.
 
 Every command a deployment runs is given an environment with the variables that
-leak into a release unset — `ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`, `ERL_FLAGS`,
-`ERL_ZFLAGS`, `ERL_OTP<major>_FLAGS`, `RELEASE_VM_ARGS` and the rest. A `-heart`
-in a developer's shell or a CI image would otherwise reach every release the
-tests start, and a release that already supplies one is then given two, which
-hangs the boot having printed nothing. `Deployment.scrubbed_env/1` is the same
-list, for the `mix release` that builds the versions being tested.
+leak into a release unset — `MIX_ENV`, `ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`,
+`ERL_FLAGS`, `ERL_ZFLAGS`, `ERL_OTP<major>_FLAGS`, `RELEASE_VM_ARGS` and the
+rest. A `-heart` in a developer's shell or a CI image would otherwise reach every
+release the tests start, and a release that already supplies one is then given
+two, which hangs the boot having printed nothing. `MIX_ENV` is there for a milder
+reason and a real one: a deployed release is started with no Mix at all, while
+one started from a test run inherits `test`, and `config/runtime.exs` is the one
+file a project routinely shares between the two. `Deployment.scrubbed_env/1` is
+the same list, for the `mix release` that builds the versions being tested.
 
 Deployments are not stopped for you: a running release outlives the test that
 started it, so `on_exit(fn -> Deployment.stop(deployment) end)` belongs beside

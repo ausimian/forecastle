@@ -110,9 +110,19 @@ defmodule Forecastle.Deployment do
   # and it leaks the same way, but it cannot be written into this list because
   # its name carries the emulator's OTP major. It is appended in
   # `scrubbed_env/1` instead.
-  @scrubbed ~w(MIX_BUILD_PATH MIX_BUILD_ROOT MIX_DEPS_PATH MIX_TARGET MIX_QUIET
-               MIX_DEBUG ERL_LIBS ELIXIR_ERL_OPTIONS ERL_AFLAGS ERL_FLAGS
-               ERL_ZFLAGS RELEASE_VM_ARGS RELEASE_REMOTE_VM_ARGS
+  #
+  # `MIX_ENV` is here for a milder reason than the rest and a real one:
+  # a deployed release is started with no Mix and no `MIX_ENV`, while a release
+  # started from a test run inherits `test` - measured, on the generated
+  # launcher. Nothing Forecastle or Mix writes reads it, so what it changes is
+  # whatever the *project's* `config/runtime.exs` makes of it, and that file is
+  # the one place a project routinely shares between a Mix run and a release. A
+  # deployment that answered differently there than a deployment would is the
+  # whole failure this list exists to prevent, arrived at through the one
+  # variable a project is most likely to read.
+  @scrubbed ~w(MIX_ENV MIX_BUILD_PATH MIX_BUILD_ROOT MIX_DEPS_PATH MIX_TARGET
+               MIX_QUIET MIX_DEBUG ERL_LIBS ELIXIR_ERL_OPTIONS ERL_AFLAGS
+               ERL_FLAGS ERL_ZFLAGS RELEASE_VM_ARGS RELEASE_REMOTE_VM_ARGS
                RELEASE_ROOT RELEASE_NAME
                RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP)
 
@@ -388,7 +398,8 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  Installs `vsn` through `bin/castle` while acting as the release's supervisor.
+  Installs `vsn` through `bin/castle` while acting as the release's supervisor,
+  returning `{output, status}`.
 
   **This is the call for a transition that restarts the emulator, and the reason
   there is no single one that covers both kinds.** Such a transition applies the
@@ -401,12 +412,13 @@ defmodule Forecastle.Deployment do
   again, and then collects what the install made of it.
 
   A hot upgrade never leaves that process, so this would wait for an exit that is
-  not coming. Use `castle!/3` with `["install", vsn]` for one.
+  not coming. Use `castle/3` or `castle!/3` with `["install", vsn]` for one.
 
-  Returns `{output, status}` from the install, with the two streams merged.
+  For a test that wants the failure rather than the tuple, `install_supervised!/3`
+  raises on a non-zero status the way every other bang here does.
   """
-  @spec install_supervised!(t(), binary(), env()) :: {binary(), non_neg_integer()}
-  def install_supervised!(%__MODULE__{} = deployment, vsn, env \\ []) do
+  @spec install_supervised(t(), binary(), env()) :: {binary(), non_neg_integer()}
+  def install_supervised(%__MODULE__{} = deployment, vsn, env \\ []) do
     pid = os_pid(deployment)
 
     installing = Task.async(fn -> castle(deployment, ["install", vsn], env) end)
@@ -415,6 +427,21 @@ defmodule Forecastle.Deployment do
     start!(deployment, env)
 
     Task.await(installing, @install_timeout)
+  end
+
+  @doc """
+  `install_supervised/3`, raising on a non-zero exit.
+
+  The install can fail on either side of the reboot, and the far side is the
+  one a bang name is doing work for: `bin/castle install` polls for the version
+  it installed *after* the release has come back, so an upgrade that rolled back
+  on the way up is reported here and nowhere earlier. Returning the tuple under
+  a bang name left that for a caller to notice, and a test written the way the
+  documentation suggests - substituting this for `castle!/3` - would not have.
+  """
+  @spec install_supervised!(t(), binary(), env()) :: binary()
+  def install_supervised!(%__MODULE__{} = deployment, vsn, env \\ []) do
+    deployment |> install_supervised(vsn, env) |> ok!("castle", ["install", vsn])
   end
 
   # The old process going away is what says the install really rebooted. What

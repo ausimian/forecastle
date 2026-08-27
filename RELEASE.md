@@ -897,8 +897,11 @@
       {:ok, deployment: deployment}
     end
 
-    test "kept counting across the upgrade", %{deployment: deployment} do
-      assert Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.count())") == "1"
+    test "moved to 1.1.0 and took the count with it", %{deployment: deployment} do
+      assert Deployment.rpc!(deployment, "IO.puts(inspect(MyApp.Counter.info()))") ==
+               ~s({"1.1.0", 1})
+
+      assert Deployment.version(deployment) == "1.1.0"
     end
   end
   ```
@@ -909,6 +912,15 @@
   flight for another — and a task would have had to hardcode one answer. As a
   case template it composes with tags, with CI and with the project's own
   assertions.
+
+  What it does have to say about writing them is that a count which survived is
+  not evidence that anything moved: an appup that does not mention a module
+  leaves that module's old code serving calls, and unchanged code preserves a
+  count perfectly. So the assertion above reads a version the module carries as
+  a compile-time literal — a fact about the code executing the call — alongside
+  `Deployment.version/1`, which is the fact about the release, and they are
+  different questions. `Forecastle.UpgradeCase` documents the shape of such a
+  module.
 
   The release under test is named with the same baseline grammar as
   `upgrade_from:` and `mix castle.relup`, so it can be the artefact that actually
@@ -928,12 +940,21 @@
   `HEART_COMMAND` is unset, and the supervisor outside the release owns the
   restart. There is deliberately no single call for both: a hot upgrade never
   leaves its process, so waiting for that process to exit would be waiting for
-  something that is not coming.
+  something that is not coming. It raises the way `castle!/3` does, and what it
+  is usually raising about is on the far side of the reboot — `bin/castle
+  install` polls for the version it installed *after* the release has come back,
+  so a provisional release that rolled back on the way up is reported there and
+  nowhere earlier. `Deployment.install_supervised/3` returns `{output, status}`
+  for a test that wants to assert on the status itself.
 
   Every command a deployment runs is given an environment with the variables that
-  would otherwise leak into it unset — `ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`,
-  `ERL_FLAGS`, `ERL_ZFLAGS`, `ERL_OTP<major>_FLAGS`, `RELEASE_VM_ARGS` and the
-  rest. A `-heart` in a developer's shell or a CI image would otherwise reach
+  would otherwise leak into it unset — `MIX_ENV`, `ELIXIR_ERL_OPTIONS`,
+  `ERL_AFLAGS`, `ERL_FLAGS`, `ERL_ZFLAGS`, `ERL_OTP<major>_FLAGS`,
+  `RELEASE_VM_ARGS` and the
+  rest. `MIX_ENV` because a deployed release is started with no Mix at all,
+  while one started from a test run inherits `test` — and `config/runtime.exs`
+  is the one file a project routinely shares between the two. A `-heart` in a
+  developer's shell or a CI image would otherwise reach
   every release the tests start, and a release that already supplies one is then
   given two, which hangs the boot having printed nothing.
   `Deployment.scrubbed_env/1` exposes the same list for the `mix release` that

@@ -52,17 +52,49 @@ defmodule Forecastle.UpgradeCase do
           Deployment.stage!(deployment, @next)
           Deployment.castle!(deployment, ["unpack", "1.1.0"])
           Deployment.castle!(deployment, ["install", "1.1.0"])
+          Deployment.castle!(deployment, ["commit"])
 
           {:ok, deployment: deployment}
         end
 
-        test "kept counting across the upgrade", %{deployment: deployment} do
-          assert Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.count())") == "1"
+        test "moved to 1.1.0 and took the count with it", %{deployment: deployment} do
+          assert Deployment.rpc!(deployment, "IO.puts(inspect(MyApp.Counter.info()))") ==
+                   ~s({"1.1.0", 1})
+
+          assert Deployment.version(deployment) == "1.1.0"
         end
       end
 
-  `castle!/3` raises on a non-zero exit, so `unpack` and `install` failing is a
-  failure of the setup rather than something a later assertion has to notice.
+  `castle!/3` raises on a non-zero exit, so `unpack`, `install` and `commit`
+  failing is a failure of the setup rather than something a later assertion has
+  to notice.
+
+  ## Assert the code as well as the state, and take the version from the code
+
+  **A count that survived is not evidence that anything moved.** An appup that
+  does not mention a module leaves that module's *old* code serving calls, with
+  the new code on disk beside it, and a count is preserved by exactly that -
+  which is the failure `mix castle.appup` exists to catch, and the reason an
+  upgrade test asserting only the state would pass one. So `info/0` above
+  reports the version alongside the count, and reports it from a literal the
+  module carries:
+
+      defmodule MyApp.Counter do
+        use GenServer
+
+        @vsn_tag Mix.Project.config()[:version]
+
+        @doc "`{the version compiled into the code serving this call, count}`"
+        def info, do: GenServer.call(__MODULE__, :info)
+
+        def handle_call(:info, _from, state), do: {:reply, {@vsn_tag, state.count}, state}
+      end
+
+  `@vsn_tag` is compiled into whichever copy of the module is executing, so an
+  old one says this process is running old code. Reading the version from
+  `Application.spec/2` or from `Deployment.version/1` instead would answer about
+  the *release*, which moves whether or not any particular module did - which is
+  why the example asserts both, and why they are different questions.
 
   ## The two transitions are installed differently
 
@@ -73,6 +105,13 @@ defmodule Forecastle.UpgradeCase do
   one has to *be* the supervisor. There is no call that covers both: a hot
   upgrade never leaves its operating system process, so waiting for that process
   to exit would be waiting for something that is not coming.
+
+  It raises the way `castle!/3` does, and the failure it is raising about is
+  usually on the far side of the reboot: `bin/castle install` polls for the
+  version it installed *after* the release has come back, so a provisional
+  release that rolled back on the way up is reported there and nowhere earlier.
+  `Forecastle.Deployment.install_supervised/3` returns `{output, status}` for a
+  test that wants to assert on the status itself.
 
   Which of the two a transition is comes from the relup, and `auto` decides it at
   generation time. A project that wants to be sure gets to say so:
