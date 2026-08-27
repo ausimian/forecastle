@@ -148,6 +148,25 @@ defmodule Forecastle.DeploymentTest do
       end
     end
 
+    # The linked task's crash report is the point of the case, not noise to read.
+    @tag :capture_log
+    test "a launcher that failed is reported as a failure, not as a hang", ctx do
+      # `Task.async/1` links, so a launcher exiting non-zero normally takes the
+      # calling process down with `launcher!/3`'s message before `Task.yield/2`
+      # returns - which is why the diagnostic was not being lost. Under a caller
+      # that traps exits, `yield` answers `{:exit, _}` instead, and the wildcard
+      # that used to be here called that a 180-second hang with nothing to
+      # report.
+      Process.flag(:trap_exit, true)
+
+      stub!(ctx.tree, "my_app", ~s|echo "no cookie file"\nexit 1\n|)
+      deployment = Deployment.new(ctx.tree, "my_app", boot_timeout: 600)
+
+      assert_raise ExUnit.AssertionError, ~r/could not be started/, fn ->
+        Deployment.start!(deployment)
+      end
+    end
+
     test "the bang forms name the program that failed", ctx do
       deployment = refusing!(ctx.tree)
 

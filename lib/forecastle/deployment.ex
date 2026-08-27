@@ -474,10 +474,19 @@ defmodule Forecastle.Deployment do
   def start!(%__MODULE__{} = deployment, env \\ []) do
     started = Task.async(fn -> launcher!(deployment, ["daemon"], env) end)
 
+    # `nil` and nothing else is the deadline. `Task.async/1` links, so a launcher
+    # that exits non-zero normally takes this process down with `launcher!/3`'s
+    # message before `Task.yield/2` returns at all - measured: `setup_all` does
+    # not trap exits, and the raise arrives as an `(EXIT from ...)` carrying the
+    # launcher's own output. But a caller that *does* trap them gets
+    # `{:exit, reason}` here, and a wildcard called that a 180-second hang and
+    # said there was no output to report, which is a description of a different
+    # failure entirely.
     output =
       case Task.yield(started, @start_timeout) do
         {:ok, output} -> output
-        _no_answer -> abandoned!(started, deployment)
+        nil -> abandoned!(started, deployment)
+        {:exit, reason} -> flunk("#{deployment.root} could not be started: #{inspect(reason)}")
       end
 
     # The same environment the start was given, because it may be what says
