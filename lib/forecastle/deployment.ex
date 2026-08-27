@@ -548,26 +548,52 @@ defmodule Forecastle.Deployment do
   def await_boot!(%__MODULE__{} = deployment, env \\ []) do
     timeout = deployment.boot_timeout
 
-    booted!(deployment, env, timeout, div(timeout, @boot_interval))
+    booted!(deployment, env, timeout, System.monotonic_time(:millisecond) + timeout)
   end
 
-  # Asked before the budget is looked at, so a deadline shorter than the polling
-  # interval still gets one question. Dispatching on `div(timeout, @boot_interval)`
-  # alone made any `:boot_timeout` under 200ms report a release that was already
-  # answering as one that missed its deadline, without ever asking it. The
-  # deadline bounds the *waiting*, not the trying.
-  defp booted!(deployment, env, timeout, attempts) do
-    case launcher(deployment, ["rpc", "IO.puts(:booted)"], env) do
+  # A wall-clock deadline rather than a count of attempts, and the probe is asked
+  # before the deadline is consulted - so a `:boot_timeout` shorter than the
+  # polling interval still gets one real question rather than being answered
+  # from arithmetic.
+  defp booted!(deployment, env, timeout, deadline) do
+    case probe(deployment, env, deadline) do
       {_output, 0} ->
         :ok
 
-      {_output, _} when attempts > 0 ->
-        Process.sleep(@boot_interval) && booted!(deployment, env, timeout, attempts - 1)
-
-      {_output, _} ->
-        flunk("#{deployment.root} did not accept an rpc within #{div(timeout, 1000)}s")
+      _not_yet ->
+        if remaining(deadline) > 0 do
+          Process.sleep(@boot_interval)
+          booted!(deployment, env, timeout, deadline)
+        else
+          flunk("#{deployment.root} did not accept an rpc within #{div(timeout, 1000)}s")
+        end
     end
   end
+
+  # **Each probe is bounded, not merely the number of them.** `bin/<name> rpc` is
+  # `elixir --rpc-eval`, which reaches `:erpc.call/4` - the arity with no timeout
+  # argument, so `:infinity`. A node that has come up far enough to accept a
+  # distribution connection and then wedged therefore answers nothing, for ever,
+  # and distribution is up long before the application is: a project whose own
+  # `start/2` blocks is an ordinary way to get there. Without a bound the loop
+  # below never runs a second time, `:boot_timeout` is never consulted again, and
+  # the suite stops instead of failing - which is the hang `start!/2` puts a
+  # deadline on one layer up, arrived at from underneath.
+  #
+  # At least one interval, so that a very short deadline still buys a real
+  # attempt. `Task.shutdown/2` reaches the Elixir process and not the launcher
+  # behind it, for the reason `start!/2` records.
+  defp probe(deployment, env, deadline) do
+    asking = Task.async(fn -> launcher(deployment, ["rpc", "IO.puts(:booted)"], env) end)
+
+    case Task.yield(asking, max(remaining(deadline), @boot_interval)) ||
+           Task.shutdown(asking, :brutal_kill) do
+      {:ok, answer} -> answer
+      _no_answer -> {"", :timeout}
+    end
+  end
+
+  defp remaining(deadline), do: deadline - System.monotonic_time(:millisecond)
 
   @doc """
   Waits until the operating system process `pid` is gone, or fails the test.

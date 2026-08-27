@@ -148,6 +148,31 @@ defmodule Forecastle.DeploymentTest do
       end
     end
 
+    @tag :capture_log
+    test "bounds each probe, not just the number of them", ctx do
+      # `bin/<name> rpc` is `elixir --rpc-eval`, which reaches `:erpc.call/4` -
+      # the arity with no timeout, so `:infinity`. A node that accepts a
+      # distribution connection and then wedges answers nothing for ever, and
+      # distribution comes up long before the application does. Unbounded, the
+      # retry loop never runs again and the suite stops rather than failing.
+      #
+      # The stub stands in for that node by never answering at all. What proves
+      # the bound is the elapsed time: a minute of sleeping, cut off in under
+      # the deadline's own order of magnitude.
+      stub!(ctx.tree, "my_app", "sleep 60\n")
+
+      deployment = Deployment.new(ctx.tree, "my_app", boot_timeout: 400)
+
+      {elapsed, _} =
+        :timer.tc(fn ->
+          assert_raise ExUnit.AssertionError, ~r/did not accept an rpc within/, fn ->
+            Deployment.await_boot!(deployment)
+          end
+        end)
+
+      assert elapsed < 10_000_000, "waited #{div(elapsed, 1_000_000)}s on a 60s sleep"
+    end
+
     test "asks once however short the deadline is", ctx do
       # `div(timeout, @interval)` is zero for any deadline below the polling
       # interval, and dispatching on that alone answered without looking: a

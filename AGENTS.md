@@ -3011,6 +3011,17 @@ Three decisions in it are worth not relitigating:
   copy first — so the basename names a launcher, `bin/my_app-1.0.0`, that does
   not exist, and every command the deployment makes fails on it. The term says
   what the release is called and the filename only sometimes does.
+- **`await_boot!/2` bounds each probe and not merely the number of them.**
+  `bin/<name> rpc` is `elixir --rpc-eval`, which reaches `:erpc.call/4` — the
+  arity with no timeout argument, so `:infinity`. A node that has come up far
+  enough to accept a distribution connection and then wedged answers nothing for
+  ever, and distribution is up long before the application is, so a project
+  whose own `start/2` blocks gets there ordinarily. Unbounded, the retry loop
+  never runs a second time and `:boot_timeout` is never consulted again: the
+  suite stops instead of failing, which is the hang `start!/2` puts a deadline
+  on, arrived at from underneath it. The wait is a wall-clock deadline rather
+  than an attempt count for the same reason the probe comes before the check —
+  arithmetic on an interval answered a deadline shorter than one without asking.
 - **The deadlines fail the test and stop nothing**, which is stated in
   `start!/2` rather than left to be discovered. Closing the port behind
   `System.cmd/3` does not terminate the program on the other end of it, and
