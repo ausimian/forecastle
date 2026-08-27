@@ -46,6 +46,15 @@ defmodule Forecastle.DeploymentTest do
       assert deployment.env == [{"SOME_VAR", "value"}]
     end
 
+    test "takes a boot deadline from the project, since only it knows one", ctx do
+      # Twenty seconds describes a release that does nothing on the way up. One
+      # that runs migrations, warms a cache or waits on a dependency takes
+      # longer, and with no way to say so `start!/2` would report a healthy cold
+      # boot as a failure.
+      assert Deployment.new(ctx.tree, "my_app").boot_timeout == 20_000
+      assert Deployment.new(ctx.tree, "my_app", boot_timeout: 90_000).boot_timeout == 90_000
+    end
+
     test "reports the version an ordinary start would boot", ctx do
       assert Deployment.version(Deployment.new(ctx.tree, "my_app")) == "1.0.0"
     end
@@ -253,6 +262,36 @@ defmodule Forecastle.DeploymentTest do
       assert_raise Mix.Error, ~r/are the same directory or one is inside the other/, fn ->
         Deployment.deploy!("rel:#{ctx.rel_path}", "/")
       end
+    end
+
+    test "refuses a destination whose release is still running", ctx do
+      # The deletion that comes back as a passing test. A deployment is a stable
+      # path, so a run interrupted before its `on_exit` leaves a daemon running
+      # out of this tree - and emptying the directory does not stop that node.
+      # It goes on holding the release's distribution name, and the readiness
+      # rpc after the next start is as likely to reach it as the new system, at
+      # which point the from-version assertions pass against last run's code.
+      into = Path.join(@root, "deployed-live")
+      File.mkdir_p!(Path.join(into, "bin"))
+      stub!(into, "my_app", ~s|[ "$1" = "pid" ] && echo 4242\nexit 0\n|)
+
+      assert_raise Mix.Error, ~r/it is running as process 4242/, fn ->
+        Deployment.deploy!("rel:#{ctx.rel_path}", into)
+      end
+
+      # Refused rather than stopped, and refused without touching it.
+      assert File.exists?(Path.join(into, "bin/my_app"))
+    end
+
+    test "deploys over one that is not running", ctx do
+      # The other half, so that the refusal is about a *live* release rather
+      # than about the launcher being there at all - which it always is, since
+      # the last deployment put it there.
+      into = Path.join(@root, "deployed-dead")
+      File.mkdir_p!(Path.join(into, "bin"))
+      stub!(into, "my_app", "exit 1\n")
+
+      assert Deployment.deploy!("rel:#{ctx.rel_path}", into).root == Path.expand(into)
     end
 
     test "a sibling whose name merely starts the same is not an overlap", ctx do

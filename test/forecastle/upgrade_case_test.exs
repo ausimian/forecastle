@@ -31,10 +31,14 @@ defmodule Forecastle.UpgradeCaseTest do
     assert Path.dirname(Path.dirname(scratch)) =~ ~r"/castle$"
   end
 
-  test "leaves it a path rather than an empty directory", %{scratch: scratch} do
-    # Cleared on the way in, and created by the first thing that deploys into
-    # it, so a module using this template for the alias and the timeout - which
-    # is what this one is doing - leaves nothing behind to explain.
+  test "leaves it a path rather than a directory", %{scratch: scratch} do
+    # Neither created nor cleared here: created by the first thing that deploys
+    # into it, and cleared by nothing at all. A recursive delete of a stable
+    # path is how a run whose `on_exit` never ran gets its still-running daemon
+    # deleted out from under it rather than stopped - so `deploy!/3` empties its
+    # own destination, where it knows the release's name and can refuse a live
+    # one. A module using this template for the alias and the timeout, which is
+    # what this one is doing, leaves nothing behind at all.
     refute File.exists?(scratch)
   end
 end

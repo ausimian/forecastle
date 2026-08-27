@@ -2978,6 +2978,22 @@ Three decisions in it are worth not relitigating:
   containment is compared on path *segments*: a textual prefix test reads
   `<root>-next` as being inside `<root>`, and misses a root of `/` entirely,
   since `/` with a separator appended is `//`.
+- **Nothing clears the scratch directory, and `deploy!/3` refuses a destination
+  that is still running.** Clearing a stable path is the obvious thing and it
+  comes back as a *passing* test: a run interrupted before its `on_exit` leaves
+  a daemon in that tree, a recursive delete does not stop it, and the next
+  deployment comes up beside a node that still answers to the release's name —
+  with `await_boot!/1` as likely to reach the old system as the new. So
+  `Forecastle.UpgradeCase` names the directory and does nothing else to it, and
+  the liveness question is asked in `deploy!/3`, which is the one place that
+  knows the release's name. Refused rather than stopped: something is running
+  there that this run did not start.
+- **The deadlines fail the test and stop nothing**, which is stated in
+  `start!/2` rather than left to be discovered. Closing the port behind
+  `System.cmd/3` does not terminate the program on the other end of it, and
+  there is no way to reach it from here that does not amount to a port-and-pid
+  abstraction inside a test harness. A release that is *slow* rather than stuck
+  is `:boot_timeout`'s business, which is why that one is the project's to set.
 - **There is no one call that installs both kinds of transition.** A hot upgrade
   never leaves its operating system process, so `install_supervised/3` would
   wait for an exit that is not coming; a restart transition reboots and nothing

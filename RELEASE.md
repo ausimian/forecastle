@@ -931,7 +931,19 @@
   tested from a baseline rebuilt today is an upgrade tested from a release nobody
   ever deployed. A deployment is a copy rather than the resolved baseline — a
   system started in the cache under `_build/castle/baselines` would leave every
-  later resolution of that spec holding a booted, half-upgraded release.
+  later resolution of that spec holding a booted, half-upgraded release — and
+  deploying **refuses a destination whose release is still running** rather than
+  emptying the directory underneath it, since a run interrupted before its
+  teardown leaves a node that a recursive delete does not stop and that still
+  answers to the release's name.
+
+  A release is given 20 seconds to answer after it has been started, which
+  describes one that does nothing on the way up; an application that runs
+  migrations or waits on a dependency says how long it wants with
+  `boot_timeout:`. What the deadlines do is fail the test: nothing in Elixir can
+  reach the operating system process behind `System.cmd/3`, so a launcher that
+  hung is still hung when the failure is reported, and the harness says so
+  rather than leaving the impression it tidied up.
 
   Both kinds of transition are covered. A hot upgrade installs through
   `Deployment.castle!/3`; one that restarts the emulator installs through

@@ -1066,8 +1066,29 @@ wants to assert on the status itself.
 ### What it does for you, and what it does not
 
 `setup_all` puts a `:scratch` directory in the context, one per test module,
-under `_build/castle/deployments`. It is emptied when the module starts and left
-behind when it finishes: a deployment that failed to upgrade is the evidence.
+under `_build/castle/deployments`. It is a *path*: nothing creates it and nothing
+clears it. `Deployment.deploy!/3` empties its own destination, so what survives
+there is whatever nothing redeployed — which is exactly the evidence a failed
+upgrade left behind.
+
+`deploy!/3` **refuses a destination whose release is still running**, rather than
+deleting underneath it. A deployment lives at a stable path, so a run interrupted
+before its `on_exit` leaves a daemon there; emptying the directory would not stop
+that node, and the next start would come up beside one that still answers to the
+release's name — with the readiness rpc as likely to reach the old system as the
+new one.
+
+`Deployment.start!/2` gives the launcher a deadline and `:boot_timeout` gives the
+release one, and **both of them fail the test rather than stopping anything**:
+nothing in Elixir can reach the operating system process behind `System.cmd/3`,
+so a launcher that hung is still hung when the failure is reported. A release
+that is merely *slow* is what `:boot_timeout` is for — the default of 20 seconds
+describes a release that does nothing on the way up, and an application that runs
+migrations or waits on a dependency should say so:
+
+```elixir
+Deployment.deploy!(@shipped, Path.join(scratch, "deploy"), boot_timeout: 90_000)
+```
 
 Every command a deployment runs is given an environment with the variables that
 leak into a release unset — `MIX_ENV`, `ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`,

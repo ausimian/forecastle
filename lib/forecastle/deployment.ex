@@ -62,7 +62,7 @@ defmodule Forecastle.Deployment do
   alias Forecastle.Baseline
 
   @enforce_keys [:root, :name, :cd]
-  defstruct [:root, :name, :cd, env: []]
+  defstruct [:root, :name, :cd, env: [], boot_timeout: 20_000]
 
   @typedoc """
   Environment for a command, in the shape `System.cmd/3` takes it: a `nil` value
@@ -72,13 +72,15 @@ defmodule Forecastle.Deployment do
 
   @typedoc """
   A release tree, the name of the release inside it, the directory commands are
-  run from, and the environment every one of them carries.
+  run from, the environment every one of them carries, and how long the release
+  is given to answer after it has been started.
   """
   @type t :: %__MODULE__{
           root: Path.t(),
           name: binary(),
           cd: Path.t(),
-          env: env()
+          env: env(),
+          boot_timeout: pos_integer()
         }
 
   # How long `daemon` itself is given to return. Generous, because on a first
@@ -94,8 +96,13 @@ defmodule Forecastle.Deployment do
   # How long an operating system process is given to go away, and how often it
   # is asked. Thirty seconds, which is a reboot rather than a boot: what starts
   # the release again is the caller.
-  @exit_attempts 300
+  @exit_timeout 30_000
   @exit_interval 100
+
+  # How often a starting release is asked whether it answers yet. The deadline
+  # is the deployment's, since only the project knows what its own cold start
+  # costs; this is only the granularity.
+  @boot_interval 200
 
   # Mix variables that would otherwise redirect a build's output, and release
   # variables that would leak into a launcher a test invokes.
@@ -142,6 +149,11 @@ defmodule Forecastle.Deployment do
       tests from covering it.
     * `:env` - environment carried by every command this deployment runs, on top
       of `scrubbed_env/1` and underneath anything a call passes for itself.
+    * `:boot_timeout` - how long, in milliseconds, the release is given to answer
+      an rpc after `daemon` has returned. Defaults to 20 seconds, which is a
+      description of a release that does nothing on the way up: an application
+      that runs migrations, warms a cache or waits on a dependency takes longer,
+      and its project is the only thing that knows how much longer.
   """
   @spec new(Path.t(), binary(), keyword()) :: t()
   def new(root, name, opts \\ []) when is_binary(root) and is_binary(name) do
@@ -149,7 +161,8 @@ defmodule Forecastle.Deployment do
       root: Path.expand(root),
       name: name,
       cd: Path.expand(Keyword.get(opts, :cd, File.cwd!())),
-      env: Keyword.get(opts, :env, [])
+      env: Keyword.get(opts, :env, []),
+      boot_timeout: Keyword.get(opts, :boot_timeout, 20_000)
     }
   end
 
@@ -178,14 +191,45 @@ defmodule Forecastle.Deployment do
     root = Path.expand("../../..", baseline.rel_path)
     into = Path.expand(into)
 
+    name = Path.basename(baseline.rel_path)
+
     refuse_unusable!(spec, baseline.rel_path, root)
     refuse_overlap!(spec, root, into)
+    refuse_running!(name, into)
 
     File.rm_rf!(into)
     File.mkdir_p!(Path.dirname(into))
     File.cp_r!(root, into)
 
-    new(into, Path.basename(baseline.rel_path), opts)
+    new(into, name, opts)
+  end
+
+  # **A destination that is still running is the one deletion that comes back as
+  # a passing test.** A deployment is a stable path, so a run that was
+  # interrupted before its `on_exit` - Ctrl-C, a killed CI job - leaves a daemon
+  # running out of this exact tree. Emptying it does not stop that node: it goes
+  # on holding the release's distribution name, and the next `start!/2` either
+  # loses the name to it or, worse, `await_boot!/1` gets an answer from it. The
+  # test then reads a system running the previous run's code out of a directory
+  # that no longer exists, and the from-version assertions pass.
+  #
+  # Refused rather than stopped. Something is running here that this run did not
+  # start, and taking it down on a guess is a bigger decision than declining to
+  # delete it.
+  defp refuse_running!(name, into) do
+    launcher = Path.join(into, "bin/#{name}")
+
+    with true <- File.regular?(launcher),
+         {output, 0} <- System.cmd(launcher, ["pid"], stderr_to_stdout: true, env: scrubbed_env()) do
+      Mix.raise(
+        "#{into} already holds a #{name} deployment, and it is running as process " <>
+          "#{String.trim(output)}. Deploying would empty the directory underneath it " <>
+          "without stopping it, leaving a node that still answers to this release's " <>
+          "name. Stop it first - `#{launcher} stop`."
+      )
+    else
+      _not_running -> :ok
+    end
   end
 
   # **The release root is three directories above the `.rel`, and nothing on the
@@ -307,6 +351,18 @@ defmodule Forecastle.Deployment do
   deadline of its own and `setup_all` has no ExUnit timeout, so without this a
   regression in the `-heart` guard stops the suite for as long as whatever is
   running it will wait. Measured, by putting the guard back the way it was.
+
+  **What the deadline does is fail the test, and that is all it does.** Nothing
+  here can reach the operating system process behind `System.cmd/3` - closing
+  the port does not terminate the program on the other end of it - so a launcher
+  that hung is still hung when the failure is reported, and a boot that was
+  merely slow may finish afterwards and leave a node running. The same goes for
+  the install in `install_supervised/3`. Both are already-failing situations
+  that somebody is about to look at, and killing a real deployment on a guess
+  would take away what they came to look at; what would not be acceptable is the
+  harness leaving the impression that it had tidied up, so it says here that it
+  has not. `:boot_timeout` is where a release that is slow rather than stuck
+  belongs.
   """
   @spec start!(t(), env()) :: binary()
   def start!(%__MODULE__{} = deployment, env \\ []) do
@@ -357,18 +413,32 @@ defmodule Forecastle.Deployment do
   @spec os_pid(t()) :: binary()
   def os_pid(%__MODULE__{} = deployment), do: launcher!(deployment, ["pid"])
 
-  @doc "Waits until the release accepts an rpc, or fails the test."
-  @spec await_boot!(t(), non_neg_integer()) :: :ok
-  def await_boot!(deployment, attempts \\ 100)
+  @doc """
+  Waits until the release accepts an rpc, or fails the test.
 
-  def await_boot!(%__MODULE__{} = deployment, 0) do
-    flunk("#{deployment.root} did not accept an rpc within the timeout")
+  The deadline is the deployment's `:boot_timeout`, or one given here. A release
+  that does nothing on the way up answers in a second or two; one that runs
+  migrations or waits on a dependency does not, and how long it should be given
+  is a property of the project rather than of this harness.
+  """
+  @spec await_boot!(t()) :: :ok
+  def await_boot!(%__MODULE__{} = deployment) do
+    await_boot!(deployment, deployment.boot_timeout)
   end
 
-  def await_boot!(%__MODULE__{} = deployment, attempts) do
+  @spec await_boot!(t(), pos_integer()) :: :ok
+  def await_boot!(%__MODULE__{} = deployment, timeout) when is_integer(timeout) do
+    booted!(deployment, timeout, div(timeout, @boot_interval))
+  end
+
+  defp booted!(deployment, timeout, 0) do
+    flunk("#{deployment.root} did not accept an rpc within #{div(timeout, 1000)}s")
+  end
+
+  defp booted!(deployment, timeout, attempts) do
     case launcher(deployment, ["rpc", "IO.puts(:booted)"]) do
       {_output, 0} -> :ok
-      {_output, _} -> Process.sleep(200) && await_boot!(deployment, attempts - 1)
+      {_output, _} -> Process.sleep(@boot_interval) && booted!(deployment, timeout, attempts - 1)
     end
   end
 
@@ -380,14 +450,18 @@ defmodule Forecastle.Deployment do
   replacement while the old beam still holds the distribution port is how a
   supervised restart turns into a name clash instead of a boot.
   """
-  @spec await_exit!(binary(), non_neg_integer()) :: :ok
-  def await_exit!(pid, attempts \\ @exit_attempts)
+  @spec await_exit!(binary(), pos_integer()) :: :ok
+  def await_exit!(pid, timeout \\ @exit_timeout) when is_integer(timeout) do
+    exited!(pid, timeout, div(timeout, @exit_interval))
+  end
 
-  def await_exit!(pid, 0), do: flunk("process #{pid} was still running at the timeout")
+  defp exited!(pid, timeout, 0) do
+    flunk("process #{pid} was still running #{div(timeout, 1000)}s later")
+  end
 
-  def await_exit!(pid, attempts) do
+  defp exited!(pid, timeout, attempts) do
     if running?(pid) do
-      Process.sleep(@exit_interval) && await_exit!(pid, attempts - 1)
+      Process.sleep(@exit_interval) && exited!(pid, timeout, attempts - 1)
     else
       :ok
     end
@@ -423,7 +497,7 @@ defmodule Forecastle.Deployment do
 
     installing = Task.async(fn -> castle(deployment, ["install", vsn], env) end)
 
-    await_reboot!(installing, pid, @exit_attempts)
+    await_reboot!(installing, pid, div(@exit_timeout, @exit_interval))
     start!(deployment, env)
 
     Task.await(installing, @install_timeout)
@@ -475,7 +549,7 @@ defmodule Forecastle.Deployment do
 
         flunk(
           "bin/castle install has neither finished nor taken process #{pid} with it, " <>
-            "#{div(@exit_attempts * @exit_interval, 1000)}s after it was asked for. " <>
+            "#{div(@exit_timeout, 1000)}s after it was asked for. " <>
             "A transition that restarts the emulator reboots the node, so this is an " <>
             "install that is neither failing nor rebooting."
         )

@@ -134,15 +134,20 @@ defmodule Forecastle.UpgradeCase do
   ## The scratch directory
 
   `setup_all` puts a `:scratch` directory in the context, one per test module,
-  under `_build/castle/deployments`. It is emptied when the module starts and
-  **left behind when it finishes**: a deployment that failed to upgrade is the
-  evidence, and deleting it at the end of the run would take away the release
-  tree, the logs and the `releases/RELEASES` that say what happened. The next run
-  of that module clears it.
+  under `_build/castle/deployments`. It is a *path*: nothing here creates it and
+  **nothing here clears it**. `Forecastle.Deployment.deploy!/3` empties its own
+  destination, so what survives in the scratch is whatever nothing redeployed -
+  which is exactly the evidence a failed upgrade left behind, and which deleting
+  the directory at either end of a run would have taken away.
 
-  It is a path rather than a directory until something deploys into it -
-  `deploy!/3` creates what it needs - so a suite that uses this template for the
-  rest of what it offers leaves nothing behind at all.
+  Clearing it was the obvious thing to do and it is wrong in a way that comes
+  back as a passing test. The path is stable per module, so a run interrupted
+  before its `on_exit` leaves a daemon running out of this tree; a recursive
+  delete would not stop that node, and the next deployment would come up beside
+  one that still answers to the release's name - with the readiness rpc as
+  likely to reach the old system as the new. `deploy!/3` refuses a destination
+  that is still running rather than deleting underneath it, which is the same
+  question asked in the one place that knows the release's name.
 
   Deployments are not stopped for you. A running release outlives the test that
   started it, so `on_exit(fn -> Deployment.stop(deployment) end)` belongs beside
@@ -172,19 +177,21 @@ defmodule Forecastle.UpgradeCase do
   end
 
   setup_all context do
-    scratch = scratch_dir(context.module)
-
-    # Cleared on the way in rather than on the way out. What a failed upgrade
-    # leaves on disk is the evidence - the tree that was deployed, whatever the
-    # release logged, and the RELEASES file saying which versions the system
-    # knew about - and a teardown that removed it would take that away at exactly
-    # the moment it became interesting.
+    # Named and nothing more: not created, and **not cleared**. Clearing it was
+    # the obvious thing and it was wrong in a way that comes back as a passing
+    # test. The path is stable per module, so a run interrupted before its
+    # `on_exit` - Ctrl-C, a killed CI job - leaves a daemon running out of this
+    # tree; a recursive delete here would not stop that node, and the next
+    # deployment would come up beside one that still answers to the release's
+    # name. Nothing at this level knows which releases are in there or whether
+    # any of them is alive.
     #
-    # Not created here, so that a module using this template for the alias and
-    # the timeout does not leave an empty directory behind to explain.
-    File.rm_rf!(scratch)
-
-    {:ok, scratch: scratch}
+    # `Forecastle.Deployment.deploy!/3` empties its own destination, which is
+    # the same question asked where the release name is known, and it refuses a
+    # destination that is still running rather than deleting underneath it. So
+    # what survives here is what nothing redeployed - which is the evidence a
+    # failed upgrade left.
+    {:ok, scratch: scratch_dir(context.module)}
   end
 
   # Beside `_build/castle/baselines` rather than inside an environment, which is
