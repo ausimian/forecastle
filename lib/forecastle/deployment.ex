@@ -91,6 +91,12 @@ defmodule Forecastle.Deployment do
   # outlast a reboot and a cold boot.
   @install_timeout 300_000
 
+  # How long an operating system process is given to go away, and how often it
+  # is asked. Thirty seconds, which is a reboot rather than a boot: what starts
+  # the release again is the caller.
+  @exit_attempts 300
+  @exit_interval 100
+
   # Mix variables that would otherwise redirect a build's output, and release
   # variables that would leak into a launcher a test invokes.
   #
@@ -150,8 +156,10 @@ defmodule Forecastle.Deployment do
   this test's to write to and the resolved baseline stays exactly as it was
   resolved. Options are `new/3`'s.
 
-  Refuses a destination that overlaps the release it is deploying: emptying it
-  would be deleting the thing about to be copied.
+  Refuses a spec that does not resolve to a release, and a destination that
+  overlaps the one it does. Both are asked *before* the destination is emptied:
+  everything that can be found out about the source is found out while there is
+  still nothing to lose by saying so.
   """
   @spec deploy!(binary(), Path.t(), keyword()) :: t()
   def deploy!(spec, into, opts \\ []) when is_binary(spec) and is_binary(into) do
@@ -160,6 +168,7 @@ defmodule Forecastle.Deployment do
     root = Path.expand("../../..", baseline.rel_path)
     into = Path.expand(into)
 
+    refuse_unusable!(spec, baseline.rel_path, root)
     refuse_overlap!(spec, root, into)
 
     File.rm_rf!(into)
@@ -167,6 +176,42 @@ defmodule Forecastle.Deployment do
     File.cp_r!(root, into)
 
     new(into, Path.basename(baseline.rel_path), opts)
+  end
+
+  # **The release root is three directories above the `.rel`, and nothing on the
+  # way in checks that there are three.** `Forecastle.Baseline` deliberately
+  # reads no filesystem for a `rel:` spec - it leaves that to whatever is about
+  # to use the path - and `Path.expand/2` climbing past the top of an absolute
+  # path stops at `/` rather than failing. So `rel:/tmp/missing` resolves to a
+  # root of `/`, and what used to happen next was `File.rm_rf!/1` on the
+  # destination followed by a recursive copy of the whole filesystem into it.
+  #
+  # Two questions close that, and both are about the spec rather than about the
+  # caller. The `.rel` has to be a file, which is the same thing
+  # `mix castle.relup` finds out a moment later and the reason the resolver
+  # leaves it alone. And it has to sit under `releases/<vsn>/`, because
+  # `<root>/releases/<vsn>/<name>` is the whole of what makes "three directories
+  # above" mean anything: a path shaped some other way has no root to climb to,
+  # only a directory that happens to be three levels up.
+  defp refuse_unusable!(spec, rel_path, root) do
+    cond do
+      not File.regular?(rel_path <> ".rel") ->
+        Mix.raise(
+          "#{spec} names a release file at #{rel_path}.rel, and there is no such file. " <>
+            "A `rel:` baseline is the path to a `.rel` without its extension, so " <>
+            "`rel:<root>/releases/<vsn>/<name>` is the spec that deploys `<root>`."
+        )
+
+      Path.basename(Path.dirname(Path.dirname(rel_path))) != "releases" ->
+        Mix.raise(
+          "#{spec} names #{rel_path}.rel, which is not under a `releases/<vsn>/` " <>
+            "directory, so there is no release root above it to deploy. Climbing out " <>
+            "of it anyway reaches #{root}, which is a directory rather than a release."
+        )
+
+      true ->
+        :ok
+    end
   end
 
   # A destination inside the release, or a release inside the destination, is
@@ -183,26 +228,43 @@ defmodule Forecastle.Deployment do
     end
   end
 
+  # Compared as path *segments*, because a textual prefix test gets two cases
+  # wrong in opposite directions. `<root>-next` reads as being inside `<root>`,
+  # which refuses a perfectly good sibling; and a root of `/` matches nothing at
+  # all, because `/` with a separator appended is `//`, which no absolute path
+  # begins with. The second is the one that mattered - it is what a spec with
+  # too few directories in it resolves to.
+  #
+  # A list is a prefix of itself, so this answers the two paths being the same
+  # directory as well.
   defp contains?(outer, inner) do
-    outer == inner or String.starts_with?(inner, outer <> "/")
+    List.starts_with?(Path.split(inner), Path.split(outer))
   end
 
   @doc """
   The release version an ordinary start of this deployment would boot.
 
-  Read from `releases/start_erl.data`, which is `<erts vsn> <release vsn>`. That
-  file is written by Mix at assembly and afterwards only by
+  Read from `releases/start_erl.data`, which is `<erts vsn> <release vsn>`, and
+  read the way the launcher reads it: `bin/<name>` takes `RELEASE_VSN` from
+  `cut -d' ' -f2`, so this takes the second space-separated field. **Not the
+  last one**, which is what it took while it was a private helper here. The two
+  answers differ only for a version that itself contains a space - which Castle
+  permits, since its rule is valid UTF-8 with no control characters - and for
+  one of those the launcher's answer is the one that is true about what starts.
+
+  That file is written by Mix at assembly and afterwards only by
   `release_handler:make_permanent/1`, so between an install and the commit that
   follows it this still names the version being upgraded *from* - which is the
   rollback target, and is right rather than stale.
   """
   @spec version(t()) :: binary()
   def version(%__MODULE__{} = deployment) do
-    deployment
-    |> path("releases/start_erl.data")
-    |> File.read!()
-    |> String.split()
-    |> List.last()
+    file = path(deployment, "releases/start_erl.data")
+
+    case file |> File.read!() |> String.split(" ") do
+      [_erts, vsn | _rest] -> String.trim(vsn)
+      _no_version -> Mix.raise("#{file} does not name a release version.")
+    end
   end
 
   @doc """
@@ -309,15 +371,20 @@ defmodule Forecastle.Deployment do
   supervised restart turns into a name clash instead of a boot.
   """
   @spec await_exit!(binary(), non_neg_integer()) :: :ok
-  def await_exit!(pid, attempts \\ 300)
+  def await_exit!(pid, attempts \\ @exit_attempts)
 
   def await_exit!(pid, 0), do: flunk("process #{pid} was still running at the timeout")
 
   def await_exit!(pid, attempts) do
-    case System.cmd("ps", ["-o", "pid=", "-p", pid], stderr_to_stdout: true) do
-      {_output, 0} -> Process.sleep(100) && await_exit!(pid, attempts - 1)
-      {_output, _} -> :ok
+    if running?(pid) do
+      Process.sleep(@exit_interval) && await_exit!(pid, attempts - 1)
+    else
+      :ok
     end
+  end
+
+  defp running?(pid) do
+    match?({_output, 0}, System.cmd("ps", ["-o", "pid=", "-p", pid], stderr_to_stdout: true))
   end
 
   @doc """
@@ -344,10 +411,59 @@ defmodule Forecastle.Deployment do
 
     installing = Task.async(fn -> castle(deployment, ["install", vsn], env) end)
 
-    await_exit!(pid)
+    await_reboot!(installing, pid, @exit_attempts)
     start!(deployment, env)
 
     Task.await(installing, @install_timeout)
+  end
+
+  # The old process going away is what says the install really rebooted. What
+  # this *also* watches for is the install answering first, and that is not belt
+  # and braces: `bin/castle install` polls the system for the version it
+  # installed, and on this path the system cannot answer until the release has
+  # been started again - which happens after this returns. So a task that has
+  # already finished has finished about a failure, and it is holding the only
+  # account of it.
+  #
+  # Waiting on the process alone, which is what this did while it was private to
+  # this repository's suites, spent the whole timeout and then said that a
+  # process was still running: true about the symptom, with Castle's statement
+  # of the cause collected a moment later and thrown away.
+  defp await_reboot!(installing, pid, attempts) do
+    if running?(pid) do
+      still_running!(installing, pid, attempts)
+    else
+      :ok
+    end
+  end
+
+  defp still_running!(installing, pid, attempts) do
+    case Task.yield(installing, 0) do
+      nil when attempts > 0 ->
+        Process.sleep(@exit_interval)
+        await_reboot!(installing, pid, attempts - 1)
+
+      nil ->
+        Task.shutdown(installing, :brutal_kill)
+
+        flunk(
+          "bin/castle install has neither finished nor taken process #{pid} with it, " <>
+            "#{div(@exit_attempts * @exit_interval, 1000)}s after it was asked for. " <>
+            "A transition that restarts the emulator reboots the node, so this is an " <>
+            "install that is neither failing nor rebooting."
+        )
+
+      {:ok, {output, status}} ->
+        flunk(
+          "bin/castle install exited #{status} without the release rebooting - process " <>
+            "#{pid} is still the one running. Either the install was refused, or the " <>
+            "transition is a hot upgrade and wanted castle!/3 rather than " <>
+            "install_supervised!/3. This is what the install said.\n\n#{output}"
+        )
+
+      {:exit, reason} ->
+        flunk("bin/castle install could not be run: #{inspect(reason)}")
+    end
   end
 
   @doc "Runs the stock Mix launcher, returning `{output, status}`."

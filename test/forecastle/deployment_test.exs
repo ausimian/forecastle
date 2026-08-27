@@ -49,6 +49,63 @@ defmodule Forecastle.DeploymentTest do
     test "reports the version an ordinary start would boot", ctx do
       assert Deployment.version(Deployment.new(ctx.tree, "my_app")) == "1.0.0"
     end
+
+    test "reads the version the way the launcher reads it", ctx do
+      # `bin/<name>` takes RELEASE_VSN from `cut -d' ' -f2`, so the release
+      # version is the *second* field. Taking the last one instead - which is
+      # what this did while it was a private helper - answers `rc1` for a version
+      # Castle permits and the launcher would boot as `1.2.0`.
+      File.write!(Path.join(ctx.tree, "releases/start_erl.data"), "16.2 1.2.0 rc1\n")
+
+      assert Deployment.version(Deployment.new(ctx.tree, "my_app")) == "1.2.0"
+    end
+
+    test "refuses a start_erl.data with no version in it", ctx do
+      File.write!(Path.join(ctx.tree, "releases/start_erl.data"), "16.2")
+
+      assert_raise Mix.Error, ~r/does not name a release version/, fn ->
+        Deployment.version(Deployment.new(ctx.tree, "my_app"))
+      end
+    end
+  end
+
+  describe "installing while acting as the supervisor" do
+    setup :release_tree
+
+    test "reports what an install that never rebooted said", ctx do
+      # The failure this used to swallow. `bin/castle install` polls the system
+      # for the version it installed and cannot be answered until the release is
+      # started again, which is this function's job and happens afterwards - so
+      # an install that has already exited has exited about a failure, and it is
+      # holding the only account of it. Waiting on the process alone spent thirty
+      # seconds and then reported that a process was still running.
+      #
+      # The stubs are what make this assertable without a release: a launcher
+      # that answers `pid` with this VM's own operating system process, which is
+      # certainly alive, and a `bin/castle` that refuses the way Castle would.
+      File.write!(Path.join(ctx.tree, "bin/castle"), """
+      #!/bin/sh
+      echo "Nothing to install: 1.1.0 has not been unpacked."
+      exit 3
+      """)
+
+      File.chmod!(Path.join(ctx.tree, "bin/castle"), 0o755)
+
+      File.write!(Path.join(ctx.tree, "bin/my_app"), """
+      #!/bin/sh
+      [ "$1" = "pid" ] && echo "$STUB_PID"
+      exit 0
+      """)
+
+      File.chmod!(Path.join(ctx.tree, "bin/my_app"), 0o755)
+
+      deployment =
+        Deployment.new(ctx.tree, "my_app", env: [{"STUB_PID", System.pid()}])
+
+      assert_raise ExUnit.AssertionError, ~r/Nothing to install/, fn ->
+        Deployment.install_supervised!(deployment, "1.1.0")
+      end
+    end
   end
 
   describe "deploying a baseline" do
@@ -125,6 +182,63 @@ defmodule Forecastle.DeploymentTest do
       end
 
       assert File.exists?(Path.join(ctx.tree, "releases/1.0.0/my_app.rel"))
+    end
+
+    test "refuses a spec that resolves to no release, before emptying anything", ctx do
+      # `rel:` is read off disk by whatever uses the path, and here that is a
+      # recursive copy that would name two directories and no spec. Asked before
+      # the destination is emptied, so a mistyped spec does not cost the caller
+      # the directory they aimed it at as well as the run.
+      into = Path.join(@root, "deployed-missing")
+      File.mkdir_p!(into)
+      File.write!(Path.join(into, "precious"), "not this run's to delete")
+
+      assert_raise Mix.Error, ~r/there is no such file/, fn ->
+        Deployment.deploy!("rel:#{ctx.tree}-typo/releases/1.0.0/my_app", into)
+      end
+
+      assert File.exists?(Path.join(into, "precious"))
+    end
+
+    test "refuses a spec with too few directories above the .rel to have a root" do
+      # The dangerous shape, and the reason the preflight is about the *shape* of
+      # the spec rather than about the directory it lands on. `Path.expand/2`
+      # climbing past the top of an absolute path stops at `/` instead of
+      # failing, so three parents up from `/tmp/missing` is the filesystem root -
+      # and what came after it was `File.rm_rf!/1` on the destination followed by
+      # a recursive copy of everything.
+      into = Path.join(@root, "deployed-shallow")
+      File.mkdir_p!(into)
+      File.write!(Path.join(into, "precious"), "not this run's to delete")
+
+      assert_raise Mix.Error, ~r/there is no such file/, fn ->
+        Deployment.deploy!("rel:/tmp/missing", into)
+      end
+
+      assert File.exists?(Path.join(into, "precious"))
+    end
+
+    test "refuses a .rel that exists but is not under releases/<vsn>" do
+      # The same climb, with the file present. Three directories up means
+      # something only because the grammar puts the `.rel` at
+      # `<root>/releases/<vsn>/<name>`; from anywhere else it lands on whatever
+      # happens to be three levels above.
+      flat = Path.join(@root, "flat")
+      File.mkdir_p!(flat)
+      write_rel!(Path.join(flat, "my_app.rel"))
+
+      assert_raise Mix.Error, ~r/not under a `releases\/<vsn>\/` directory/, fn ->
+        Deployment.deploy!("rel:#{flat}/my_app", Path.join(@root, "deployed-flat"))
+      end
+    end
+
+    test "refuses the filesystem root as a destination", ctx do
+      # `/` contains every absolute path, and the textual prefix test this
+      # replaced could not see that: `/` with a separator appended is `//`, which
+      # nothing begins with. So a destination of `/` reached `File.rm_rf!/1`.
+      assert_raise Mix.Error, ~r/are the same directory or one is inside the other/, fn ->
+        Deployment.deploy!("rel:#{ctx.rel_path}", "/")
+      end
     end
 
     test "a sibling whose name merely starts the same is not an overlap", ctx do
@@ -220,11 +334,8 @@ defmodule Forecastle.DeploymentTest do
     File.chmod!(Path.join(tree, "bin/my_app"), 0o755)
     File.write!(Path.join(tree, "releases/start_erl.data"), "16.2 1.0.0")
 
-    # A real release term: a version directory can hold more than one `.rel`,
-    # and telling them apart is done by reading them.
-    term = {:release, {~c"my_app", ~c"1.0.0"}, {:erts, ~c"16.2"}, [{:kernel, ~c"10.3"}]}
     rel_path = Path.join(tree, "releases/1.0.0/my_app")
-    File.write!(rel_path <> ".rel", :io_lib.format(~c"%% coding: utf-8~n~tp.~n", [term]))
+    write_rel!(rel_path <> ".rel")
 
     tarball = Path.join(dir, "my_app-1.0.0.tar.gz")
     members = for entry <- ~w(bin lib releases), do: {~c"#{entry}", ~c"#{Path.join(tree, entry)}"}
@@ -238,5 +349,13 @@ defmodule Forecastle.DeploymentTest do
     on_exit(fn -> File.rm_rf!(@root) end)
 
     {:ok, tree: tree, rel_path: rel_path, tarball: tarball}
+  end
+
+  # A real release term, because a version directory can hold more than one
+  # `.rel` and telling them apart is done by reading them.
+  defp write_rel!(path) do
+    term = {:release, {~c"my_app", ~c"1.0.0"}, {:erts, ~c"16.2"}, [{:kernel, ~c"10.3"}]}
+
+    File.write!(path, :io_lib.format(~c"%% coding: utf-8~n~tp.~n", [term]))
   end
 end
