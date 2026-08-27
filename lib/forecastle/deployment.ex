@@ -111,6 +111,12 @@ defmodule Forecastle.Deployment do
   # costs; this is only the granularity.
   @boot_interval 200
 
+  # How long a deployment already in the destination is given to say whether it
+  # is running. It is either up and answers at once or absent and fails at once,
+  # so this is only a bound on the third case - wedged - and refusing is what
+  # happens when it is reached.
+  @probe_timeout 10_000
+
   # Mix variables that would otherwise redirect a build's output, and release
   # variables that would leak into a launcher a test invokes.
   #
@@ -242,13 +248,36 @@ defmodule Forecastle.Deployment do
   # answers about a launcher that may not even be present. The caller's `:env` is
   # carried into the probe for the same reason: a deployment started with a node
   # name or cookie of its own is only reachable with them.
-  defp refuse_running!(%__MODULE__{root: into} = deployment) do
-    into
-    |> Path.join("releases/*/*.rel")
-    |> Path.wildcard()
-    |> Enum.map(&(&1 |> Path.rootname() |> Path.basename()))
-    |> Enum.uniq()
+  defp refuse_running!(%__MODULE__{} = deployment) do
+    deployment
+    |> deployed_names()
     |> Enum.each(&refuse_running_release!(deployment, &1))
+  end
+
+  # Listed rather than globbed, because the destination is a path somebody chose
+  # and `Path.wildcard/1` would read it as a pattern. A workspace called
+  # `build[1]` makes `[1]` a character class matching `build1`, so the glob finds
+  # none of the releases that are really there, the check below is asked about
+  # nothing, and a live deployment is deleted - which is the failure this guard
+  # exists to prevent, reintroduced through the guard itself. There is no
+  # escaping helper for `Path.wildcard/1`, and there is nothing here a glob was
+  # buying: two `File.ls/1` calls say it literally.
+  defp deployed_names(%__MODULE__{root: into}) do
+    releases = Path.join(into, "releases")
+
+    releases
+    |> entries()
+    |> Enum.flat_map(&entries(Path.join(releases, &1)))
+    |> Enum.filter(&(Path.extname(&1) == ".rel"))
+    |> Enum.map(&Path.rootname/1)
+    |> Enum.uniq()
+  end
+
+  defp entries(dir) do
+    case File.ls(dir) do
+      {:ok, entries} -> entries
+      {:error, _not_a_directory} -> []
+    end
   end
 
   # Through `cmd/4`, so the probe runs from the directory this deployment runs
@@ -261,17 +290,37 @@ defmodule Forecastle.Deployment do
   defp refuse_running_release!(%__MODULE__{root: into} = deployment, name) do
     launcher = Path.join(into, "bin/#{name}")
 
-    with true <- File.regular?(launcher),
-         {output, 0} <- cmd(deployment, launcher, ["pid"], []) do
-      Mix.raise(
-        "#{into} already holds a #{name} deployment, and it is running as process " <>
-          "#{String.trim(output)}. Deploying would empty the directory underneath it " <>
-          "without stopping it, leaving a node that still answers to this release's " <>
-          "name. Stop it first - `#{launcher} stop`."
-      )
-    else
-      _not_running -> :ok
+    if File.regular?(launcher) do
+      case within(deployment, launcher, ["pid"], [], @probe_timeout) do
+        {output, 0} -> refuse_deployment!(into, name, launcher, String.trim(output))
+        :timeout -> refuse_unanswered!(into, name, launcher)
+        _not_running -> :ok
+      end
     end
+  end
+
+  defp refuse_deployment!(into, name, launcher, pid) do
+    Mix.raise(
+      "#{into} already holds a #{name} deployment, and it is running as process " <>
+        "#{pid}. Deploying would empty the directory underneath it without stopping " <>
+        "it, leaving a node that still answers to this release's name. Stop it " <>
+        "first - `#{launcher} stop`."
+    )
+  end
+
+  # **A question that timed out is not an answer of "no".** The launcher's `rpc`
+  # reaches `:erpc.call/4` with no timeout, so a node that accepts a distribution
+  # connection and then wedges - suspended, stuck in its own `start/2` - never
+  # replies. Unbounded that hangs `deploy!/3` outright, and treating the timeout
+  # as "nothing running" would delete the wedged node's tree underneath it, which
+  # is the case this check exists for. So the deadline refuses.
+  defp refuse_unanswered!(into, name, launcher) do
+    Mix.raise(
+      "#{into} already holds a #{name} deployment, and it did not answer within " <>
+        "#{div(@probe_timeout, 1000)}s. A node that accepts a connection and does not " <>
+        "reply is wedged rather than absent, and deploying would empty the directory " <>
+        "underneath it. Stop it first - `#{launcher} stop`."
+    )
   end
 
   # **Out of the term, not off the filename**, because an unpacked release holds
@@ -592,15 +641,30 @@ defmodule Forecastle.Deployment do
   # deadline on one layer up, arrived at from underneath.
   #
   # At least one interval, so that a very short deadline still buys a real
-  # attempt. `Task.shutdown/2` reaches the Elixir process and not the launcher
-  # behind it, for the reason `start!/2` records.
-  defp probe(deployment, env, deadline) do
-    asking = Task.async(fn -> launcher(deployment, ["rpc", "IO.puts(:booted)"], env) end)
+  # attempt.
+  defp probe(%__MODULE__{name: name} = deployment, env, deadline) do
+    within(
+      deployment,
+      Path.join(deployment.root, "bin/#{name}"),
+      ["rpc", "IO.puts(:booted)"],
+      env,
+      max(remaining(deadline), @boot_interval)
+    )
+  end
 
-    case Task.yield(asking, max(remaining(deadline), @boot_interval)) ||
-           Task.shutdown(asking, :brutal_kill) do
+  # A command with a deadline, answering `:timeout` when it has one. Every rpc
+  # this module makes needs this: `bin/<name> rpc` is `elixir --rpc-eval`, which
+  # reaches `:erpc.call/4` - the arity with no timeout argument - so a node that
+  # accepts a connection and never replies is answered forever.
+  #
+  # `Task.shutdown/2` reaches the Elixir process and not the launcher behind it,
+  # for the reason `start!/2` records.
+  defp within(deployment, exe, args, env, timeout) do
+    asking = Task.async(fn -> cmd(deployment, exe, args, env) end)
+
+    case Task.yield(asking, timeout) || Task.shutdown(asking, :brutal_kill) do
       {:ok, answer} -> answer
-      _no_answer -> {"", :timeout}
+      _no_answer -> :timeout
     end
   end
 

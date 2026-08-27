@@ -523,6 +523,37 @@ defmodule Forecastle.DeploymentTest do
       end
     end
 
+    test "refuses a destination whose name contains glob characters", ctx do
+      # `Path.wildcard/1` would read the destination as a pattern: `build[1]`
+      # makes `[1]` a character class matching `build1`, so the glob finds none
+      # of the releases that are really in `build[1]` - and a check asked about
+      # nothing deletes a live deployment, which is the failure this guard is
+      # for, arriving through the guard.
+      into = occupied!(Path.join(@root, "build[1]"), "my_app", "echo 4242\nexit 0\n")
+
+      assert_raise Mix.Error, ~r/it is running as process 4242/, fn ->
+        Deployment.deploy!("rel:#{ctx.rel_path}", into)
+      end
+    end
+
+    test "refuses a destination whose release will not answer", ctx do
+      # A node that accepts a connection and then wedges never replies, because
+      # the launcher's rpc reaches `:erpc.call/4` with no timeout. Unbounded this
+      # hangs `deploy!/3`; answered as "nothing running" it would delete the
+      # wedged node's tree. So the deadline refuses.
+      into = occupied!(Path.join(@root, "deployed-wedged"), "my_app", "sleep 60\n")
+
+      {elapsed, _} =
+        :timer.tc(fn ->
+          assert_raise Mix.Error, ~r/did not answer within/, fn ->
+            Deployment.deploy!("rel:#{ctx.rel_path}", into)
+          end
+        end)
+
+      assert elapsed < 30_000_000, "waited #{div(elapsed, 1_000_000)}s on a 60s sleep"
+      assert File.exists?(Path.join(into, "bin/my_app"))
+    end
+
     test "deploys over one that is not running", ctx do
       # The other half, so that the refusal is about a *live* release rather
       # than about the launcher being there at all - which it always is, since
