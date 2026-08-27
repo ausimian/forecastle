@@ -42,8 +42,7 @@ defmodule Forecastle.RestartUpgradeTest do
   """
 
   use Forecastle.ReleaseCase
-
-  import Forecastle.Deployment
+  use Forecastle.UpgradeCase
 
   alias Forecastle.Fixture
 
@@ -141,7 +140,7 @@ defmodule Forecastle.RestartUpgradeTest do
     workspace = Fixture.workspace()
     relup = Path.join(workspace, "relup")
 
-    deploy = assemble!(into: "restart-deploy", vsn: @from, env: @heart_in_vm_args)
+    deploy = deployment(assemble!(into: "restart-deploy", vsn: @from, env: @heart_in_vm_args))
     next = assemble!(into: "restart-next", vsn: @to, env: @heart_in_vm_args)
 
     # `--restart`, explicitly, for the reason the hot suite asks for `--hot`: the
@@ -149,16 +148,13 @@ defmodule Forecastle.RestartUpgradeTest do
     # is what fails if it stops being generatable. `auto` would judge this edge
     # hot - the dependency's appup covers its move - so it is not the strategy
     # that produces the relup this suite needs.
-    make_relup!({deploy, @from}, {next, @to}, ["--restart"])
+    make_relup!({deploy.root, @from}, {next, @to}, ["--restart"])
     ^next = assemble!(into: "restart-next", vsn: @to, env: @heart_in_vm_args)
 
-    File.cp!(
-      Path.join(next, "sample-#{@to}.tar.gz"),
-      Path.join(deploy, "releases/sample-#{@to}.tar.gz")
-    )
+    Deployment.stage!(deploy, Path.join(next, "sample-#{@to}.tar.gz"))
 
     on_exit(fn ->
-      cmd(Path.join(deploy, "bin/sample"), ["stop"])
+      Deployment.stop(deploy)
       File.rm(relup)
     end)
 
@@ -166,94 +162,96 @@ defmodule Forecastle.RestartUpgradeTest do
     # inherited heart setting, and that warning is part of what this suite
     # asserts.
     hostile_start =
-      start!(
+      Deployment.start!(
         deploy,
         [{"SAMPLE_GREETING", @first_greeting}] ++ @hostile_heart ++ @tabbed_heart
       )
 
     booted = %{
-      os_pid: os_pid(deploy),
-      heart: rpc!(deploy, "IO.puts(inspect(:erlang.whereis(:heart)))"),
-      heart_cmd: rpc!(deploy, "IO.puts(inspect(:heart.get_cmd()))"),
-      heart_env: rpc!(deploy, @heart_report),
-      heart_args: rpc!(deploy, "IO.puts(inspect(:init.get_argument(:heart)))"),
-      tab_probe: rpc!(deploy, @probe_report),
-      erl_aflags: rpc!(deploy, ~s|IO.puts(inspect(System.get_env("ERL_AFLAGS")))|),
+      os_pid: Deployment.os_pid(deploy),
+      heart: Deployment.rpc!(deploy, "IO.puts(inspect(:erlang.whereis(:heart)))"),
+      heart_cmd: Deployment.rpc!(deploy, "IO.puts(inspect(:heart.get_cmd()))"),
+      heart_env: Deployment.rpc!(deploy, @heart_report),
+      heart_args: Deployment.rpc!(deploy, "IO.puts(inspect(:init.get_argument(:heart)))"),
+      tab_probe: Deployment.rpc!(deploy, @probe_report),
+      erl_aflags: Deployment.rpc!(deploy, ~s|IO.puts(inspect(System.get_env("ERL_AFLAGS")))|),
       elixir_erl_options:
-        rpc!(deploy, ~s|IO.puts(inspect(System.get_env("ELIXIR_ERL_OPTIONS")))|),
+        Deployment.rpc!(deploy, ~s|IO.puts(inspect(System.get_env("ELIXIR_ERL_OPTIONS")))|),
       start_output: hostile_start,
-      counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      releases: castle!(deploy, ["releases"]),
-      start_erl: File.read!(Path.join(deploy, "releases/start_erl.data"))
+      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
+      releases: Deployment.castle!(deploy, ["releases"]),
+      start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data"))
     }
 
-    castle!(deploy, ["unpack", @to])
+    Deployment.castle!(deploy, ["unpack", @to])
 
     # The first transition, abandoned. `install` reboots the node, the launcher
     # selects the provisional version on the way back up, and nothing has been
     # committed - so what a crash from here has to do is come back on @from.
-    {provisional_output, provisional_status} = install_supervised!(deploy, @to, @restart_env)
+    {provisional_output, provisional_status} =
+      Deployment.install_supervised!(deploy, @to, @restart_env)
 
     provisional = %{
       output: provisional_output,
       status: provisional_status,
-      os_pid: os_pid(deploy),
-      counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      greeting: rpc!(deploy, "IO.puts(Sample.greeting())"),
-      env_marker: rpc!(deploy, "IO.puts(Sample.env_marker())"),
-      release_env: rpc!(deploy, "IO.puts(inspect(Sample.release_env()))"),
-      releases: castle!(deploy, ["releases"]),
-      version: launcher!(deploy, ["version"]),
-      start_erl: File.read!(Path.join(deploy, "releases/start_erl.data")),
-      pending?: File.exists?(Path.join(deploy, "releases/castle-restart-pending")),
-      marker?: File.exists?(Path.join(deploy, "releases/new_start_erl.data")),
-      castle_names: Path.wildcard(Path.join(deploy, "releases/castle-*"))
+      os_pid: Deployment.os_pid(deploy),
+      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
+      greeting: Deployment.rpc!(deploy, "IO.puts(Sample.greeting())"),
+      env_marker: Deployment.rpc!(deploy, "IO.puts(Sample.env_marker())"),
+      release_env: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.release_env()))"),
+      releases: Deployment.castle!(deploy, ["releases"]),
+      version: Deployment.launcher!(deploy, ["version"]),
+      start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data")),
+      pending?: File.exists?(Path.join(deploy.root, "releases/castle-restart-pending")),
+      marker?: File.exists?(Path.join(deploy.root, "releases/new_start_erl.data")),
+      castle_names: Path.wildcard(Path.join(deploy.root, "releases/castle-*"))
     }
 
     # A crash, not a stop: `bin/sample stop` would be an orderly shutdown, and
     # what has to be survivable is the other kind.
     {_output, 0} = System.cmd("kill", ["-9", provisional.os_pid])
-    await_exit!(provisional.os_pid)
-    start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
+    Deployment.await_exit!(provisional.os_pid)
+    Deployment.start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
 
     rolled_back = %{
-      counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      releases: castle!(deploy, ["releases"]),
-      version: launcher!(deploy, ["version"])
+      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
+      releases: Deployment.castle!(deploy, ["releases"]),
+      version: Deployment.launcher!(deploy, ["version"])
     }
 
     # And again, from the release that came back, this time through to a commit.
-    {installed_output, installed_status} = install_supervised!(deploy, @to, @restart_env)
+    {installed_output, installed_status} =
+      Deployment.install_supervised!(deploy, @to, @restart_env)
 
     installed = %{output: installed_output, status: installed_status}
 
-    committed = %{output: castle!(deploy, ["commit"])}
+    committed = %{output: Deployment.castle!(deploy, ["commit"])}
     refute committed.output =~ "__CASTLE_COMMIT_"
     refute committed.output =~ "__CASTLE_NOTHING_TO_COMMIT_"
 
     committed =
       Map.merge(committed, %{
-        releases: castle!(deploy, ["releases"]),
-        version: launcher!(deploy, ["version"]),
-        start_erl: File.read!(Path.join(deploy, "releases/start_erl.data"))
+        releases: Deployment.castle!(deploy, ["releases"]),
+        version: Deployment.launcher!(deploy, ["version"]),
+        start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data"))
       })
 
     # One more restart, with no marker anywhere: what an ordinary start boots is
     # the other half of what `commit` means.
-    committed_pid = os_pid(deploy)
-    launcher!(deploy, ["stop"])
-    await_exit!(committed_pid)
+    committed_pid = Deployment.os_pid(deploy)
+    Deployment.launcher!(deploy, ["stop"])
+    Deployment.await_exit!(committed_pid)
 
     # The one start in this suite with nothing hostile in its environment, and
     # nothing for the fragment to select either, so it is what says the heart
     # warnings above are about the environment rather than about every start.
-    quiet_start = start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
+    quiet_start = Deployment.start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
 
     restarted = %{
       start_output: quiet_start,
-      heart_env: rpc!(deploy, @heart_report),
-      counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      releases: castle!(deploy, ["releases"])
+      heart_env: Deployment.rpc!(deploy, @heart_report),
+      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
+      releases: Deployment.castle!(deploy, ["releases"])
     }
 
     {:ok,
@@ -359,10 +357,10 @@ defmodule Forecastle.RestartUpgradeTest do
       # really does run it - on init:reboot(), and on a heart-beat time-out where
       # HEART_NO_KILL means the old VM is still alive - so starting anything from
       # it would risk two live nodes.
-      start = Path.join(deploy, "bin/start")
+      start = Path.join(deploy.root, "bin/start")
 
       assert File.exists?(start)
-      assert {"", 0} = System.cmd(start, ["releases/new_start_erl.data"], cd: deploy)
+      assert {"", 0} = System.cmd(start, ["releases/new_start_erl.data"], cd: deploy.root)
     end
   end
 
@@ -410,7 +408,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # which runtime.exs reads with fetch_env! - is derived from it *after*.
       # Assigning the version in place would have booted @from's vm.args, sys.config
       # and boot script under @to's name; only an exec recomputes them.
-      assert provisional.release_env =~ "#{deploy}/releases/#{@to}/vm.args"
+      assert provisional.release_env =~ "#{deploy.root}/releases/#{@to}/vm.args"
     end
 
     test "runs the project's own env.sh across the re-exec", %{provisional: provisional} do

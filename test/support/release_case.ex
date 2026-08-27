@@ -6,11 +6,20 @@ defmodule Forecastle.ReleaseCase do
   standards and are never async.
 
   Driving a release once it is assembled - starting it, upgrading it, asking it
-  questions - is `Forecastle.Deployment`, which a suite imports for itself.
+  questions - is `Forecastle.Deployment`, which ships. This is the fixture's half
+  of the arrangement and nothing more: everything here knows the sample by name -
+  `bin/sample`, `SAMPLE_VSN`, the workspace it is built in - which is exactly why
+  none of it is in `lib`.
+
+  A suite that upgrades a release adds `use Forecastle.UpgradeCase` beside this
+  one. The two compose: this one assembles, that one deploys and drives.
   """
 
   use ExUnit.CaseTemplate
 
+  import ExUnit.Assertions
+
+  alias Forecastle.Deployment
   alias Forecastle.Fixture
 
   using do
@@ -85,6 +94,60 @@ defmodule Forecastle.ReleaseCase do
     mix!(["release", "sample", "--overwrite", "--path", into], env)
     into
   end
+
+  @doc """
+  A `Forecastle.Deployment` over an assembled fixture release.
+
+  `cd:` is the workspace rather than the release root, and that is load bearing
+  in two places: `Forecastle.UpgradeTest` starts a release from there and then
+  asserts `releases/RELEASES` landed in the release anyway, and it passes a
+  *relative* `RELEASE_VM_ARGS` that only resolves if nothing changed directory on
+  the way to starting the VM.
+  """
+  def deployment(root) do
+    Deployment.new(root, "sample", cd: Fixture.workspace())
+  end
+
+  @doc """
+  Generates a relup between two assembled releases, into the workspace.
+
+  `from` and `to` are `{path, version}` pairs. `extra_args` is appended to the
+  task's arguments, which is where an upgrade strategy switch goes.
+
+  Through `mix castle.relup` as a command rather than through
+  `Forecastle.Relup`, because that is the interface a project has: the task is
+  what refuses a transition `--hot` cannot generate, and a suite that named the
+  strategy would otherwise be asserting about a function no downstream caller
+  reaches.
+
+  Returns the path of the relup it wrote.
+  """
+  def make_relup!({from, from_vsn}, {to, to_vsn}, extra_args \\ []) do
+    # No --outdir: the relup is wanted in the workspace, which is where
+    # post-assembly looks for one. The task exits non-zero if it could not
+    # generate it, so `mix!` raising is what rules out a relup left over from
+    # an earlier run satisfying the assertions below.
+    workspace = Fixture.workspace()
+    relup = Path.join(workspace, "relup")
+
+    args = ["--target", rel_path(to, to_vsn), "--fromto", rel_path(from, from_vsn)]
+
+    mix!(
+      ["castle.relup" | args ++ extra_args],
+      [{"SAMPLE_VSN", to_vsn}, {"MIX_BUILD_ROOT", Path.join(workspace, "_build-#{to_vsn}")}]
+    )
+
+    assert File.exists?(relup), "mix castle.relup did not produce a relup"
+
+    # And that it is a plan between these two versions, not merely a file.
+    contents = File.read!(relup)
+    assert contents =~ ~s("#{to_vsn}"), "relup does not target #{to_vsn}:\n\n#{contents}"
+    assert contents =~ ~s("#{from_vsn}"), "relup has no path from #{from_vsn}:\n\n#{contents}"
+
+    relup
+  end
+
+  defp rel_path(release, vsn), do: Path.join(release, "releases/#{vsn}/sample")
 
   defdelegate mix(args, env \\ []), to: Fixture
   defdelegate mix!(args, env \\ []), to: Fixture

@@ -25,8 +25,7 @@ defmodule Forecastle.UpgradeTest do
   """
 
   use Forecastle.ReleaseCase
-
-  import Forecastle.Deployment
+  use Forecastle.UpgradeCase
 
   alias Forecastle.Fixture
 
@@ -39,7 +38,7 @@ defmodule Forecastle.UpgradeTest do
     workspace = Fixture.workspace()
     relup = Path.join(workspace, "relup")
 
-    deploy = assemble!(into: "deploy", vsn: @from)
+    deploy = deployment(assemble!(into: "deploy", vsn: @from))
     next = assemble!(into: "next", vsn: @to)
 
     # `--hot`, explicitly, because a hot upgrade is the whole subject of this
@@ -48,71 +47,71 @@ defmodule Forecastle.UpgradeTest do
     # `auto` judges the edge hot - and saying so is what makes the task, rather
     # than an assertion further down, the thing that fails if this transition ever
     # stops being hot.
-    make_relup!({deploy, @from}, {next, @to}, ["--hot"])
+    make_relup!({deploy.root, @from}, {next, @to}, ["--hot"])
     # Reassemble so that post-assembly copies the relup into the release, and
     # the tarball we are about to hand to release_handler contains it.
     ^next = assemble!(into: "next", vsn: @to)
 
-    File.cp!(
-      Path.join(next, "sample-#{@to}.tar.gz"),
-      Path.join(deploy, "releases/sample-#{@to}.tar.gz")
-    )
+    Deployment.stage!(deploy, Path.join(next, "sample-#{@to}.tar.gz"))
 
     on_exit(fn ->
-      cmd(Path.join(deploy, "bin/sample"), ["stop"])
+      Deployment.stop(deploy)
       File.rm(relup)
     end)
 
-    start!(deploy, [{"SAMPLE_GREETING", "hello-from-runtime"}])
+    Deployment.start!(deploy, [{"SAMPLE_GREETING", "hello-from-runtime"}])
 
     booted = %{
-      greeting: rpc!(deploy, "IO.puts(Sample.greeting())"),
-      env_marker: rpc!(deploy, "IO.puts(Sample.env_marker())"),
-      release_env: rpc!(deploy, "IO.puts(inspect(Sample.release_env()))"),
-      counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      unmentioned: rpc!(deploy, "IO.puts(inspect(Sample.Unmentioned.info()))"),
-      os_pid: launcher!(deploy, ["pid"]),
-      releases: castle!(deploy, ["releases"]),
-      releases_file?: File.exists?(Path.join(deploy, "releases/RELEASES")),
-      dep_lib: rpc!(deploy, "IO.puts(:code.lib_dir(:sample_dep))")
+      greeting: Deployment.rpc!(deploy, "IO.puts(Sample.greeting())"),
+      env_marker: Deployment.rpc!(deploy, "IO.puts(Sample.env_marker())"),
+      release_env: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.release_env()))"),
+      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
+      unmentioned: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Unmentioned.info()))"),
+      os_pid: Deployment.os_pid(deploy),
+      releases: Deployment.castle!(deploy, ["releases"]),
+      releases_file?: File.exists?(Path.join(deploy.root, "releases/RELEASES")),
+      dep_lib: Deployment.rpc!(deploy, "IO.puts(:code.lib_dir(:sample_dep))")
     }
 
     "3" =
-      rpc!(deploy, "IO.puts(Enum.map(1..3, fn _ -> Sample.Counter.bump() end) |> List.last())")
+      Deployment.rpc!(
+        deploy,
+        "IO.puts(Enum.map(1..3, fn _ -> Sample.Counter.bump() end) |> List.last())"
+      )
 
     unpacked = %{
-      output: castle!(deploy, ["unpack", @to]),
-      releases: castle!(deploy, ["releases"]),
-      releases_file?: File.exists?(Path.join(deploy, "releases/RELEASES"))
+      output: Deployment.castle!(deploy, ["unpack", @to]),
+      releases: Deployment.castle!(deploy, ["releases"]),
+      releases_file?: File.exists?(Path.join(deploy.root, "releases/RELEASES"))
     }
 
-    installed = %{output: castle!(deploy, ["install", @to])}
+    installed = %{output: Deployment.castle!(deploy, ["install", @to])}
 
     installed =
       Map.merge(installed, %{
-        counter: rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-        unmentioned: rpc!(deploy, "IO.puts(inspect(Sample.Unmentioned.info()))"),
+        counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
+        unmentioned: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Unmentioned.info()))"),
         # Where the code path would find that module *now*, which is not where
         # the process is running from. "New code sits on disk, reachable,
         # unused" is the whole of §1.1, and this is the half of it an assertion
         # about the running process cannot show on its own.
         unmentioned_object:
-          rpc!(deploy, "IO.puts(elem(:code.get_object_code(Sample.Unmentioned), 2))"),
-        os_pid: launcher!(deploy, ["pid"]),
-        greeting: rpc!(deploy, "IO.puts(Sample.greeting())"),
-        releases: castle!(deploy, ["releases"]),
-        dep_lib: rpc!(deploy, "IO.puts(:code.lib_dir(:sample_dep))")
+          Deployment.rpc!(deploy, "IO.puts(elem(:code.get_object_code(Sample.Unmentioned), 2))"),
+        os_pid: Deployment.os_pid(deploy),
+        greeting: Deployment.rpc!(deploy, "IO.puts(Sample.greeting())"),
+        releases: Deployment.castle!(deploy, ["releases"]),
+        dep_lib: Deployment.rpc!(deploy, "IO.puts(:code.lib_dir(:sample_dep))")
       })
 
-    committed = %{output: castle!(deploy, ["commit"])}
+    committed = %{output: Deployment.castle!(deploy, ["commit"])}
     refute committed.output =~ "__CASTLE_COMMIT_"
     refute committed.output =~ "__CASTLE_NOTHING_TO_COMMIT_"
 
     committed =
       Map.merge(committed, %{
-        releases: castle!(deploy, ["releases"]),
-        version: launcher!(deploy, ["version"]),
-        start_erl: File.read!(Path.join(deploy, "releases/start_erl.data"))
+        releases: Deployment.castle!(deploy, ["releases"]),
+        version: Deployment.launcher!(deploy, ["version"]),
+        start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data"))
       })
 
     {:ok,
@@ -188,19 +187,20 @@ defmodule Forecastle.UpgradeTest do
     test "leaves a relative RELEASE_VM_ARGS resolving against the caller",
          %{deploy: deploy} do
       workspace = Fixture.workspace()
-      vsn = deploy |> Path.join("releases/start_erl.data") |> File.read!() |> vsn_of()
+      vsn = Deployment.version(deploy)
 
       File.cp!(
-        Path.join(deploy, "releases/#{vsn}/vm.args"),
+        Path.join(deploy.root, "releases/#{vsn}/vm.args"),
         Path.join(workspace, "relative.vm.args")
       )
 
       on_exit(fn -> File.rm(Path.join(workspace, "relative.vm.args")) end)
 
-      # cmd/4 runs in the workspace, which is not the release root, so this only
-      # resolves if nothing changed directory on the way to starting the VM.
+      # The deployment runs its commands in the workspace, which is not the
+      # release root, so this only resolves if nothing changed directory on the
+      # way to starting the VM.
       assert {output, 0} =
-               cmd(Path.join(deploy, "bin/sample"), ["eval", "IO.puts(:evaluated)"], [
+               Deployment.launcher(deploy, ["eval", "IO.puts(:evaluated)"], [
                  {"RELEASE_VM_ARGS", "relative.vm.args"}
                ]),
              "eval with a relative RELEASE_VM_ARGS failed"
@@ -303,7 +303,7 @@ defmodule Forecastle.UpgradeTest do
       # renames the result over sys.config with a line saying it did. The
       # preboot script this needs is what pre_assemble/1 contributes, which is
       # why this is asserted from here.
-      version_path = Path.join(deploy, "releases/#{@to}")
+      version_path = Path.join(deploy.root, "releases/#{@to}")
 
       assert File.read!(Path.join(version_path, "sys.config")) =~ "CASTLE_MATERIALISED=true"
       assert File.exists?(Path.join(version_path, "sys.config.pristine"))
@@ -330,7 +330,7 @@ defmodule Forecastle.UpgradeTest do
     end
 
     test "left no peer, and no working directory, behind", %{deploy: deploy} do
-      assert Path.wildcard(Path.join(deploy, "releases/*/castle-*")) == []
+      assert Path.wildcard(Path.join(deploy.root, "releases/*/castle-*")) == []
     end
 
     test "configures the version it installed", %{installed: installed} do
