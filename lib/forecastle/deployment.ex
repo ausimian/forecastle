@@ -410,7 +410,12 @@ defmodule Forecastle.Deployment do
         _no_answer -> abandoned!(started, deployment)
       end
 
-    await_boot!(deployment)
+    # The same environment the start was given, because it may be what says
+    # which node this is: `RELEASE_NODE` and `RELEASE_COOKIE` are both scrubbed,
+    # so a start carrying its own would come up under that identity and then be
+    # asked for by the default one - a release that started perfectly, reported
+    # as one that never answered.
+    await_boot!(deployment, env)
     output
   end
 
@@ -435,8 +440,8 @@ defmodule Forecastle.Deployment do
   nothing to stop, and a teardown that raised there would report itself instead
   of the failure that got it here.
   """
-  @spec stop(t()) :: {binary(), non_neg_integer()}
-  def stop(%__MODULE__{} = deployment), do: launcher(deployment, ["stop"])
+  @spec stop(t(), env()) :: {binary(), non_neg_integer()}
+  def stop(%__MODULE__{} = deployment, env \\ []), do: launcher(deployment, ["stop"], env)
 
   @doc """
   The operating system pid of the running release, as the release reports it.
@@ -446,35 +451,38 @@ defmodule Forecastle.Deployment do
   for telling one incarnation of the node from another and for waiting on the
   first to go away.
   """
-  @spec os_pid(t()) :: binary()
-  def os_pid(%__MODULE__{} = deployment), do: launcher!(deployment, ["pid"])
+  @spec os_pid(t(), env()) :: binary()
+  def os_pid(%__MODULE__{} = deployment, env \\ []), do: launcher!(deployment, ["pid"], env)
 
   @doc """
   Waits until the release accepts an rpc, or fails the test.
 
-  The deadline is the deployment's `:boot_timeout`, or one given here. A release
-  that does nothing on the way up answers in a second or two; one that runs
-  migrations or waits on a dependency does not, and how long it should be given
-  is a property of the project rather than of this harness.
+  The deadline is the deployment's `:boot_timeout`. A release that does nothing
+  on the way up answers in a second or two; one that runs migrations or waits on
+  a dependency does not, and how long it should be given is a property of the
+  project rather than of this harness.
+
+  `env` is the environment the rpc is made with, and it is not decoration: it is
+  how a release started under a node name or cookie of its own is reached again.
   """
-  @spec await_boot!(t()) :: :ok
-  def await_boot!(%__MODULE__{} = deployment) do
-    await_boot!(deployment, deployment.boot_timeout)
+  @spec await_boot!(t(), env()) :: :ok
+  def await_boot!(%__MODULE__{} = deployment, env \\ []) do
+    timeout = deployment.boot_timeout
+
+    booted!(deployment, env, timeout, div(timeout, @boot_interval))
   end
 
-  @spec await_boot!(t(), pos_integer()) :: :ok
-  def await_boot!(%__MODULE__{} = deployment, timeout) when is_integer(timeout) do
-    booted!(deployment, timeout, div(timeout, @boot_interval))
-  end
-
-  defp booted!(deployment, timeout, 0) do
+  defp booted!(deployment, _env, timeout, 0) do
     flunk("#{deployment.root} did not accept an rpc within #{div(timeout, 1000)}s")
   end
 
-  defp booted!(deployment, timeout, attempts) do
-    case launcher(deployment, ["rpc", "IO.puts(:booted)"]) do
-      {_output, 0} -> :ok
-      {_output, _} -> Process.sleep(@boot_interval) && booted!(deployment, timeout, attempts - 1)
+  defp booted!(deployment, env, timeout, attempts) do
+    case launcher(deployment, ["rpc", "IO.puts(:booted)"], env) do
+      {_output, 0} ->
+        :ok
+
+      {_output, _} ->
+        Process.sleep(@boot_interval) && booted!(deployment, env, timeout, attempts - 1)
     end
   end
 
@@ -529,7 +537,7 @@ defmodule Forecastle.Deployment do
   """
   @spec install_supervised(t(), binary(), env()) :: {binary(), non_neg_integer()}
   def install_supervised(%__MODULE__{} = deployment, vsn, env \\ []) do
-    pid = os_pid(deployment)
+    pid = os_pid(deployment, env)
 
     installing = Task.async(fn -> castle(deployment, ["install", vsn], env) end)
 

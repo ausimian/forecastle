@@ -123,6 +123,31 @@ defmodule Forecastle.DeploymentTest do
       assert {_output, 7} = Deployment.stop(deployment)
     end
 
+    test "a start's own environment reaches the readiness check", ctx do
+      # `RELEASE_NODE` and `RELEASE_COOKIE` are both scrubbed, so a start
+      # carrying its own comes up under that identity - and a readiness rpc made
+      # with the defaults asks the wrong node. What that looks like is a release
+      # that started perfectly and was reported as one that never answered.
+      # `daemon` succeeds either way, so what the second half below measures is
+      # the readiness rpc and not the start.
+      stub!(ctx.tree, "my_app", """
+      if [ "$1" = "daemon" ]; then exit 0; fi
+      if [ "$RELEASE_NODE" != "elsewhere" ]; then exit 1; fi
+      exit 0
+      """)
+
+      deployment = Deployment.new(ctx.tree, "my_app", boot_timeout: 600)
+
+      assert Deployment.start!(deployment, [{"RELEASE_NODE", "elsewhere"}]) == ""
+
+      # And the failing half, so that the case above is about the environment
+      # arriving rather than about the stub answering everything. The deadline
+      # is the deployment's, which is what makes this quick.
+      assert_raise ExUnit.AssertionError, ~r/did not accept an rpc within/, fn ->
+        Deployment.start!(deployment)
+      end
+    end
+
     test "the bang forms name the program that failed", ctx do
       deployment = refusing!(ctx.tree)
 
@@ -160,6 +185,26 @@ defmodule Forecastle.DeploymentTest do
 
       assert_raise ExUnit.AssertionError, ~r/Nothing to unpack/, fn ->
         Deployment.install_supervised(deployment, "1.1.0")
+      end
+    end
+
+    test "asks for the pid with the environment the install was given", ctx do
+      # The pid it waits on is read before the install starts, and it is read
+      # from a node the install's own environment may be what identifies. Read
+      # with the defaults instead, it fails, `launcher!/3` raises, and the
+      # install never happens.
+      stub!(ctx.tree, "my_app", """
+      if [ "$RELEASE_NODE" != "elsewhere" ]; then exit 1; fi
+      if [ "$1" = "pid" ]; then echo #{System.pid()}; fi
+      exit 0
+      """)
+
+      stub!(ctx.tree, "castle", ~s|echo "Nothing to unpack."\nexit 3\n|)
+
+      deployment = Deployment.new(ctx.tree, "my_app")
+
+      assert_raise ExUnit.AssertionError, ~r/Nothing to unpack/, fn ->
+        Deployment.install_supervised(deployment, "1.1.0", [{"RELEASE_NODE", "elsewhere"}])
       end
     end
 

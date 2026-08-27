@@ -38,7 +38,14 @@ defmodule Sample.MixProject do
       # what exercises them together. Back to `release/1.0.0` when that tree
       # merges - the same unenforced step as last time.
       {:castle, github: "ausimian/castle", branch: "feature/upgrade-tooling"},
-      {:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), override: true},
+      # `runtime: false`, which is how Castle declares it and therefore how a
+      # consumer gets it: Forecastle is build-time support, so it is compiled and
+      # on the code path for `mix release` and for the project's own tests, and it
+      # is not in the assembled release. This fixture stands in for a consumer in
+      # the end-to-end suites, so a release shape that did not match the
+      # documented one would leave that integration untested.
+      {:forecastle,
+       path: System.get_env("FORECASTLE_PATH", @forecastle), override: true, runtime: false},
       # An application the relup never mentions, versioned in step with this
       # one, so that "release_handler knows its version changed" is observable
       # from outside the system. See dep/mix.exs.

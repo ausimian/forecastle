@@ -175,16 +175,35 @@ defmodule Forecastle.DownstreamUpgradeTest do
 
   describe "what a project depending on Forecastle is given" do
     test "the harness compiled into its build" do
-      # The fixture depends on Forecastle by path, so its build directory is a
-      # real consumer's. Castle names Forecastle `runtime: false`, which keeps it
-      # out of releases and changes nothing about this: a build-time dependency
-      # is compiled and on the code path wherever the project's own tests run.
+      # The fixture takes Forecastle the way Castle declares it - by path here,
+      # but `runtime: false` - so its build directory is a real consumer's. That
+      # a build-time dependency is still compiled and on the code path wherever
+      # the project's own tests run is the whole of what makes the harness
+      # reachable, and it is a fact about the build rather than about the
+      # release.
       ebin = Path.join(Fixture.workspace(), "_build-#{@from}/prod/lib/forecastle/ebin")
 
       for module <- [Forecastle.Deployment, Forecastle.UpgradeCase] do
         assert File.exists?(Path.join(ebin, "#{module}.beam")),
                "#{inspect(module)} did not reach a project that depends on Forecastle"
       end
+    end
+
+    test "and none of it in the release that was deployed", %{deployment: deployment} do
+      # The other half, and the one the claim rests on: `runtime: false` is what
+      # keeps a build-time dependency out of the artefact. Without this the first
+      # case is satisfied by any dependency at all, and every end-to-end path
+      # here would be exercising a release shape the documentation says does not
+      # happen.
+      assert Path.wildcard(Path.join(deployment.root, "lib/forecastle-*")) == []
+
+      rel =
+        deployment.root
+        |> Path.join("releases/#{@to}/sample.rel")
+        |> File.read!()
+
+      refute rel =~ "forecastle"
+      assert rel =~ "castle"
     end
   end
 end

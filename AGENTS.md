@@ -3037,6 +3037,17 @@ hand-maintained list is exactly how that happens; measuring it against the
 artefact is what makes a variable a later Elixir adds a failure rather than a
 hole.
 
+**The fixture takes Forecastle `runtime: false`, which is how Castle declares
+it**, and that matters beyond tidiness: the fixture is what stands in for a
+consumer in the end-to-end suites, and it used to take Forecastle as an ordinary
+runtime dependency — so `lib/forecastle-<vsn>` was in every release those suites
+assembled and the `.rel` listed it permanent, while the README said a
+`runtime: false` dependency never enters one. Every e2e path was exercising a
+shape the documentation says does not happen, and the reachability check was
+satisfied by its own setup. `Forecastle.DownstreamUpgradeTest` now asserts both
+halves: the beams in the dependency build, and nothing of Forecastle in the
+release that was deployed.
+
 `Forecastle.DownstreamUpgradeTest` is the check on the acceptance criterion
 rather than a restatement of it: everything it does below the build is shipped
 API, and one of its cases asserts that both modules really are compiled into the

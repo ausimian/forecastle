@@ -57,6 +57,8 @@ defmodule SampleDep.MixProject do
   def version, do: System.get_env("SAMPLE_DEP_VSN") || System.get_env("SAMPLE_VSN", "0.1.0")
 
   defp deps do
-    [{:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle)}]
+    # Build-time only, for the `:appup` compiler above. See the sample's own
+    # `mix.exs` for why the shape matters.
+    [{:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), runtime: false}]
   end
 end
