@@ -275,34 +275,20 @@ defmodule Forecastle.AssemblyRelupTest do
     test "a generation step after :tar, on a release a caller step made ask for one",
          %{from: from} do
       # The guard runs twice for the reason `refuse_hand_written_relup!/0` is
-      # called twice. A `Mix.Release` is the caller's to rewrite - this module's
-      # own `staged_baselines/1` says a step adding a baseline to `upgrade_from:`
-      # is a thing that happens - so the guard before `:assemble` passes for a
-      # release that names nothing yet, and only the one immediately before
-      # `:tar` sees the options as they finally are.
+      # called twice. A `Mix.Release` is the caller's to rewrite, so a steps list
+      # that adds `upgrade_from:` to a release which named nothing is one Mix
+      # accepts - the guard before `:assemble` passes for such a release, and
+      # only the one immediately before `:tar` sees the options as they finally
+      # are.
       #
       # Without that second guard this build packs an archive, generates a relup
       # into the release behind it, announces the plan and exits 0: the archive a
       # deployment is handed carries no upgrade plan at all, and nothing said so.
-      path = Path.join(Fixture.workspace(), "assembly-relup-after-tar-late")
+      {output, path} = assemble_late!("assembly-relup-after-tar-late", from, "after-tar-late")
 
-      File.rm_rf!(path)
-      on_exit(fn -> File.rm_rf!(path) end)
-
-      # Deliberately not `env/1`: the release must name no baselines when the
-      # build starts, and be given one by `add_upgrade_from/1` afterwards.
-      {output, status} =
-        mix(
-          ["release", "sample", "--overwrite", "--path", path],
-          [
-            {"SAMPLE_VSN", @to},
-            {"MIX_BUILD_ROOT", Path.join(Fixture.workspace(), "_build-#{@to}")},
-            {"SAMPLE_STEPS", "after-tar-late"},
-            {"SAMPLE_LATE_UPGRADE_FROM", "rel:" <> rel(from, @from)}
-          ]
-        )
-
-      assert status != 0, "assembly was expected to fail:\n\n#{output}"
+      # The placement rather than the change, and that ordering is deliberate:
+      # `refuse_late_upgrade_from/1` would refuse this build too, a step further
+      # on, but this guard runs first and names the thing the project can move.
       assert output =~ "after :tar"
 
       # This one refuses after `:assemble`, so the release directory is there and
@@ -310,6 +296,166 @@ defmodule Forecastle.AssemblyRelupTest do
       # the refusal landed before `:tar`, so nothing shippable was produced.
       refute File.exists?(tarball(path, @to)), "a refused build still packed an archive"
       refute File.exists?(relup_path(path)), "a refused build still generated a relup"
+    end
+  end
+
+  describe "refusing an upgrade_from: a step changed" do
+    test "a baseline named by a step after :tar, which nothing else can see", %{from: from} do
+      # The shape that made this its own issue. Generation sits exactly where
+      # `steps/1` puts it, the release names nothing while it runs, and the step
+      # that names a baseline comes after `:tar` - so every check about where
+      # generation *sits* passes, and the build used to exit 0 with no relup
+      # anywhere and nothing printed. The refusal after every step has run is the
+      # only thing that can see it.
+      {output, path} = assemble_late!("assembly-relup-late-option", from, "late-option")
+
+      assert output =~ "changed while the build was running"
+
+      # The remedy, which is the whole point of refusing rather than reporting:
+      # the same step one position earlier is honoured.
+      assert output =~ "before :assemble"
+
+      refute File.exists?(relup_path(path)), "a refused build still generated a relup"
+
+      # And what it costs, stated rather than engineered away: this refusal
+      # necessarily lands after `:tar`, so the archive is on disk. The non-zero
+      # exit is what stops a pipeline shipping it - deleting an artefact at a
+      # path the user chose is the destructive-action objection this project
+      # makes everywhere else. What matters is that the archive is not a release
+      # carrying the upgrade plan the build asked for.
+      assert {:ok, members} = :erl_tar.table(to_charlist(tarball(path, @to)), [:compressed])
+      refute ~c"releases/#{@to}/relup" in members
+    end
+
+    test "a baseline named by a step between :assemble and :tar", %{from: from} do
+      # The one shape this takes something away from, pinned because of that. A
+      # caller step there runs *before* generation, so the build used to work:
+      # the stash did not cover the new spec, `staged_baselines/2` re-resolved,
+      # and the archive got a relup for the baseline the step named. Refused now,
+      # under the same rule as the other two, so that `upgrade_from:` means one
+      # thing at one moment rather than two.
+      {output, path} = assemble_late!("assembly-relup-mid-option", from, "mid-option")
+
+      assert output =~ "changed while the build was running"
+
+      # This one refuses at generation, which is before `:tar`, so nothing
+      # shippable was produced - unlike the after-`:tar` shapes above, where the
+      # archive is already on disk when the build fails. The message does not
+      # claim otherwise either: which of the two a refused build would have been
+      # is not something the comparison can know.
+      refute File.exists?(relup_path(path)), "a refused build still generated a relup"
+      refute File.exists?(tarball(path, @to)), "a refused build still packed an archive"
+      refute output =~ "every transition in this relup is a hot upgrade"
+    end
+
+    test "a baseline named between :tar and a generation step of the project's", %{from: from} do
+      # The same change, reached the other way: the project places generation
+      # after `:tar` and names the baseline in between, so both placement guards
+      # see a release asking for nothing and pass it. This one used to announce
+      # its verdict and leave a relup on disk that the archive did not carry -
+      # the louder half of the same failure. Refused at generation, which is the
+      # first of the two positions and the cheap one.
+      {output, path} =
+        assemble_late!("assembly-relup-late-after-tar", from, "late-option-after-tar")
+
+      assert output =~ "changed while the build was running"
+
+      refute File.exists?(relup_path(path)), "a refused build still generated a relup"
+
+      refute output =~ "every transition in this relup is a hot upgrade",
+             "a refused build still announced an upgrade plan:\n\n#{output}"
+    end
+
+    test "a step that replaces the options instead of rewriting them", %{from: from} do
+      # The bypass adversarial review found, and it is a build rather than an
+      # argument: `%Mix.Release{release | options: [upgrade_from: [spec]]}` names
+      # a baseline and drops the record `pre_assemble/1` left in the same move,
+      # so a check that read a missing record as "pre-assembly never ran" passed
+      # this build through to exit 0 with no relup in the archive. Measured that
+      # way before the strictness went in.
+      {output, path} =
+        assemble_late!("assembly-relup-late-replaced", from, "late-option", "replace")
+
+      assert output =~ "no record that this is the option"
+
+      # And it names both readings of the absence, because a build reaching it
+      # has either misplaced `pre_assemble/1` or misspelled its own step, and the
+      # message cannot tell which.
+      assert output =~ "before :assemble"
+      assert output =~ "rewrite the keyword list"
+
+      assert {:ok, members} = :erl_tar.table(to_charlist(tarball(path, @to)), [:compressed])
+      refute ~c"releases/#{@to}/relup" in members
+    end
+
+    test "leaves a build alone that replaces the options and asks for no relup" do
+      # The line the strictness above is not allowed to cross. `rebuild_options/1`
+      # is the same spelling without the baseline - a step doing something else
+      # entirely - and this release names no `upgrade_from:` at all, so there is
+      # nothing wrong with what it produces. A check that refused a missing record
+      # outright failed this build over Forecastle's own bookkeeping, which is the
+      # objection that made `refuse_unpackaged_relup/1` a step rather than a
+      # refusal in `steps/1`.
+      path =
+        assemble!(
+          into: "assembly-relup-replaced-options",
+          vsn: @to,
+          env: [{"SAMPLE_STEPS", "replaced-options"}]
+        )
+
+      refute File.exists?(relup_path(path)), "a release naming no baselines generated a relup"
+      assert File.exists?(tarball(path, @to)), "the build did not produce an archive"
+    end
+
+    test "the same replacement with generation the project placed after :tar", %{from: from} do
+      # The second layout through the same bypass. Generation runs before the
+      # appended step and is deliberately lenient about a missing record - it is
+      # reachable without `pre_assemble/1`, which `read_rel!/1` answers - so this
+      # build does generate a relup and announce it. What it must not do is
+      # succeed: the step after every other one is what turns it into a failure,
+      # and the archive `:tar` packed still carries nothing.
+      {output, path} =
+        assemble_late!(
+          "assembly-relup-late-after-tar-replaced",
+          from,
+          "late-option-after-tar",
+          "replace"
+        )
+
+      assert output =~ "no record that this is the option"
+
+      assert {:ok, members} = :erl_tar.table(to_charlist(tarball(path, @to)), [:compressed])
+      refute ~c"releases/#{@to}/relup" in members
+    end
+
+    test "and honours the same step placed before :assemble", %{from: from} do
+      # The capability the refusal is protecting, and the reason it takes nothing
+      # away. `steps/1` inserts nothing in front of the caller's own
+      # pre-`:assemble` steps, so a project that works its baselines out at build
+      # time - from git tags, from an artefact store - puts that step here and is
+      # resolved and honoured exactly as a `mix.exs` naming them would be.
+      #
+      # Asserted on the artefact rather than on the exit status: what the step
+      # named has to reach the archive, or "honoured" would mean only that the
+      # build did not fail.
+      path = Path.join(Fixture.workspace(), "assembly-relup-early-option")
+
+      File.rm_rf!(path)
+      on_exit(fn -> File.rm_rf!(path) end)
+
+      output =
+        mix!(
+          ["release", "sample", "--overwrite", "--path", path],
+          late_env(from, "early-option")
+        )
+
+      assert output =~ "auto: every transition in this relup is a hot upgrade."
+
+      assert {:ok, [{@to_vsn, [{@from_vsn, [], [_ | _]}], [{@from_vsn, [], [_ | _]}]}]} =
+               :file.consult(to_charlist(relup_path(path)))
+
+      assert {:ok, members} = :erl_tar.table(to_charlist(tarball(path, @to)), [:compressed])
+      assert ~c"releases/#{@to}/relup" in members
     end
   end
 
@@ -436,6 +582,41 @@ defmodule Forecastle.AssemblyRelupTest do
 
     {output, status} =
       mix(["release", "sample", "--overwrite", "--path", path], env(specs) ++ extra_env)
+
+    assert status != 0, "assembly was expected to fail:\n\n#{output}"
+    {output, path}
+  end
+
+  # The builds whose baseline is named by a step of the project's rather than by
+  # `mix.exs`. Deliberately not `env/1`: the release has to name nothing when the
+  # build starts, so `SAMPLE_UPGRADE_FROM` stays unset and `add_upgrade_from/1`
+  # takes the spec from `SAMPLE_LATE_UPGRADE_FROM` instead - which is what leaves
+  # the test naming it in charge of what the build asks for.
+  # `style` is how `add_upgrade_from/1` writes the option: `put` rewrites the
+  # keyword list the step was handed, `replace` puts a fresh one in its stead and
+  # drops Forecastle's own keys with it. Both are things a step can do to a
+  # `Mix.Release`, and the second is the one that used to defeat the check by the
+  # same move that made it necessary.
+  defp late_env(from, mode, style \\ "put") do
+    [
+      {"SAMPLE_VSN", @to},
+      {"MIX_BUILD_ROOT", Path.join(Fixture.workspace(), "_build-#{@to}")},
+      {"SAMPLE_STEPS", mode},
+      {"SAMPLE_LATE_UPGRADE_FROM", "rel:" <> rel(from, @from)},
+      {"SAMPLE_LATE_UPGRADE_FROM_STYLE", style}
+    ]
+  end
+
+  # `mix/2` rather than `mix!/2`, for `assemble_failure!/3`'s reason: assembly is
+  # meant to fail here and what it says while failing is the thing under test.
+  defp assemble_late!(into, from, mode, style \\ "put") do
+    path = Path.join(Fixture.workspace(), into)
+
+    File.rm_rf!(path)
+    on_exit(fn -> File.rm_rf!(path) end)
+
+    {output, status} =
+      mix(["release", "sample", "--overwrite", "--path", path], late_env(from, mode, style))
 
     assert status != 0, "assembly was expected to fail:\n\n#{output}"
     {output, path}

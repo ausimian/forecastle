@@ -5,10 +5,11 @@ defmodule ForecastleTest do
 
   describe "steps/1" do
     test "wraps the assemble step" do
-      assert [pre, :assemble, post, relup, :tar] = Forecastle.steps()
+      assert [pre, :assemble, post, relup, :tar, late] = Forecastle.steps()
       assert pre == (&Forecastle.pre_assemble/1)
       assert post == (&Forecastle.post_assemble/1)
       assert relup == (&Forecastle.generate_relup/1)
+      assert late == (&Forecastle.refuse_late_upgrade_from/1)
     end
 
     test "puts relup generation after post-assembly and before :tar" do
@@ -17,7 +18,7 @@ defmodule ForecastleTest do
       # from, and after `:tar` the archive has already been packed without it.
       # Asserting the list in order is what catches a splice that put the step
       # somewhere it would find nothing or change nothing.
-      assert [_pre, :assemble, _post, relup, :tar] = Forecastle.steps()
+      assert [_pre, :assemble, _post, relup, :tar, _late] = Forecastle.steps()
       assert relup == (&Forecastle.generate_relup/1)
     end
 
@@ -25,7 +26,7 @@ defmodule ForecastleTest do
       before_step = fn release -> release end
       after_step = fn release -> release end
 
-      assert [^before_step, pre, :assemble, post, relup, :tar, ^after_step] =
+      assert [^before_step, pre, :assemble, post, relup, :tar, ^after_step, _late] =
                Forecastle.steps([before_step, :assemble, :tar, after_step])
 
       assert pre == (&Forecastle.pre_assemble/1)
@@ -42,7 +43,7 @@ defmodule ForecastleTest do
       # pins the consequence on a real release; this pins the order.
       custom = fn release -> release end
 
-      assert [pre, :assemble, post, ^custom, relup, :tar] =
+      assert [pre, :assemble, post, ^custom, relup, :tar, _late] =
                Forecastle.steps([:assemble, custom, :tar])
 
       assert pre == (&Forecastle.pre_assemble/1)
@@ -56,7 +57,9 @@ defmodule ForecastleTest do
       # itself: nothing here can tell which of its steps does the packing.
       custom = fn release -> release end
 
-      assert [_pre, :assemble, _post, ^custom, relup] = Forecastle.steps([:assemble, custom])
+      assert [_pre, :assemble, _post, ^custom, relup, _late] =
+               Forecastle.steps([:assemble, custom])
+
       assert relup == (&Forecastle.generate_relup/1)
     end
 
@@ -73,7 +76,7 @@ defmodule ForecastleTest do
       # step, in the caller's position.
       pack = fn release -> release end
 
-      assert [pre, :assemble, post, relup, ^pack] =
+      assert [pre, :assemble, post, relup, ^pack, _late] =
                Forecastle.steps([:assemble, &Forecastle.generate_relup/1, pack])
 
       assert pre == (&Forecastle.pre_assemble/1)
@@ -87,7 +90,7 @@ defmodule ForecastleTest do
       # point: a placement made deliberately is not a mistake to correct.
       custom = fn release -> release end
 
-      assert [_pre, :assemble, _post, relup, ^custom, :tar] =
+      assert [_pre, :assemble, _post, relup, ^custom, :tar, _late] =
                Forecastle.steps([:assemble, &Forecastle.generate_relup/1, custom, :tar])
 
       assert relup == (&Forecastle.generate_relup/1)
@@ -112,7 +115,7 @@ defmodule ForecastleTest do
       # add `upgrade_from:` to a release that named nothing when the first ran.
       # Immediately before `:tar` is the packaging boundary, and the only
       # position sure of the options as they finally are.
-      assert [guard, _pre, :assemble, _post, guard, :tar, relup] =
+      assert [guard, _pre, :assemble, _post, guard, :tar, relup, _late] =
                Forecastle.steps([:assemble, :tar, &Forecastle.generate_relup/1])
 
       assert guard == (&Forecastle.refuse_unpackaged_relup/1)
@@ -121,7 +124,7 @@ defmodule ForecastleTest do
       # Including where the caller placed a packageable one as well: the
       # after-`:tar` step would still overwrite what was packed. Both of the
       # caller's steps keep their places, and nothing is added but the guards.
-      assert [^guard, _pre, :assemble, _post, first, ^guard, :tar, second] =
+      assert [^guard, _pre, :assemble, _post, first, ^guard, :tar, second, _late] =
                Forecastle.steps([
                  :assemble,
                  &Forecastle.generate_relup/1,
@@ -138,7 +141,7 @@ defmodule ForecastleTest do
       # `:tar`, which `mix release` allows and this has no opinion on.
       after_tar = fn release -> release end
 
-      assert [_pre, :assemble, _post, relup, :tar, ^after_tar] =
+      assert [_pre, :assemble, _post, relup, :tar, ^after_tar, _late] =
                Forecastle.steps([:assemble, :tar, after_tar])
 
       assert relup == (&Forecastle.generate_relup/1)
@@ -154,7 +157,7 @@ defmodule ForecastleTest do
       # `:tar` and says nothing about function steps.
       caller = &Forecastle.generate_relup/1
 
-      assert [^caller, pre, :assemble, post, relup, :tar] =
+      assert [^caller, pre, :assemble, post, relup, :tar, _late] =
                Forecastle.steps([caller, :assemble, :tar])
 
       assert pre == (&Forecastle.pre_assemble/1)
@@ -168,26 +171,173 @@ defmodule ForecastleTest do
       # `Enum` failure would name a module the project never mentioned. So the
       # splice is written by hand, and the search for a caller-placed generation
       # step has to be too - it walks the same possibly-improper list.
-      assert [_pre, :assemble, _post, appended | :nonsense] =
+      assert [_pre, :assemble, _post, appended, late | :nonsense] =
                Forecastle.steps([:assemble | :nonsense])
 
       assert appended == (&Forecastle.generate_relup/1)
+      assert late == (&Forecastle.refuse_late_upgrade_from/1)
 
-      assert [_pre, :assemble, _post, spliced, :tar | :nonsense] =
+      assert [_pre, :assemble, _post, spliced, :tar, ^late | :nonsense] =
                Forecastle.steps([:assemble, :tar | :nonsense])
 
       assert spliced == (&Forecastle.generate_relup/1)
 
       # And with a caller-placed step in front of the improper tail, where the
       # search has to reach that tail to answer at all.
-      assert [_pre, :assemble, _post, placed | :nonsense] =
+      assert [_pre, :assemble, _post, placed, ^late | :nonsense] =
                Forecastle.steps([:assemble, (&Forecastle.generate_relup/1) | :nonsense])
 
       assert placed == (&Forecastle.generate_relup/1)
     end
 
+    test "reads upgrade_from: once more after every step has run" do
+      # The only position from which a step that sets the option *after* `:tar`
+      # is visible at all. Generation runs immediately before `:tar`, so at every
+      # point it could read the option that mutation has not happened yet, and by
+      # the time it has the archive is packed - a build asking for an upgrade
+      # plan and shipping an artefact with none in it, at exit 0.
+      #
+      # Appended to every list this splices rather than only to the ones where a
+      # step could still change something. Which steps run after generation is a
+      # fact about where `steps/1` puts generation, and a rule resting on that
+      # would quietly stop being true the next time the placement moves.
+      after_tar = fn release -> release end
+      pack = fn release -> release end
+
+      assert [_pre, :assemble, _post, _relup, :tar, ^after_tar, late] =
+               Forecastle.steps([:assemble, :tar, after_tar])
+
+      assert late == (&Forecastle.refuse_late_upgrade_from/1)
+
+      # Including where the caller placed generation itself and there is no
+      # `:tar` for it to precede: the packing step still runs after it.
+      assert [_pre, :assemble, _post, _relup, ^pack, ^late] =
+               Forecastle.steps([:assemble, &Forecastle.generate_relup/1, pack])
+
+      # And on the plainest list of all, where nothing can change the option and
+      # the step is a no-op that costs a call.
+      assert [_pre, :assemble, _post, _relup, :tar, ^late] = Forecastle.steps()
+    end
+
     test "is a no-op when there is no assemble step" do
       assert Forecastle.steps([:tar]) == [:tar]
+    end
+  end
+
+  describe "refuse_late_upgrade_from/1" do
+    test "refuses baselines with no record that pre-assembly resolved them" do
+      # The hole adversarial review found, and the reason a missing record is not
+      # read here as "pre-assembly never ran, so there is nothing to do". A caller
+      # step can write the option by replacing the release options rather than
+      # rewriting them, which adds the baseline and deletes the record in one
+      # move - so a check lenient about the absence let exactly the build this
+      # exists to refuse through to exit 0.
+      #
+      # This release is also the *other* thing that shape can be: a step may have
+      # replaced the options carrying the specs pre-assembly did resolve, and
+      # nothing here can tell the two apart. So the message says the record is
+      # missing rather than that the baselines were never resolved, which would
+      # be false in that case - and asserting on the wording is what keeps a
+      # refusal that cannot know from claiming it does.
+      release = release(upgrade_from: ["rel:some/release/releases/1.0.0/sample"])
+
+      error =
+        assert_raise Mix.Error, fn ->
+          Forecastle.refuse_late_upgrade_from(release)
+        end
+
+      assert error.message =~ "no record that this is the option"
+      refute error.message =~ "never resolved"
+      assert error.message =~ "rel:some/release/releases/1.0.0/sample"
+      assert error.message =~ "before :assemble"
+    end
+
+    test "leaves a release with no record and no baselines alone" do
+      # The other side of that, and the line is where this module always puts it:
+      # ask the release, not the bookkeeping. A build naming no baselines produces
+      # nothing wrong whatever became of a private key, and a release that says
+      # nothing about upgrading has to assemble exactly as it did before any of
+      # this existed. Refusing here failed builds with nothing to do with relups,
+      # which is the objection that made `refuse_unpackaged_relup/1` a step.
+      release = release([])
+
+      assert Forecastle.refuse_late_upgrade_from(release) == release
+    end
+
+    test "passes an option that is the one pre-assembly resolved" do
+      specs = ["rel:some/release/releases/1.0.0/sample"]
+
+      release =
+        release(
+          upgrade_from: specs,
+          forecastle_upgrade_from: {:baselines, specs}
+        )
+
+      assert Forecastle.refuse_late_upgrade_from(release) == release
+    end
+
+    test "passes a release that named nothing and still names nothing" do
+      release = release(forecastle_upgrade_from: :none)
+
+      assert Forecastle.refuse_late_upgrade_from(release) == release
+    end
+
+    test "refuses a baseline a step added after pre-assembly, and names the remedy" do
+      # The shape #40 is about: the option is resolved before `:assemble` and
+      # read at generation, so one that arrives afterwards is either too late to
+      # be generated from or too late to be packaged. The message has to carry
+      # both halves of the difference and where to put the option instead, since
+      # a project reaching this has a step that works and a placement that does
+      # not.
+      release =
+        release(
+          upgrade_from: ["rel:some/release/releases/1.0.0/sample"],
+          forecastle_upgrade_from: :none
+        )
+
+      error =
+        assert_raise Mix.Error, fn ->
+          Forecastle.refuse_late_upgrade_from(release)
+        end
+
+      assert error.message =~ "named no baselines"
+      assert error.message =~ "rel:some/release/releases/1.0.0/sample"
+      assert error.message =~ "before :assemble"
+    end
+
+    test "refuses a baseline list a step rewrote into a different one" do
+      release =
+        release(
+          upgrade_from: ["rel:b/releases/1.0.0/sample"],
+          forecastle_upgrade_from: {:baselines, ["rel:a/releases/1.0.0/sample"]}
+        )
+
+      assert_raise Mix.Error, ~r/changed while the build was running/, fn ->
+        Forecastle.refuse_late_upgrade_from(release)
+      end
+    end
+
+    test "refuses an option a step took away as readily as one it added" do
+      # A build that asked for an upgrade plan, had its baselines resolved, and
+      # then dropped the option is not a release that says nothing about
+      # upgrading - it is one whose answer changed. Every difference is refused,
+      # which is what makes this the same comparison at both positions.
+      release = release(forecastle_upgrade_from: {:baselines, ["rel:a/releases/1.0.0/sample"]})
+
+      assert_raise Mix.Error, ~r/changed while the build was running/, fn ->
+        Forecastle.refuse_late_upgrade_from(release)
+      end
+    end
+
+    test "refuses a malformed option for what is wrong with the option" do
+      # `upgrade_from!/1` rather than a comparison of raw values, so a step that
+      # left the option naming nothing is told that rather than being told its
+      # answer changed - the same call `refuse_unpackaged_relup/1` makes.
+      release = release(upgrade_from: [], forecastle_upgrade_from: :none)
+
+      assert_raise Mix.Error, ~r/upgrade_from: names no baselines/, fn ->
+        Forecastle.refuse_late_upgrade_from(release)
+      end
     end
   end
 
@@ -327,6 +477,35 @@ defmodule ForecastleTest do
       assert assembled.options[:forecastle_baselines] == %{
                "rel:some/release/releases/1.0.0/sample" => "some/release/releases/1.0.0/sample"
              }
+
+      # And what it *read* is recorded beside what that resolved to, which is
+      # what `refuse_late_upgrade_from/1` compares a later answer against. The
+      # resolved map cannot stand in for it: that is keyed by spec, so it answers
+      # for a set rather than for the list the project wrote.
+      assert assembled.options[:forecastle_upgrade_from] == {:baselines, specs}
+    end
+
+    test "records that the release named nothing, rather than recording nothing" do
+      # The two things a missing record would have to mean at once: a release
+      # that named no baselines, and a build where `pre_assemble/1` never ran.
+      # Only the first is a refusal when a later step names something, so the
+      # `:none` branch writes the record too.
+      assembled = Forecastle.pre_assemble(release([]))
+
+      assert assembled.options[:forecastle_upgrade_from] == :none
+    end
+
+    test "refuses to carry a record of its own that it did not write" do
+      # Mix carries release options it does not recognise straight into the
+      # assembled release, so a project that had set this key would otherwise
+      # decide what a later step is compared against. Dropped unconditionally,
+      # for the same reason the baselines key is.
+      assembled =
+        Forecastle.pre_assemble(
+          release(forecastle_upgrade_from: {:baselines, ["rel:invented/by/the/project"]})
+        )
+
+      assert assembled.options[:forecastle_upgrade_from] == :none
     end
 
     test "resolves the baselines before anything is assembled" do
@@ -426,16 +605,40 @@ defmodule ForecastleTest do
       end
     end
 
+    test "reads a missing record as a step list without pre-assembly", %{tmp_dir: tmp_dir} do
+      # The other half of the strictness `refuse_late_upgrade_from/1` has about
+      # the same absence, and the reason the two are not one function. This step
+      # is reachable without `pre_assemble/1` - a caller who placed it before
+      # `:assemble` - and `read_rel!/1` already answers that by naming the file
+      # it could not read. A second refusal here would be the same decision made
+      # in two places, which is what this module declines to do elsewhere.
+      #
+      # The assertion is which failure comes out: the target, not the record.
+      release = release(version_path: tmp_dir, upgrade_from: ["rel:some/release/1.0.0/sample"])
+
+      error =
+        assert_raise Mix.Error, fn ->
+          Forecastle.generate_relup(release)
+        end
+
+      assert error.message =~ "could not be read"
+      refute error.message =~ "no record that this is the option"
+    end
+
     test "resolves afresh when the staged baselines do not cover the option", %{
       tmp_dir: tmp_dir
     } do
-      # Two steps and any function step of the project's own run between the
-      # resolution in pre-assembly and its use here, and a Mix.Release is theirs
-      # to rewrite. A stash that no longer answers for every spec is therefore
-      # discarded rather than indexed into: generate!/7 looks specs up with
-      # Map.fetch!/2, so a missing one would arrive as a KeyError naming a map.
-      # Re-resolving is also the correct branch, not merely the safe one - what
-      # the option says now is what the relup should be generated from.
+      # A stash that does not answer for every spec is discarded rather than
+      # indexed into: generate!/7 looks specs up with Map.fetch!/2, so a missing
+      # one would arrive as a KeyError naming a map rather than as anything an
+      # author could act on.
+      #
+      # This used to be how a step that added a baseline mid-build was
+      # accommodated. That is now refused outright - see
+      # refuse_late_upgrade_from/1 - so what is left here is a guard: a steps
+      # list that reached generation without pre_assemble/1 has no stash and no
+      # record either, and a caller's step could leave something behind that is
+      # not a map at all. This release is the first of those, having no record.
       #
       # The target has to be readable for this to assert anything: reading it
       # comes first, so a test with no `.rel` here would raise the same Mix.Error
@@ -456,6 +659,49 @@ defmodule ForecastleTest do
         )
 
       assert_raise Mix.Error, ~r/which is not a file that can be read/, fn ->
+        Forecastle.generate_relup(release)
+      end
+    end
+
+    test "refuses an option a step changed, before reading the target", %{tmp_dir: tmp_dir} do
+      # The first of the two positions the comparison runs at, and the cheap one:
+      # a build that changed the option is refused before the target's `.rel` is
+      # read and before any baseline is resolved, which can mean unpacking an
+      # artefact or building a git ref.
+      #
+      # The ordering is the assertion. There is no `sample.rel` in `tmp_dir`, so
+      # a run that reached the target first would raise about the file it could
+      # not read, and that is the failure this has to come in front of.
+      release =
+        release(
+          version_path: tmp_dir,
+          upgrade_from: ["tar:/nowhere/sample.tar.gz"],
+          forecastle_upgrade_from: :none
+        )
+
+      assert_raise Mix.Error, ~r/changed while the build was running/, fn ->
+        Forecastle.generate_relup(release)
+      end
+
+      assert File.ls!(tmp_dir) == []
+    end
+
+    test "generates from an option that is the one pre-assembly resolved", %{tmp_dir: tmp_dir} do
+      # The ordinary path, and the one the refusal must not stand in front of: a
+      # record that agrees with the option is not a change, so the step goes on
+      # to do its work. It gets as far as the target it cannot read, which is the
+      # next thing wrong with this release and the evidence that the comparison
+      # let it through.
+      specs = ["tar:/nowhere/sample.tar.gz"]
+
+      release =
+        release(
+          version_path: tmp_dir,
+          upgrade_from: specs,
+          forecastle_upgrade_from: {:baselines, specs}
+        )
+
+      assert_raise Mix.Error, ~r|#{Path.join(tmp_dir, "sample.rel")} could not be read|, fn ->
         Forecastle.generate_relup(release)
       end
     end
@@ -504,7 +750,7 @@ defmodule ForecastleTest do
 
   defp release(options) do
     {release_options, struct_options} =
-      Keyword.split(options, [:upgrade_from, :forecastle_baselines])
+      Keyword.split(options, [:upgrade_from, :forecastle_baselines, :forecastle_upgrade_from])
 
     struct!(
       %Mix.Release{

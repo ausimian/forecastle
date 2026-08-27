@@ -806,7 +806,26 @@
   step as the way to customise an assembled release, so generating before it
   would describe a tree that `:tar` then packaged differently. Where a release
   has no `:tar` step, generation is appended last. A project spelling its steps
-  out by hand needs `&Forecastle.generate_relup/1` immediately before `:tar`.
+  out by hand needs `&Forecastle.generate_relup/1` immediately before `:tar`, and
+  `&Forecastle.refuse_late_upgrade_from/1` last of all.
+
+  **`upgrade_from:` is settled before `:assemble`, and a step of the project's
+  own that changes it afterwards is refused**, naming what the release said then,
+  what it says now, and where to say it instead. Pre-assembly reads the option
+  and resolves the baselines, and what a release asks for is not re-read after
+  that. A step setting it later can be too late for a relup to be generated from
+  it, and one setting it after `:tar` reaches a build that has already packed an
+  archive with no upgrade plan in it, at exit 0 — the outcome this closes.
+  Baselines worked out at build time go in a step placed *before* `:assemble`:
+  nothing is inserted in front of a project's own pre-assembly steps, so what one
+  of them sets is resolved with the rest. Have a step of your own rewrite the
+  keyword list it is handed rather than replace it: the check compares against a
+  record pre-assembly leaves in the release options, and a fresh list drops it,
+  so a release naming baselines with no record beside them is refused too — not
+  because they are known to be different, but because nothing there can tell
+  whether they are. Omitting `upgrade_from:` altogether stays a no-op whatever a
+  step does to the release options.
+  Supporting a genuinely late baseline is deferred rather than ruled out.
 
   What it does when it is given nothing, or something malformed, is part of the
   contract rather than an accident. Omitting `upgrade_from:` is a no-op and
@@ -1079,8 +1098,10 @@
   would announce the upgrade plan it had generated and exit 0 having shipped an
   artefact with none in it. A release that sets no `:upgrade_from` is unaffected:
   generation does nothing there, so the placement costs nothing and the build is
-  left alone — which is why the check happens twice, since a step of your own can
-  add the option after the first has passed.
+  left alone — which is why the check happens twice rather than once, since a
+  step of your own can add the option after the first has passed. Such a build is
+  refused for the placement it chose, which is the thing it can move; the option
+  it added is refused in its own right too, a step further on.
 - `mix castle.relup` now refuses a baseline whose version is the version being
   generated for, naming the file. `:systools` accepts such a pair and generates
   an entry from the version to itself, and since `release_handler` selects an
