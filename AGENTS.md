@@ -2967,12 +2967,28 @@ Three decisions in it are worth not relitigating:
   `deploy!/3` refuses a destination that overlaps the release for the same
   reason it copies: it empties the destination first, and an overlapping one is
   `File.rm_rf!/1` on what is about to be copied.
+- **The preflight is about the shape of the spec, and it is not decoration.**
+  The release root is three directories above the `.rel`, `Forecastle.Baseline`
+  deliberately reads no filesystem for a `rel:` spec, and `Path.expand/2`
+  climbing past the top of an absolute path stops at `/` rather than failing —
+  so `rel:/tmp/missing` resolved to a root of `/`, and the next two lines were
+  `File.rm_rf!/1` on the destination and a recursive copy of the whole
+  filesystem into it. So the `.rel` has to be a file and it has to sit under
+  `releases/<vsn>/`, both asked before anything is deleted. For the same reason
+  containment is compared on path *segments*: a textual prefix test reads
+  `<root>-next` as being inside `<root>`, and misses a root of `/` entirely,
+  since `/` with a separator appended is `//`.
 - **There is no one call that installs both kinds of transition.** A hot upgrade
   never leaves its operating system process, so `install_supervised!/3` would
   wait for an exit that is not coming; a restart transition reboots and nothing
   in the release starts it again, so `castle!/3` alone would hang. Which one a
   transition is comes from the relup, and the caller knows because the caller
-  asked for it.
+  asked for it. `install_supervised!/3` watches the install task *while* it
+  waits for the process, because `bin/castle install` cannot be answered until
+  the release has been started again — which is that function's own next line —
+  so an install that has already exited has exited about a failure and is
+  holding the only account of it. Waiting on the process alone spent the whole
+  timeout and then reported that a process was still running.
 - **Relup generation is not part of the harness.** `mix castle.relup` and
   `upgrade_from:` are already public, so a project has both without this, and
   `test/support` keeps `make_relup!/3` because what it wraps is the *fixture* —
@@ -3077,6 +3093,7 @@ directory to start from a clean slate.
 | `test/forecastle/appup_gen_test.exs` | `mix castle.appup.gen` as a command, against two assembled releases: the three writing cases, everything it refuses, what it writes for a dependency, and `mix castle.appup` run over the output |
 | `test/forecastle/dep_appup_test.exs` | `rel/appups` through real assemblies: the same transition built with a project-supplied appup and without, everything the assembly step refuses, and the merge of two sources for one application |
 | `test/forecastle/deployment_test.exs` | The shipped harness without a running system: laying a baseline out, the modes it preserves, the destinations it refuses, what it leaves the cache holding, and the environment scrub |
+| `test/forecastle/upgrade_case_test.exs` | `use Forecastle.UpgradeCase` on its own, which is how a project takes it and which every other suite here pairs with `Forecastle.ReleaseCase`: the alias, the timeout, and the scratch directory it names |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 | `test/forecastle/downstream_upgrade_test.exs` | The upgrade test a project outside this repository writes, written that way: `upgrade_from:`, a `tar:` deployment and nothing but shipped API below the build. Tagged `:e2e` |
