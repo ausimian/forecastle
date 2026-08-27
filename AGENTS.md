@@ -2941,6 +2941,56 @@ reads the appup out of the build `--to` names, and a project-supplied one is onl
 ever in an assembled release — so checking one means pointing `--to` at a `rel:`
 or `tar:` baseline. The generated file's own header says so.
 
+## The upgrade harness
+
+`Forecastle.Deployment` and `Forecastle.UpgradeCase` are what a downstream
+project points at its own release. They started as `test/support/deployment.ex`
+and the private setup of the two e2e suites; they are in `lib` now, which is the
+whole of the change — `package/0` ships `lib`, Castle takes Forecastle as
+`runtime: false`, and a build-time dependency is compiled and on the code path
+wherever the consuming project's own tests run. Nothing enters a release.
+
+**It is a case template rather than a `mix castle.upgrade.test`, and that is
+settled** — `design/upgrade-tooling.md` D6 in ausimian/castle. A task would have
+to hardcode what "the upgrade worked" means, and only the project knows: a
+counter for one, an open socket or an in-flight job for another. Nothing in
+either module asserts that anything worked, and nothing new may.
+
+Three decisions in it are worth not relitigating:
+
+- **A deployment is a copy, never the resolved baseline.** `tar:` and `ref:`
+  resolve into `_build/castle/baselines`, whose entries are immutable and read by
+  every later resolution of the same spec. Starting a release writes
+  `releases/RELEASES` into the tree, unpacking one puts another release beside it
+  and installing rewrites `start_erl.data` — so a deployment run in place would
+  leave the cache holding a booted, half-upgraded release with nothing to say so.
+  `deploy!/3` refuses a destination that overlaps the release for the same
+  reason it copies: it empties the destination first, and an overlapping one is
+  `File.rm_rf!/1` on what is about to be copied.
+- **There is no one call that installs both kinds of transition.** A hot upgrade
+  never leaves its operating system process, so `install_supervised!/3` would
+  wait for an exit that is not coming; a restart transition reboots and nothing
+  in the release starts it again, so `castle!/3` alone would hang. Which one a
+  transition is comes from the relup, and the caller knows because the caller
+  asked for it.
+- **Relup generation is not part of the harness.** `mix castle.relup` and
+  `upgrade_from:` are already public, so a project has both without this, and
+  `test/support` keeps `make_relup!/3` because what it wraps is the *fixture* —
+  `SAMPLE_VSN`, a build root per version, the workspace the relup is left in.
+
+The environment scrub has one home now, `Forecastle.Deployment.scrubbed_env/1`,
+and `Forecastle.Fixture` reads it from there. Two copies of that list is how the
+two drift, and what drifting costs is a `-heart` reaching a release the fragment
+then adds another to — a hang, printing nothing.
+
+`Forecastle.DownstreamUpgradeTest` is the check on the acceptance criterion
+rather than a restatement of it: everything it does below the build is shipped
+API, and one of its cases asserts that both modules really are compiled into the
+fixture's dependency build, which is a genuine consumer's. The hot and restart
+suites are the other half — they were rewritten onto the harness rather than left
+duplicating it, and the diff of their test bodies is nine lines, every one of
+them `deploy` becoming `deploy.root`.
+
 ## Layout
 
 | Path | Purpose |
@@ -2953,6 +3003,8 @@ or `tar:` baseline. The generated file's own header says so.
 | `lib/forecastle/appup/dep.ex` | The appups a project supplies for applications it does not own: the `rel/appups` directory, reading a name against the versions the release carries, and placing the result into the assembled release |
 | `lib/forecastle/build.ex` | Reading one build of an application and diffing two of them: the library-directory refusals, the `ebin` discovery, the `.app` resource, and the module fingerprints. Shared by the check and the generator |
 | `lib/forecastle/relup.ex` | Generating a relup: resolving baselines, classifying each transition, the three strategies, the announcement and the atomic publication. Shared by the task and the assembly step |
+| `lib/forecastle/deployment.ex` | A release tree on disk, and everything an upgrade test does to one: laying a baseline spec out, starting it, `bin/castle`, `rpc`, the environment scrub, and standing in for the supervisor a restart transition needs |
+| `lib/forecastle/upgrade_case.ex` | `Forecastle.UpgradeCase` — the case template a project uses, the scratch directory it deploys into, and where the whole recipe is written down |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
 | `lib/mix/tasks/castle.appup.ex` | `mix castle.appup` — the read-only coverage check. Non-zero when a module that moved is mentioned nowhere |
 | `lib/mix/tasks/castle.appup.gen.ex` | `mix castle.appup.gen` — drafts the entry for a transition and writes or merges it into the appup source |
@@ -2962,7 +3014,7 @@ or `tar:` baseline. The generated file's own header says so.
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it, and which ships no appup of its own when `SAMPLE_DEP_APPUP=none` |
-| `test/support` | The workspace the fixture is built in, the case template for tests that build it, and the helpers that drive one once it is built |
+| `test/support` | The workspace the fixture is built in, the case template for tests that assemble it, and `mix castle.relup` between two of them. Everything here knows the sample by name, which is why none of it is in `lib` |
 
 ## Working on this project
 
@@ -3024,8 +3076,10 @@ directory to start from a clean slate.
 | `test/forecastle/appup_source_test.exs` | The line between an appup that states a term and one that computes it, against real files in a scratch directory, and what a merge does to the file it merges into |
 | `test/forecastle/appup_gen_test.exs` | `mix castle.appup.gen` as a command, against two assembled releases: the three writing cases, everything it refuses, what it writes for a dependency, and `mix castle.appup` run over the output |
 | `test/forecastle/dep_appup_test.exs` | `rel/appups` through real assemblies: the same transition built with a project-supplied appup and without, everything the assembly step refuses, and the merge of two sources for one application |
+| `test/forecastle/deployment_test.exs` | The shipped harness without a running system: laying a baseline out, the modes it preserves, the destinations it refuses, what it leaves the cache holding, and the environment scrub |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
+| `test/forecastle/downstream_upgrade_test.exs` | The upgrade test a project outside this repository writes, written that way: `upgrade_from:`, a `tar:` deployment and nothing but shipped API below the build. Tagged `:e2e` |
 
 The `:e2e` suite is excluded by default and included by `mix precommit`. Run it
 on its own with `mix test --include e2e`. It needs no epmd daemon: the fixture

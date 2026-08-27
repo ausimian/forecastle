@@ -864,6 +864,81 @@
   recursed, and a `mix.exs` naming a `ref:` baseline should leave the option out
   when `CASTLE_BASELINE` is set in the environment.
 
+- An upgrade test harness, so a project can test that its own release survives
+  the upgrade rather than only that it builds. `Forecastle.UpgradeCase` is an
+  `ExUnit.CaseTemplate` and `Forecastle.Deployment` drives a release from
+  outside: it lays a baseline out in a directory of its own, starts it under the
+  stock Mix launcher, runs `bin/castle` and `rpc` against it, and stands in for
+  the external supervisor a transition that restarts the emulator needs. Both
+  ship as ordinary library code, so `mix test` runs an upgrade test like any
+  other test — and because Castle takes Forecastle as `runtime: false`, they are
+  there at build and test time and never enter a release.
+
+  ```elixir
+  defmodule MyApp.UpgradeTest do
+    use Forecastle.UpgradeCase
+
+    @moduletag :upgrade
+
+    setup_all %{scratch: scratch} do
+      deployment =
+        Deployment.deploy!("tar:artifacts/myapp-1.0.0.tar.gz", Path.join(scratch, "deploy"))
+
+      on_exit(fn -> Deployment.stop(deployment) end)
+
+      Deployment.start!(deployment)
+      Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.bump())")
+
+      Deployment.stage!(deployment, "_build/prod/myapp-1.1.0.tar.gz")
+      Deployment.castle!(deployment, ["unpack", "1.1.0"])
+      Deployment.castle!(deployment, ["install", "1.1.0"])
+      Deployment.castle!(deployment, ["commit"])
+
+      {:ok, deployment: deployment}
+    end
+
+    test "kept counting across the upgrade", %{deployment: deployment} do
+      assert Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.count())") == "1"
+    end
+  end
+  ```
+
+  **Nothing in it decides whether the upgrade worked**, and that is why it is a
+  case template rather than a task. What "worked" means is the project's to say —
+  a counter that kept counting for one, a socket still open or a job still in
+  flight for another — and a task would have had to hardcode one answer. As a
+  case template it composes with tags, with CI and with the project's own
+  assertions.
+
+  The release under test is named with the same baseline grammar as
+  `upgrade_from:` and `mix castle.relup`, so it can be the artefact that actually
+  shipped (`tar:`), a release already on disk (`rel:`), or a git ref built in a
+  worktree (`ref:`). `tar:` is the one to prefer here for the same reason relup
+  generation prefers it: `release_handler` selects a relup entry by from-version
+  string and never checks it against the code that is running, so an upgrade
+  tested from a baseline rebuilt today is an upgrade tested from a release nobody
+  ever deployed. A deployment is a copy rather than the resolved baseline — a
+  system started in the cache under `_build/castle/baselines` would leave every
+  later resolution of that spec holding a booted, half-upgraded release.
+
+  Both kinds of transition are covered. A hot upgrade installs through
+  `Deployment.castle!/3`; one that restarts the emulator installs through
+  `Deployment.install_supervised!/3`, which waits for the old operating system
+  process to go and starts the release again — because `bin/start` is inert,
+  `HEART_COMMAND` is unset, and the supervisor outside the release owns the
+  restart. There is deliberately no single call for both: a hot upgrade never
+  leaves its process, so waiting for that process to exit would be waiting for
+  something that is not coming.
+
+  Every command a deployment runs is given an environment with the variables that
+  would otherwise leak into it unset — `ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`,
+  `ERL_FLAGS`, `ERL_ZFLAGS`, `ERL_OTP<major>_FLAGS`, `RELEASE_VM_ARGS` and the
+  rest. A `-heart` in a developer's shell or a CI image would otherwise reach
+  every release the tests start, and a release that already supplies one is then
+  given two, which hangs the boot having printed nothing.
+  `Deployment.scrubbed_env/1` exposes the same list for the `mix release` that
+  builds the versions being tested.
+
 ### Changed
 
 - **Breaking:** `mix forecastle.relup` is now `mix castle.relup`. The task is

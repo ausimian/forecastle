@@ -913,3 +913,126 @@ while preparing the reboot, and something to select the installed version on the
 way back up, because the reboot would otherwise come back on whichever version
 `releases/start_erl.data` names. Both are in the `env.sh` hook; see
 *Upgrades that restart the emulator* above for what your supervisor has to do.
+
+## Testing an Upgrade
+
+A release that assembles is a release that builds. Whether it can be *upgraded*
+is a different question, and the only thing that answers it is starting one
+version, installing the next, and looking at what survived.
+
+`Forecastle.UpgradeCase` and `Forecastle.Deployment` are the half of that you do
+not have to write. They are ordinary `lib` code, so `mix test` runs them like any
+other test — and because Castle takes Forecastle as `runtime: false`, they are
+there at build and test time and never enter a release.
+
+**There is no `mix castle.upgrade.test`, deliberately.** A task would have to
+hardcode what "the upgrade worked" means, and only your project knows: for one it
+is a counter that kept counting, for another a socket still open or a job still
+in flight. As a case template it composes with tags, with CI and with your own
+assertions instead.
+
+### What it looks like
+
+Name the artefact you shipped, so a single `mix release` produces a tarball with
+the relup already in it:
+
+```elixir
+defp releases do
+  [
+    myapp: fn ->
+      [upgrade_from: ["tar:artifacts/myapp-1.0.0.tar.gz"]]
+      |> Castle.customize()
+    end
+  ]
+end
+```
+
+Then deploy that same artefact, start it, and install the tarball the build just
+produced:
+
+```elixir
+defmodule MyApp.UpgradeTest do
+  use Forecastle.UpgradeCase
+
+  @moduletag :upgrade
+
+  @shipped "tar:artifacts/myapp-1.0.0.tar.gz"
+  @next "_build/prod/myapp-1.1.0.tar.gz"
+
+  setup_all %{scratch: scratch} do
+    deployment = Deployment.deploy!(@shipped, Path.join(scratch, "deploy"))
+    on_exit(fn -> Deployment.stop(deployment) end)
+
+    Deployment.start!(deployment)
+    Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.bump())")
+
+    Deployment.stage!(deployment, @next)
+    Deployment.castle!(deployment, ["unpack", "1.1.0"])
+    Deployment.castle!(deployment, ["install", "1.1.0"])
+    Deployment.castle!(deployment, ["commit"])
+
+    {:ok, deployment: deployment}
+  end
+
+  test "kept counting across the upgrade", %{deployment: deployment} do
+    assert Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.count())") == "1"
+  end
+end
+```
+
+`castle!/3` raises on a non-zero exit, so an `unpack` or an `install` that failed
+is a failure of the setup rather than something an assertion further down has to
+notice. `@moduletag :upgrade` and an `ExUnit.start(exclude: [:upgrade])` keep it
+out of the ordinary `mix test` run; it boots a node, so it does not belong there.
+
+### Where the release under test comes from
+
+`Deployment.deploy!/3` takes the same baseline grammar as `upgrade_from:` and
+`mix castle.relup` — `rel:` an assembled release, `tar:` the artefact that
+shipped, `ref:` a git ref built in a worktree — so the release you upgrade can be
+the one that is actually running in production.
+
+**Prefer `tar:`, for the reason relup generation prefers it.** `release_handler`
+selects a relup entry by from-version *string* and never checks it against the
+code that is running, so an upgrade tested from a baseline rebuilt today is an
+upgrade tested from a release nobody ever deployed — which is the question the
+test was written to settle.
+
+It copies rather than deploying in place. `tar:` and `ref:` resolve into an
+immutable cache under `_build/castle/baselines`, and a system started in the
+cache would leave every later resolution of that spec holding a booted,
+half-upgraded release with nothing to say so.
+
+### The two transitions are installed differently
+
+The example above is a hot upgrade. A transition that restarts the emulator needs
+`Deployment.install_supervised!/3` in place of the `install` above, because
+nothing inside the release starts it again after the reboot: `bin/start` is
+inert, `HEART_COMMAND` is unset, and your supervisor owns the restart — so a test
+of one has to *be* the supervisor.
+
+There is no call that covers both. A hot upgrade never leaves its operating
+system process, so waiting for that process to exit would be waiting for
+something that is not coming. Which of the two a transition is comes from the
+relup, and `auto` decides it at generation time; `mix castle.relup --hot` fails
+rather than degrading, which puts the failure on the build instead of on an
+assertion much further down.
+
+### What it does for you, and what it does not
+
+`setup_all` puts a `:scratch` directory in the context, one per test module,
+under `_build/castle/deployments`. It is emptied when the module starts and left
+behind when it finishes: a deployment that failed to upgrade is the evidence.
+
+Every command a deployment runs is given an environment with the variables that
+leak into a release unset — `ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`, `ERL_FLAGS`,
+`ERL_ZFLAGS`, `ERL_OTP<major>_FLAGS`, `RELEASE_VM_ARGS` and the rest. A `-heart`
+in a developer's shell or a CI image would otherwise reach every release the
+tests start, and a release that already supplies one is then given two, which
+hangs the boot having printed nothing. `Deployment.scrubbed_env/1` is the same
+list, for the `mix release` that builds the versions being tested.
+
+Deployments are not stopped for you: a running release outlives the test that
+started it, so `on_exit(fn -> Deployment.stop(deployment) end)` belongs beside
+every `start!/2`. And nothing decides whether the upgrade worked. That is the
+whole point.
