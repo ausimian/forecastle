@@ -7,7 +7,7 @@ build-time dependency — Forecastle is not intended to be taken directly.
 
 ## What it does
 
-`Forecastle.steps/1` wraps a Mix release's `:steps` list, injecting three hooks
+`Forecastle.steps/1` wraps a Mix release's `:steps` list, injecting four hooks
 around `:assemble`:
 
 - **`pre_assemble/1`** — checks and stages any `relup`, refuses a project-root
@@ -22,6 +22,9 @@ around `:assemble`:
   `upgrade_from:` option and writes it into the version path. Immediately before
   `:tar`, *after* any function step the project put between `:assemble` and
   `:tar`; see *The relup generated during assembly*.
+- **`refuse_late_upgrade_from/1`** — refuses a build whose `upgrade_from:` is not
+  the one `pre_assemble/1` resolved. Appended after every other step, and called
+  from `generate_relup/1` as well; see *A late `upgrade_from:` is refused*.
 
 **Nothing here touches configuration, and nothing new may.** Forecastle used to
 intercept all of it: `:runtime_config_path` set to `false`, a substitute
@@ -1073,11 +1076,13 @@ nothing wrong with it, including one packaging a hand-written `relup`.
 `Forecastle.refuse_unpackaged_relup/1` is spliced in instead and asks the release.
 
 **It is spliced twice, and the third review round is why.** A `Mix.Release` is
-the caller's to rewrite — `staged_baselines/1` says so itself about a step adding
-a baseline to `upgrade_from:` — so a single check up front passes for a release
-that names nothing *yet*, and a step adding the option afterwards reaches `:tar`
+the caller's to rewrite, so a single check up front passes for a release that
+names nothing *yet*, and a step adding the option afterwards reaches `:tar`
 with the placement never re-examined: archive packed, relup generated into the
-release behind it, plan announced, exit 0. So one guard before `:assemble`, where
+release behind it, plan announced, exit 0. Such a build is refused twice over
+now — `refuse_late_upgrade_from/1` sees the option change — but this guard is
+deliberately still the first to fire, because it names the *placement*, which is
+what the project can move. So one guard before `:assemble`, where
 a refusal costs no build and no resolved baseline, and one immediately before
 `:tar`, which is the packaging boundary and the only position sure of the options
 as they finally are. Same doctrine as `refuse_hand_written_relup!/0` being called
@@ -1098,15 +1103,16 @@ being a shipped archive announced as carrying a plan it does not carry.
 **What the guards deliberately do not close is
 [#40](https://github.com/ausimian/forecastle/issues/40).** A step *after* `:tar`
 that sets `upgrade_from:` is past both of them and past the packing, and the
-fourth review round on #38 named it. It is left where it is because it is not
-about a caller-placed generation step at all: with generation in its ordinary
-position and the mutating step after `:tar`, the same build exits 0 with **no
-relup anywhere and nothing printed** — the worse half, and identical on
-`feature/upgrade-tooling` before this change, which was checked by running one
-fixture against both revisions. Closing it here would mean refusing every steps
-list with a function step after `:tar`, which refuses builds that have nothing to
-do with relups; #40 is about what `upgrade_from:` means once the pipeline has
-started, which is a decision, not a patch.
+fourth review round on #38 named it. It is not about a caller-placed generation
+step at all: with generation in its ordinary position and the mutating step after
+`:tar`, the same build exits 0 with **no relup anywhere and nothing printed** —
+the worse half, and identical on `feature/upgrade-tooling` before #38, which was
+checked by running one fixture against both revisions. Closing it from `steps/1`
+would mean refusing every steps list with a function step after `:tar`, which
+refuses builds that have nothing to do with relups. It is closed from the other
+end instead — by what `upgrade_from:` is allowed to mean once the pipeline has
+started, which was a decision rather than a patch. See *A late `upgrade_from:` is
+refused*.
 
 A step *before* `:assemble` is deliberately not guarded at all: `read_rel!/1`
 already refuses it by name, before `:assemble` has created anything, and a second
@@ -1255,6 +1261,10 @@ coverage having compared nothing. So:
   merely a non-zero exit, because a test content with non-zero would go on
   passing if this became some other failure or if the refusal ever reported one
   application and skipped the rest.
+- **An option a step changed after `pre_assemble/1` resolved it is a refusal.**
+  It is a fourth answer to "what does this release name", arrived at after the
+  question was settled, and it is refused at generation and again after every
+  step has run. See *A late `upgrade_from:` is refused*.
 - **The target is not checked, and that is a boundary rather than a gap.** At
   this point in the steps list the target is Mix's own output, so there is
   nothing to check that `:assemble` has not already guaranteed. A hand-written
@@ -1303,26 +1313,30 @@ generates none. `copy_relup/1` has always behaved that way when nothing was
 staged. Removing it would mean deleting a `relup` that a caller's own step may
 have written, which is the same objection again.
 
-**A caller step that rewrites `upgrade_from:` resolves late, and that is the
-boundary rather than a defect.** `Mix.Release` is a caller's to rewrite, and
-`generate_relup/1` re-reads the option rather than trusting what `pre_assemble/1`
-saw — so a step that adds a baseline leaves the staged map not answering for it.
-`staged_baselines/2` is what makes that safe: the map is used only where it
-covers *every* spec the step is about to generate from, and anything else
-re-resolves. That is the correct branch and not merely the safe one, because what
-the option says now is what the relup should be generated from; indexing into the
-stale map instead raised a `KeyError` naming a map, which is what review round 3
-found. Rejecting the mutation outright was the alternative and was refused: it
-would refuse a customisation Mix supports in order to protect an optimisation.
+**A caller step that rewrites `upgrade_from:` is refused, and that reverses what
+this document said before #40.** It used to read: a step that adds a baseline
+leaves the staged map not answering for it, `staged_baselines/2` re-resolves
+where the map does not cover every spec, and *"that is the correct branch and not
+merely the safe one, because what the option says now is what the relup should be
+generated from"*. That sentence was true about the branch and wrong about the
+option, and #40 is where it was settled the other way. Rejecting the mutation had
+been considered and refused there as protecting an optimisation at the cost of a
+customisation Mix supports; what that reading missed is that the mutation does
+not survive the pipeline in either shape — see *A late `upgrade_from:` is
+refused*.
 
-What such a build cannot have is early resolution of a baseline nobody had
-mentioned by `pre_assemble/1`. It is resolved late and a failure there is retried
-with `--overwrite`, exactly as the `:systools` half is. **This is the third
-appearance of one class — work that can only happen after `:assemble` — and the
-answer is deliberately structural rather than another special case: everything
-nameable before `:assemble` is settled there, the irreducible remainder is listed
-above, and its cost is documented and tested rather than engineered around. Do
-not reopen it with a fourth narrower case.**
+`staged_baselines/2` keeps its coverage check, as a guard rather than as support
+for the mutation: a steps list reaching generation without `pre_assemble/1` has
+no stash to index into, and Mix's carrying of unrecognised options means a
+caller's step can leave something there that is not a map at all. Indexing into a
+stale map instead raised a `KeyError` naming a map, which is what review round 3
+found, and that is still the failure the check exists to avoid.
+
+**This is the third appearance of one class — work that can only happen after
+`:assemble` — and the answer is deliberately structural rather than another
+special case: everything nameable before `:assemble` is settled there, the
+irreducible remainder is listed above, and its cost is documented and tested
+rather than engineered around. Do not reopen it with a fourth narrower case.**
 
 **A project-root `relup` beside `upgrade_from:` is a refusal, not a precedence
 rule.** They are two upgrade plans for one release and only one file can be in
@@ -1342,13 +1356,199 @@ a second check here would be the same decision made in two places. A project tha
 sets the option directly and names a `ref:` baseline meets the resolver's own
 refusal, which is loud.
 
+### A late `upgrade_from:` is refused
+
+**A build whose `upgrade_from:` is not the one `pre_assemble/1` resolved is
+refused**, and that is [#40](https://github.com/ausimian/forecastle/issues/40).
+The option is *read* at generation and the archive is packed at `:tar`, so a step
+that sets it after either asks for an upgrade plan too late for one to be made,
+or too late for one to be packed. Both shapes exited 0:
+
+- generation where `steps/1` puts it and the mutating step after `:tar` — no
+  relup anywhere, neither in the archive nor in the version path, and nothing
+  printed; and
+- generation placed after `:tar` by the project with the mutating step between
+  the two — a relup on disk, `auto`'s verdict announced, and an archive carrying
+  none of it. `:erl_tar.table/2` on the produced tarball listed no
+  `releases/<vsn>/relup`.
+
+**Not every refused change is one of those, and the message must not say it is.**
+A caller step between `:assemble` and `:tar` runs *before* generation, so that
+one used to work: `staged_baselines/2` found the stash did not cover the new spec,
+re-resolved, and the archive got a relup for the baseline the step named. It is
+refused too, so that `upgrade_from:` means one thing at one moment rather than
+two — but the refusal cannot tell which of the three it is looking at, so it
+states the invariant and stops. Adversarial review round 4 found the diagnostic
+claiming a shipped archive with no plan in it for all of them; `mid-option` is
+the fixture mode that pins this one, refused at generation with no tarball
+written at all.
+
+**Refuse rather than freeze or merely report, and three things decided it.**
+Refusing now and supporting it later is additive while the reverse is breaking,
+and `upgrade_from:` is unreleased, so nobody can be relying on rewriting it
+mid-build — true now and not true again. Nothing real is lost: a step placed
+before `:assemble` runs ahead of `pre_assemble/1`, since `steps/1` has never
+inserted anything in front of the caller's own pre-`:assemble` steps, so a
+project computing baselines from git tags or an artefact store puts the work
+there and has them resolved and honoured normally. And it closes both shapes,
+which neither alternative does — a rule comparing only at generation cannot see
+the first, and freezing the option changes nothing there either, since generation
+has already produced nothing by the time the step runs.
+
+**Two positions, and the second is not optional.** `refuse_late_upgrade_from/1`
+is called from `generate_relup/1`, where refusing is cheap and where the option
+is about to be read, and spliced by `steps/1` after every other step, which is
+the only point from which the first shape is visible at all. Under a rule that
+refuses every difference the two are the same comparison, which is what makes
+this smaller than the alternatives it replaced. It is appended to *every* list
+`steps/1` splices rather than only to those where a step could still change
+something: which steps run after generation is a fact about where `steps/1` puts
+generation, and a rule resting on that would quietly stop being true the next
+time that placement moves.
+
+**A missing record is not innocent, and reading it as "pre-assembly never ran"
+was a hole.** Adversarial review found it and a build reproduced it: a caller step
+writes the option either by rewriting the keyword list it was handed, which keeps
+Forecastle's keys, or by putting a fresh list in their stead —
+`%Mix.Release{release | options: [upgrade_from: specs]}` — which drops them. The
+second spelling names a baseline and deletes the record in one move, and a check
+lenient about the absence passed such a build straight through to exit 0 with no
+relup in the archive.
+
+**But the absence is answered by asking the release, not by refusing on the
+bookkeeping**, which is `refuse_unpackaged_relup/1`'s rule and it holds here for
+its reason. Refusing every absence failed builds that name no baselines at all
+and produce nothing wrong — a step can rebuild the options for reasons of its
+own, and a release with no `upgrade_from:` has to assemble exactly as it did
+before this feature existed, which is not a promise worth a private key. So a
+release naming baselines with no record behind them is refused at the final step,
+and one naming none is left alone. The fixture's `replaced-options` mode is that
+second build, and `SAMPLE_LATE_UPGRADE_FROM_STYLE` writes the option both ways,
+so the difference between the spellings is exercised rather than assumed.
+
+**The message for that refusal describes missing evidence, and does not claim
+the baselines were never resolved.** A step can replace the options carrying the
+*same* specs, dropping only the record, and `pre_assemble/1` did resolve those —
+so "never resolved" would be false in exactly the case the refusal is most
+conservative about. Adversarial review round 5 found it saying so. The refusal
+stands, because nothing at that position can tell the two apart; what changed is
+that it says as much.
+
+**One shape stays open, and it is stated rather than engineered away.** A step
+that replaces the options *before* generation, dropping an `upgrade_from:` the
+build had along with the record, takes the request and the evidence of it in one
+move, and both checks then see a release asking for nothing.
+
+**There is a mechanism that would close it, and it is named here rather than left
+to be rediscovered.** `pre_assemble/1` could append a *closure* to
+`release.steps` capturing what it resolved, which an options replacement cannot
+reach: `Mix.Tasks.Release.run_steps/1` hands each function step the remaining
+list and then runs whatever the returned release carries, so appending works and
+the captured value is out of the caller's way. Adversarial review round 3 raised
+it, and the claim it replaced — that `Mix.Release` offers no such place — was
+simply wrong. It is not taken, for two reasons. `release.steps` is the caller's
+to rewrite exactly as `options` is, and by the same mechanism: a step returning
+`%{release | steps: release.steps ++ [mutate]}` runs `mutate` after any terminal
+guard, closure or not, so the surface moves rather than closing. And a guard
+existing only at runtime is invisible to `steps/1`, whose ordered output is what
+`forecastle_test.exs` and Castle's `customize_test.exs` assert on precisely so a
+splice cannot go wrong quietly — and `Mix.Release.validate_steps!/1` has already
+run by then, so a step appended afterwards is never validated by name either.
+
+**So the boundary is this, and it is a boundary rather than a gap.** These checks
+catch a step that gets `upgrade_from:` wrong. They do not defend against a step
+that dismantles the pipeline it is running in: one replacing the release options
+wholesale drops Mix's own along with Forecastle's — the staged relup, the staged
+appups, `:overlays`, `:quiet` — and one rewriting `release.steps` can run
+anything after anything. The spelling a step is actually written with,
+`Keyword.put/3` on the list it was handed, is refused properly in both
+directions. **Do not reopen this with a narrower case**: three review rounds
+produced three of them, each defeated by a step erasing whatever the last one
+relied on, which is what says the class has no terminus inside a `Mix.Release`.
+
+`generate_relup/1` cannot be strict about a missing record at all and goes
+through `compare_upgrade_from/1` instead: it is reachable without
+`pre_assemble/1` — a caller who placed it before `:assemble` — and `read_rel!/1`
+already answers that by naming the file, which this module declines to decide
+twice. So the two positions differ in what a missing record means and share the
+comparison itself.
+
+**`stage_baselines/1` records what it read as well as what it resolved to**,
+under `:forecastle_upgrade_from`, on both branches and `:none` included. The two
+answers the comparison has to tell apart are "this release named nothing and a
+later step named something" and "`pre_assemble/1` never ran, so there is nothing
+to compare", which a key appearing only when the option did could not
+distinguish. The resolved map cannot stand in for it either: it is keyed by spec,
+so it answers for a set rather than for the list the project wrote. Both keys are
+dropped unconditionally first, for the reason `stage_relup/1` drops its own.
+
+**What the second position costs is stated rather than engineered away.** A
+change made after `:tar` can only be refused after `:tar`, so the archive is
+already on disk when the build fails, and so is the assembled release, which a
+retry has to `--overwrite`. The non-zero exit is what stops a pipeline shipping
+it; deleting an artefact at a path the user chose and Forecastle did not create
+is the destructive-action objection made about cleaning up after a late failure
+and about `git worktree prune`. What the archive is *not* is a release announced
+as carrying an upgrade plan it does not carry.
+
+**Deferred, not rejected.** Supporting a genuinely late baseline would mean
+moving generation to the last moment before packing in a way that survives caller
+steps, or an explicit opt-in saying "re-read the option, I know where my packing
+step is". Neither is needed for 1.0 and neither is foreclosed. **If this refusal
+is later read as a considered permanent rule, that is a misreading — it is a
+narrowing taken while narrowing was still free**, and the comment beside
+`refuse_late_upgrade_from/1` says so as well.
+
+`forecastle_test.exs` covers the comparison directly: an option matching the
+record is a pass, and a baseline added, rewritten or taken away is a refusal —
+plus a malformed one refused for what is wrong with the option rather than for
+having changed, which is the call `refuse_unpackaged_relup/1` makes too. It pins
+both answers to a *missing* record as well: refused at the final step when the
+release names baselines, passed when it names none, and passed inside
+`generate_relup/1` either way, where what is asserted is that the failure names
+the target it could not read rather than the record. And it pins the ordering
+inside `generate_relup/1`, since the comparison has to come before the target's
+`.rel` is read and before any baseline is resolved.
+
+`assembly_relup_test.exs` pins both shapes on real builds, through the fixture's
+`SAMPLE_STEPS=late-option` and `late-option-after-tar` modes, each of them a
+second time with `SAMPLE_LATE_UPGRADE_FROM_STYLE=replace` for the
+options-replacing spelling, and the third shape with `mid-option` — the change
+made before generation, refused with no tarball written at all, which is what
+says the two after-`:tar` shapes leaving an archive behind is a property of
+*where* they are refused rather than of the refusal. It pins the capability the
+refusal protects with
+`early-option` — the same step one position earlier, asserted on the relup *in
+the archive* rather than on the exit status — and the line the strictness must
+not cross with `replaced-options`, a build that rebuilds the options and asks for
+no relup, which has to succeed.
+
+One thing those assemblies establish in passing, and it is worth knowing: Mix
+carries `release.options` through `:tar` and through its own steps untouched, so
+the record survives to the last position. Every default-mode assembly in the
+suite now ends on a step that would refuse if it did not.
+
+**What none of it covers is a hand-written steps list that leaves the final step
+out**, which keeps the exposure this closes. That is the same class as a list
+that leaves `post_assemble/1` out and ships without `bin/castle`: Forecastle does
+not police hand-written lists, and cannot start here. The check would have to be
+unconditional to catch the first shape — the release names nothing at
+`pre_assemble/1` time, which is the whole of the issue — so it would refuse every
+list that predates this, including releases that never mention `upgrade_from:`.
+That is the objection that made `refuse_unpackaged_relup/1` a step rather than a
+refusal in `steps/1`. `Castle.customize/1`, which is how a consumer reaches any
+of this, always goes through `steps/1`.
+
 **The fixture sets the option directly and names the step functions by hand.**
 `test/fixtures/sample/mix.exs` does not go through `Castle.customize/1`, so this
 half is testable without Castle's API — castle#34 is a separate issue and lands
 after this. It is also why the fixture's `steps/0` writes the list out rather
 than calling `Forecastle.steps/1`: a splice bug would otherwise produce both
-sides of the comparison. The `custom`, `packing`, `after-tar` and `after-tar-late`
-modes are the deliberate exceptions — there the splice *is* what is under test.
+sides of the comparison. The `custom`, `packing`, `after-tar`, `after-tar-late`,
+`late-option`, `late-option-after-tar`, `mid-option`, `early-option` and
+`replaced-options`
+modes are the
+deliberate exceptions — there the splice *is* what is under test.
 
 ## Baselines
 
@@ -2817,7 +3017,7 @@ directory to start from a clean slate.
 | `test/forecastle/env_script_test.exs` | The `env.sh` fragment as a shell script, sourced in a release-shaped directory with a launcher stub: the heart environment it leaves behind, and which provisional version each state of the two markers selects |
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
 | `test/forecastle/relup_test.exs` | `mix castle.relup` as a command, against three assembled releases: argument handling, exit status, all three upgrade strategies, and `--dry-run` against an ordinary run of the same command |
-| `test/forecastle/assembly_relup_test.exs` | The relup a single `mix release` produces from `upgrade_from:` — in the version path and in the tarball — and what the option does when it names nothing |
+| `test/forecastle/assembly_relup_test.exs` | The relup a single `mix release` produces from `upgrade_from:` — in the version path and in the tarball — what the option does when it names nothing, and what happens when a step of the project's changes it after the build has started |
 | `test/forecastle/baseline_test.exs` | The baseline grammar and all three sources. `tar:` against a release-shaped tree built in the test; `ref:` against a throwaway git repository holding a Mix project of its own |
 | `test/forecastle/appup_check_test.exs` | `mix castle.appup` as a command, against two assembled releases: what it reports, what it passes over, and the exit status |
 | `test/forecastle/appup_draft_test.exs` | The decision table, against module attribute lists built in the test — plus the two rows that are measured rather than stated: `code_change/3` against real compiled modules, and the American `-behavior` spelling against real Erlang |

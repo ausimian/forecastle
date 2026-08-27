@@ -72,7 +72,7 @@ both from the same release series.
 `Forecastle` integrates into the steps of the release assembly process. It requires
 that the `Forecastle.pre_assemble/1` and `Forecastle.post_assemble/1` functions are
 placed around the `:assemble` step, with `Forecastle.generate_relup/1` immediately
-before `:tar`, e.g.:
+before `:tar` and `Forecastle.refuse_late_upgrade_from/1` last of all, e.g.:
 
 ```elixir
 defp releases do
@@ -84,7 +84,8 @@ defp releases do
         :assemble,
         &Forecastle.post_assemble/1,
         &Forecastle.generate_relup/1,
-        :tar
+        :tar,
+        &Forecastle.refuse_late_upgrade_from/1
       ]
     ]
   ]
@@ -121,6 +122,27 @@ refusal happens before anything is assembled, and again immediately before `:tar
 in case a step of your own added `:upgrade_from` in between — so no archive is
 ever packed without it. A release that sets no `:upgrade_from` is unaffected:
 generation does nothing there, so the placement costs nothing.
+
+**`:upgrade_from` itself is settled before `:assemble`, and a step that changes
+it afterwards is refused.** `&Forecastle.pre_assemble/1` reads the option and
+resolves the baselines, and what your release asks for is not re-read after
+that. A step setting it later can be too late for a relup to be generated from
+it — and one that sets it after `:tar` reaches a build that has already packed
+an archive with no upgrade plan in it, at exit 0, which is what this closes. If
+your baselines are worked out at build time, put that step *before* `:assemble`:
+`Forecastle.steps/1` adds nothing in front of your own pre-assembly steps, so
+what it sets is resolved with the rest.
+
+`&Forecastle.refuse_late_upgrade_from/1` is what checks, and it goes last in the
+list — after any step of your own that follows `:tar`, since that is the only
+position from which such a step is visible at all. It compares against the record
+`&Forecastle.pre_assemble/1` leaves behind, so a release naming baselines with no
+record beside them is refused too: not because they are known to be different,
+but because nothing there can tell whether they are. Have a step of your own
+*rewrite* the keyword list it is handed rather than replacing it, since a fresh
+list drops what `Forecastle` put there. A release that names no `:upgrade_from`
+is left alone either way, and assembles exactly as it did before any of this
+existed.
 
 `generate_relup/1` does nothing at all unless the release sets `:upgrade_from`,
 so adding it to a release that generates no relup changes nothing and costs
@@ -605,6 +627,10 @@ decisions rather than an accident:
   - **A repeated `upgrade_from:`** is refused rather than resolved by taking the
     first. Mix keeps every occurrence of a release option it does not recognise,
     so a definition built by joining lists can carry two.
+  - **An `upgrade_from:` a step of your own changed** after pre-assembly resolved
+    it is refused, naming what the release said then, what it says now, and where
+    to say it instead. Work your baselines out in a step placed before
+    `:assemble`, where they are resolved and honoured like any others.
   - **A baseline that cannot be resolved** — a `tar:` that is not there, a `ref:`
     that does not build — is refused before `:assemble` too. Resolution is the
     largest thing this can fail at, so it happens while failing is still free.
