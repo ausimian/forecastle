@@ -3053,6 +3053,14 @@ hand-maintained list is exactly how that happens; measuring it against the
 artefact is what makes a variable a later Elixir adds a failure rather than a
 hole.
 
+`ERL_OTP<major>_FLAGS` is derived from the *environment* rather than from
+`:erlang.system_info/1`, and that is the same lesson once more. A `tar:`
+baseline is the artefact that shipped, so the release under test may bundle an
+ERTS from a different OTP than the VM running the tests — and the `erlexec`
+inside it reads its own major's variable. Asking this VM what it is scrubs the
+wrong name for exactly the cross-ERTS deployment the harness exists to make
+testable.
+
 **The fixture takes Forecastle `runtime: false`, which is how Castle declares
 it**, and that matters beyond tidiness: the fixture is what stands in for a
 consumer in the end-to-end suites, and it used to take Forecastle as an ordinary

@@ -697,9 +697,28 @@ defmodule Forecastle.Deployment do
   """
   @spec scrubbed_env(env()) :: env()
   def scrubbed_env(extra \\ []) do
-    scrubbed = ["ERL_OTP#{:erlang.system_info(:otp_release)}_FLAGS" | @scrubbed]
+    Enum.map(erl_otp_flag_vars() ++ @scrubbed, &{&1, nil}) ++ extra
+  end
 
-    Enum.map(scrubbed, &{&1, nil}) ++ extra
+  # `ERL_OTP<major>_FLAGS` cannot be written into the list, because its name
+  # carries an OTP major - and **not necessarily this one**. A `tar:` baseline is
+  # the artefact that shipped, which may well have been built against a different
+  # OTP than the VM running the tests, and the `erlexec` inside that release
+  # reads its own major's variable. Asking `:erlang.system_info/1` what this VM
+  # is therefore scrubs the wrong name for exactly the cross-ERTS deployment this
+  # harness exists to make testable.
+  #
+  # So the environment is asked which of them are set, rather than the VM being
+  # asked what it is. This VM's own name is included whether or not it is set, so
+  # that the guarantee does not depend on the variable happening to be there.
+  defp erl_otp_flag_vars do
+    current = "ERL_OTP#{:erlang.system_info(:otp_release)}_FLAGS"
+
+    System.get_env()
+    |> Map.keys()
+    |> Enum.filter(&Regex.match?(~r/\AERL_OTP\d+_FLAGS\z/, &1))
+    |> Enum.concat([current])
+    |> Enum.uniq()
   end
 
   defp path(%__MODULE__{root: root}, relative), do: Path.join(root, relative)

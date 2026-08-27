@@ -503,6 +503,18 @@ defmodule Forecastle.DeploymentTest do
       assert {"ERL_OTP#{:erlang.system_info(:otp_release)}_FLAGS", nil} in Deployment.scrubbed_env()
     end
 
+    test "and the one for an OTP this VM is not running" do
+      # Asking `:erlang.system_info/1` what this VM is scrubs the wrong name for
+      # the deployment this harness most wants to be usable: a `tar:` baseline is
+      # the artefact that shipped, which may have been built against a different
+      # OTP, and the erlexec inside that release reads its own major's variable.
+      # A `-heart` arriving through it is the two-flag hang.
+      System.put_env("ERL_OTP19_FLAGS", "-heart")
+      on_exit(fn -> System.delete_env("ERL_OTP19_FLAGS") end)
+
+      assert {"ERL_OTP19_FLAGS", nil} in Deployment.scrubbed_env()
+    end
+
     test "unsets the build environment the release is being started from" do
       # A deployed release is started with no Mix and no `MIX_ENV`; a release
       # started from a test run inherits `test`, measured on the generated

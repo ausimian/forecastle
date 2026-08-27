@@ -38,7 +38,8 @@ defmodule Forecastle.UpgradeCase do
       defmodule MyApp.UpgradeTest do
         use Forecastle.UpgradeCase
 
-        @tag :upgrade
+        @moduletag :upgrade
+
         @shipped "tar:artifacts/my_app-1.0.0.tar.gz"
         @next "_build/prod/my_app-1.1.0.tar.gz"
 
@@ -161,6 +162,12 @@ defmodule Forecastle.UpgradeCase do
   Assembling and booting releases is slow by unit-test standards besides, so
   these tests want a tag of their own and an opt-in run - which is what
   `@moduletag :upgrade` in the example above is for.
+
+  **`@moduletag` and not `@tag`**, which is not a spelling preference here.
+  `setup_all` runs when *any* test in the module is selected, and `@tag` marks
+  only the test that follows it - so a module with a second, untagged test would
+  deploy and upgrade a real release in the middle of an ordinary `mix test`,
+  having been excluded on paper.
   """
 
   use ExUnit.CaseTemplate
