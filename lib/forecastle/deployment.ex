@@ -209,17 +209,17 @@ defmodule Forecastle.Deployment do
     root = Path.expand("../../..", baseline.rel_path)
     into = Path.expand(into)
 
-    name = Path.basename(baseline.rel_path)
+    deployment = new(into, Path.basename(baseline.rel_path), opts)
 
     refuse_unusable!(spec, baseline.rel_path, root)
     refuse_overlap!(spec, root, into)
-    refuse_running!(into, Keyword.get(opts, :env, []))
+    refuse_running!(deployment)
 
     File.rm_rf!(into)
     File.mkdir_p!(Path.dirname(into))
     File.cp_r!(root, into)
 
-    new(into, name, opts)
+    deployment
   end
 
   # **A destination that is still running is the one deletion that comes back as
@@ -242,21 +242,27 @@ defmodule Forecastle.Deployment do
   # answers about a launcher that may not even be present. The caller's `:env` is
   # carried into the probe for the same reason: a deployment started with a node
   # name or cookie of its own is only reachable with them.
-  defp refuse_running!(into, env) do
+  defp refuse_running!(%__MODULE__{root: into} = deployment) do
     into
     |> Path.join("releases/*/*.rel")
     |> Path.wildcard()
     |> Enum.map(&(&1 |> Path.rootname() |> Path.basename()))
     |> Enum.uniq()
-    |> Enum.each(&refuse_running_release!(into, &1, env))
+    |> Enum.each(&refuse_running_release!(deployment, &1))
   end
 
-  defp refuse_running_release!(into, name, env) do
+  # Through `cmd/4`, so the probe runs from the directory this deployment runs
+  # its commands from and with the environment it carries. Neither is
+  # decoration: a release started from a working directory of its own may have
+  # been given a *relative* `RELEASE_VM_ARGS` - which is a case
+  # `Forecastle.UpgradeTest` covers on purpose - and a probe made from somewhere
+  # else cannot resolve it. The launcher fails, that reads as "nothing running",
+  # and the live deployment is deleted.
+  defp refuse_running_release!(%__MODULE__{root: into} = deployment, name) do
     launcher = Path.join(into, "bin/#{name}")
 
     with true <- File.regular?(launcher),
-         {output, 0} <-
-           System.cmd(launcher, ["pid"], stderr_to_stdout: true, env: scrubbed_env(env)) do
+         {output, 0} <- cmd(deployment, launcher, ["pid"], []) do
       Mix.raise(
         "#{into} already holds a #{name} deployment, and it is running as process " <>
           "#{String.trim(output)}. Deploying would empty the directory underneath it " <>
@@ -327,8 +333,46 @@ defmodule Forecastle.Deployment do
   #
   # A list is a prefix of itself, so this answers the two paths being the same
   # directory as well.
+  #
+  # **On the physical paths, because `Path.expand/2` is lexical.** It collapses
+  # `.` and `..` and stops there, so two names for one directory - `/tmp/x` and
+  # `/private/tmp/x` on a Mac, anything reached through a symlinked parent - come
+  # out as different segment lists and read as no overlap at all. What that
+  # permits is the deletion this check exists to prevent: `File.rm_rf!/1` follows
+  # an aliased parent perfectly well, so the source release is removed and the
+  # copy that was to follow it fails on a directory that is no longer there.
   defp contains?(outer, inner) do
-    List.starts_with?(Path.split(inner), Path.split(outer))
+    List.starts_with?(Path.split(physical(inner)), Path.split(physical(outer)))
+  end
+
+  # `pwd -P` prints the directory with every symlink resolved, and it is POSIX.
+  # Run through `System.cmd/3`'s `:cd`, which moves nothing outside the child -
+  # `File.cd/1` moves the whole operating system process, and this repository
+  # refuses that on principle (see `Forecastle.BaselineTest`'s moduledoc). A
+  # destination usually does not exist yet, so what is resolved is its nearest
+  # existing ancestor with the rest of the name put back on.
+  #
+  # A host with no `pwd` falls back to the lexical path, which is what this
+  # compared before and is a check that still answers every case not reached
+  # through a link. Refusing every deployment on a missing `pwd` would be the
+  # worse trade for a harness whose job is to run other people's tests.
+  defp physical(path) do
+    {existing, rest} = deepest_existing(path, [])
+
+    case System.cmd("pwd", ["-P"], cd: existing, stderr_to_stdout: true) do
+      {output, 0} -> Path.join([String.trim(output) | rest])
+      _no_pwd -> path
+    end
+  end
+
+  defp deepest_existing(path, rest) do
+    parent = Path.dirname(path)
+
+    cond do
+      File.dir?(path) -> {path, rest}
+      parent == path -> {path, rest}
+      true -> deepest_existing(parent, [Path.basename(path) | rest])
+    end
   end
 
   @doc """

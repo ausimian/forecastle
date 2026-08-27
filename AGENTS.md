@@ -2978,6 +2978,17 @@ Three decisions in it are worth not relitigating:
   containment is compared on path *segments*: a textual prefix test reads
   `<root>-next` as being inside `<root>`, and misses a root of `/` entirely,
   since `/` with a separator appended is `//`.
+
+  **And on the *physical* paths**, which was argued the other way first and was
+  wrong. `Path.expand/2` is lexical, so two names for one directory come out as
+  different segment lists and read as no overlap — and this repository already
+  knew that shape: *the build runs where the project is*, above, records that
+  subtracting one path from another "gets it wrong wherever a symlink stands
+  between the two, which on macOS is `/tmp` every time". Measured here rather
+  than argued: with `alias -> real`, the lexical check answers "no overlap" and
+  `File.rm_rf!/1` on `alias/release` deletes `real/release`. The decline rested
+  on there being no portable realpath short of `File.cd/1`; `pwd -P` under
+  `System.cmd/3`'s `:cd` is one, and it moves nothing outside the child.
 - **Nothing clears the scratch directory, and `deploy!/3` refuses a destination
   that is still running.** Clearing a stable path is the obvious thing and it
   comes back as a *passing* test: a run interrupted before its `on_exit` leaves
@@ -2987,7 +2998,12 @@ Three decisions in it are worth not relitigating:
   `Forecastle.UpgradeCase` names the directory and does nothing else to it, and
   the liveness question is asked in `deploy!/3`, which is the one place that
   knows the release's name. Refused rather than stopped: something is running
-  there that this run did not start.
+  there that this run did not start. The probe goes through `cmd/4`, so it runs
+  from the directory the deployment runs its commands in and with the
+  environment it carries — a release started elsewhere may have been given a
+  *relative* `RELEASE_VM_ARGS`, which `Forecastle.UpgradeTest` covers on
+  purpose, and a probe made from the wrong directory cannot resolve it and reads
+  as "nothing running".
 - **The deadlines fail the test and stop nothing**, which is stated in
   `start!/2` rather than left to be discovered. Closing the port behind
   `System.cmd/3` does not terminate the program on the other end of it, and

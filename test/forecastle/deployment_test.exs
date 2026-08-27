@@ -396,6 +396,27 @@ defmodule Forecastle.DeploymentTest do
       end
     end
 
+    test "probes from the directory the deployment runs its commands in", ctx do
+      # A release started from a working directory of its own may have been given
+      # a *relative* `RELEASE_VM_ARGS`, which `Forecastle.UpgradeTest` covers on
+      # purpose. A probe made from somewhere else cannot resolve it, the launcher
+      # fails, that reads as "nothing running", and the live deployment is
+      # deleted underneath the node.
+      gated_on_cwd = """
+      if [ ! -f ./marker ]; then exit 1; fi
+      echo 4242
+      """
+
+      into = occupied!(Path.join(@root, "deployed-elsewhere"), "my_app", gated_on_cwd)
+      workdir = Path.join(@root, "workdir")
+      File.mkdir_p!(workdir)
+      File.write!(Path.join(workdir, "marker"), "")
+
+      assert_raise Mix.Error, ~r/it is running as process 4242/, fn ->
+        Deployment.deploy!("rel:#{ctx.rel_path}", into, cd: workdir)
+      end
+    end
+
     test "reaches a deployment started with a node name of its own", ctx do
       # A release started with `RELEASE_NODE` or `RELEASE_COOKIE` of its own is
       # only reachable with them, and both are on the scrub list - so a probe
@@ -427,6 +448,22 @@ defmodule Forecastle.DeploymentTest do
       into = occupied!(Path.join(@root, "deployed-dead"), "my_app", "exit 1\n")
 
       assert Deployment.deploy!("rel:#{ctx.rel_path}", into).root == Path.expand(into)
+    end
+
+    test "refuses a destination that reaches the release through a symlink", ctx do
+      # `Path.expand/2` is lexical, so `<root>/source/my_app` and
+      # `<root>/alias/my_app` are different segment lists naming one directory -
+      # which is the shape `/tmp` and `/private/tmp` have on a Mac, and the shape
+      # any symlinked parent has anywhere. Read as no overlap, `File.rm_rf!/1`
+      # follows the link and deletes the release that was about to be copied.
+      aliased = Path.join(@root, "alias")
+      File.ln_s!(Path.dirname(ctx.tree), aliased)
+
+      assert_raise Mix.Error, ~r/are the same directory or one is inside the other/, fn ->
+        Deployment.deploy!("rel:#{ctx.rel_path}", Path.join(aliased, "my_app"))
+      end
+
+      assert File.exists?(Path.join(ctx.tree, "releases/1.0.0/my_app.rel"))
     end
 
     test "a sibling whose name merely starts the same is not an overlap", ctx do
