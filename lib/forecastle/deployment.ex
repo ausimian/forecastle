@@ -551,17 +551,21 @@ defmodule Forecastle.Deployment do
     booted!(deployment, env, timeout, div(timeout, @boot_interval))
   end
 
-  defp booted!(deployment, _env, timeout, 0) do
-    flunk("#{deployment.root} did not accept an rpc within #{div(timeout, 1000)}s")
-  end
-
+  # Asked before the budget is looked at, so a deadline shorter than the polling
+  # interval still gets one question. Dispatching on `div(timeout, @boot_interval)`
+  # alone made any `:boot_timeout` under 200ms report a release that was already
+  # answering as one that missed its deadline, without ever asking it. The
+  # deadline bounds the *waiting*, not the trying.
   defp booted!(deployment, env, timeout, attempts) do
     case launcher(deployment, ["rpc", "IO.puts(:booted)"], env) do
       {_output, 0} ->
         :ok
 
-      {_output, _} ->
+      {_output, _} when attempts > 0 ->
         Process.sleep(@boot_interval) && booted!(deployment, env, timeout, attempts - 1)
+
+      {_output, _} ->
+        flunk("#{deployment.root} did not accept an rpc within #{div(timeout, 1000)}s")
     end
   end
 
@@ -578,15 +582,14 @@ defmodule Forecastle.Deployment do
     exited!(pid, timeout, div(timeout, @exit_interval))
   end
 
-  defp exited!(pid, timeout, 0) do
-    flunk("process #{pid} was still running #{div(timeout, 1000)}s later")
-  end
-
+  # Asked before the budget, for the reason `booted!/4` is: a timeout shorter
+  # than the polling interval otherwise fails without looking, and a process
+  # that has already gone is the commonest thing to be asked about.
   defp exited!(pid, timeout, attempts) do
-    if running?(pid) do
-      Process.sleep(@exit_interval) && exited!(pid, timeout, attempts - 1)
-    else
-      :ok
+    cond do
+      not running?(pid) -> :ok
+      attempts > 0 -> Process.sleep(@exit_interval) && exited!(pid, timeout, attempts - 1)
+      true -> flunk("process #{pid} was still running #{div(timeout, 1000)}s later")
     end
   end
 

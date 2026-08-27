@@ -148,6 +148,22 @@ defmodule Forecastle.DeploymentTest do
       end
     end
 
+    test "asks once however short the deadline is", ctx do
+      # `div(timeout, @interval)` is zero for any deadline below the polling
+      # interval, and dispatching on that alone answered without looking: a
+      # release that was already up reported as one that missed its deadline,
+      # and a process that had already gone reported as one still running. The
+      # deadline bounds the waiting, not the trying.
+      stub!(ctx.tree, "my_app", "exit 0\n")
+
+      assert Deployment.await_boot!(Deployment.new(ctx.tree, "my_app", boot_timeout: 50)) == :ok
+
+      pid = transient_pid()
+      Deployment.await_exit!(pid)
+
+      assert Deployment.await_exit!(pid, 50) == :ok
+    end
+
     # The linked task's crash report is the point of the case, not noise to read.
     @tag :capture_log
     test "a launcher that failed is reported as a failure, not as a hang", ctx do
