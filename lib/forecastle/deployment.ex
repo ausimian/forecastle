@@ -45,10 +45,17 @@ defmodule Forecastle.Deployment do
   supplies one is then given two - which leaves `heart:check_start_heart/0` with
   no clause to match and hangs the boot having printed nothing.
 
-  `RELEASE_VM_ARGS` and `RELEASE_REMOTE_VM_ARGS` are worse than an extra flag:
-  they redirect the launcher to a different args file entirely, so one set in the
-  environment would have every release booting on some other project's `vm.args`
-  and presenting as a bug in the release rather than as a leaked variable.
+  **Every variable the generated launcher reads as a default is unset**, and that
+  is a rule rather than a list: `bin/<name>` takes `RELEASE_VM_ARGS`,
+  `RELEASE_BOOT_SCRIPT`, `RELEASE_MODE`, `RELEASE_DISTRIBUTION` and the rest from
+  the environment where they are set, so one of them inherited from a shell or a
+  CI image does not merely add a flag - it points the release at a different args
+  file, a different boot script, a different configuration or a different
+  distribution mode. What that produces is a test of a release materially unlike
+  the one that would be deployed, presenting as a bug in the release rather than
+  as a leaked variable. `Forecastle.DownstreamUpgradeTest` measures the rule
+  against the launcher Mix actually generated, so a variable a later Elixir adds
+  shows up as a failure rather than as a hole.
 
   Anything a caller passes is applied after the scrub, so a test that wants one
   of these set says so and gets it.
@@ -127,10 +134,21 @@ defmodule Forecastle.Deployment do
   # deployment that answered differently there than a deployment would is the
   # whole failure this list exists to prevent, arrived at through the one
   # variable a project is most likely to read.
+  # The `RELEASE_*` half is every variable the generated launcher takes from the
+  # environment where it is set, which is a longer list than the obvious one. The
+  # args files are the sharpest - they carry emulator flags, so an inherited one
+  # boots the release on another project's `vm.args` - but a boot script, a
+  # configuration file, `embedded` versus `interactive`, and `sname` versus
+  # `name` each change what the release *is* rather than what it prints, and none
+  # of them announces itself. Kept as a rule rather than as a list somebody
+  # remembers to extend: `Forecastle.DownstreamUpgradeTest` reads the defaults
+  # out of the launcher Mix generated and requires this to cover them.
   @scrubbed ~w(MIX_ENV MIX_BUILD_PATH MIX_BUILD_ROOT MIX_DEPS_PATH MIX_TARGET
                MIX_QUIET MIX_DEBUG ERL_LIBS ELIXIR_ERL_OPTIONS ERL_AFLAGS
                ERL_FLAGS ERL_ZFLAGS RELEASE_VM_ARGS RELEASE_REMOTE_VM_ARGS
-               RELEASE_ROOT RELEASE_NAME
+               RELEASE_ROOT RELEASE_NAME RELEASE_PROG RELEASE_MODE
+               RELEASE_DISTRIBUTION RELEASE_BOOT_SCRIPT
+               RELEASE_BOOT_SCRIPT_CLEAN RELEASE_SYS_CONFIG
                RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP)
 
   @doc """
@@ -195,7 +213,7 @@ defmodule Forecastle.Deployment do
 
     refuse_unusable!(spec, baseline.rel_path, root)
     refuse_overlap!(spec, root, into)
-    refuse_running!(name, into)
+    refuse_running!(into, Keyword.get(opts, :env, []))
 
     File.rm_rf!(into)
     File.mkdir_p!(Path.dirname(into))
@@ -216,11 +234,29 @@ defmodule Forecastle.Deployment do
   # Refused rather than stopped. Something is running here that this run did not
   # start, and taking it down on a guess is a bigger decision than declining to
   # delete it.
-  defp refuse_running!(name, into) do
+  #
+  # **The question is asked of the destination's own releases, not of the one
+  # being deployed.** What is at risk is whatever is running *there*, and a
+  # previous run may have put a different release in this directory - or the same
+  # one under a name the project has since changed. Asking `bin/<incoming name>`
+  # answers about a launcher that may not even be present. The caller's `:env` is
+  # carried into the probe for the same reason: a deployment started with a node
+  # name or cookie of its own is only reachable with them.
+  defp refuse_running!(into, env) do
+    into
+    |> Path.join("releases/*/*.rel")
+    |> Path.wildcard()
+    |> Enum.map(&(&1 |> Path.rootname() |> Path.basename()))
+    |> Enum.uniq()
+    |> Enum.each(&refuse_running_release!(into, &1, env))
+  end
+
+  defp refuse_running_release!(into, name, env) do
     launcher = Path.join(into, "bin/#{name}")
 
     with true <- File.regular?(launcher),
-         {output, 0} <- System.cmd(launcher, ["pid"], stderr_to_stdout: true, env: scrubbed_env()) do
+         {output, 0} <-
+           System.cmd(launcher, ["pid"], stderr_to_stdout: true, env: scrubbed_env(env)) do
       Mix.raise(
         "#{into} already holds a #{name} deployment, and it is running as process " <>
           "#{String.trim(output)}. Deploying would empty the directory underneath it " <>

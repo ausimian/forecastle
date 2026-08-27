@@ -960,10 +960,13 @@
   for a test that wants to assert on the status itself.
 
   Every command a deployment runs is given an environment with the variables that
-  would otherwise leak into it unset — `MIX_ENV`, `ELIXIR_ERL_OPTIONS`,
-  `ERL_AFLAGS`, `ERL_FLAGS`, `ERL_ZFLAGS`, `ERL_OTP<major>_FLAGS`,
-  `RELEASE_VM_ARGS` and the
-  rest. `MIX_ENV` because a deployed release is started with no Mix at all,
+  would otherwise leak into it unset: the emulator flag variables
+  (`ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`, `ERL_FLAGS`, `ERL_ZFLAGS`,
+  `ERL_OTP<major>_FLAGS`) and **every variable the generated launcher takes as a
+  default** — `RELEASE_VM_ARGS`, `RELEASE_BOOT_SCRIPT`, `RELEASE_SYS_CONFIG`,
+  `RELEASE_MODE`, `RELEASE_DISTRIBUTION`, `RELEASE_NODE` and the rest, each of
+  which redirects the release at something other than its own rather than merely
+  adding to it. `MIX_ENV` because a deployed release is started with no Mix at all,
   while one started from a test run inherits `test` — and `config/runtime.exs`
   is the one file a project routinely shares between the two. A `-heart` in a
   developer's shell or a CI image would otherwise reach

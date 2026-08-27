@@ -1091,15 +1091,27 @@ Deployment.deploy!(@shipped, Path.join(scratch, "deploy"), boot_timeout: 90_000)
 ```
 
 Every command a deployment runs is given an environment with the variables that
-leak into a release unset — `MIX_ENV`, `ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`,
-`ERL_FLAGS`, `ERL_ZFLAGS`, `ERL_OTP<major>_FLAGS`, `RELEASE_VM_ARGS` and the
-rest. A `-heart` in a developer's shell or a CI image would otherwise reach every
-release the tests start, and a release that already supplies one is then given
-two, which hangs the boot having printed nothing. `MIX_ENV` is there for a milder
-reason and a real one: a deployed release is started with no Mix at all, while
-one started from a test run inherits `test`, and `config/runtime.exs` is the one
-file a project routinely shares between the two. `Deployment.scrubbed_env/1` is
-the same list, for the `mix release` that builds the versions being tested.
+leak into a release unset. Two kinds, and both matter:
+
+- **Emulator flags** — `ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`, `ERL_FLAGS`,
+  `ERL_ZFLAGS`, `ERL_OTP<major>_FLAGS`. A `-heart` in a developer's shell or a CI
+  image would otherwise reach every release the tests start, and a release that
+  already supplies one is then given two, which hangs the boot having printed
+  nothing.
+- **Everything `bin/<name>` takes as a default** — `RELEASE_VM_ARGS`,
+  `RELEASE_BOOT_SCRIPT`, `RELEASE_SYS_CONFIG`, `RELEASE_MODE`,
+  `RELEASE_DISTRIBUTION`, `RELEASE_NODE` and the rest. Each is
+  `${NAME:-default}` in the generated launcher, so an inherited value wins: a
+  different args file, a different boot script, a different configuration,
+  `interactive` instead of `embedded`. What that produces is a test of a release
+  materially unlike the one you would deploy, presenting as a bug in the release
+  rather than as a leaked variable.
+
+`MIX_ENV` is there for a milder reason and a real one: a deployed release is
+started with no Mix at all, while one started from a test run inherits `test`,
+and `config/runtime.exs` is the one file a project routinely shares between the
+two. `Deployment.scrubbed_env/1` is the same list, for the `mix release` that
+builds the versions being tested.
 
 Deployments are not stopped for you: a running release outlives the test that
 started it, so `on_exit(fn -> Deployment.stop(deployment) end)` belongs beside

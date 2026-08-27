@@ -78,6 +78,64 @@ defmodule Forecastle.DeploymentTest do
     end
   end
 
+  describe "running the release's own commands" do
+    setup :release_tree
+
+    # Against stubs that report their arguments, because what is being asserted
+    # is which program each of these reaches and what it does with the answer.
+    # That a real launcher answers is every other suite's.
+
+    test "the launcher and bin/castle are two different programs", ctx do
+      deployment = echoing!(ctx.tree)
+
+      assert Deployment.launcher!(deployment, ["version"]) == "my_app: version"
+      assert Deployment.castle!(deployment, ["releases"]) == "castle: releases"
+    end
+
+    test "an rpc is the launcher with the expression after it", ctx do
+      deployment = echoing!(ctx.tree)
+
+      assert Deployment.rpc!(deployment, "IO.puts(:hello)") == "my_app: rpc IO.puts(:hello)"
+    end
+
+    test "the pid is what the release says its own is", ctx do
+      # Through `bin/<name> pid`, which is an rpc, so it is the beam's own
+      # `System.pid/0` rather than anything about the process that asked.
+      deployment = stubbed!(ctx.tree, "4242", "exit 0\n")
+
+      assert Deployment.os_pid(deployment) == "4242"
+    end
+
+    test "the non-bang forms hand back the status", ctx do
+      deployment = refusing!(ctx.tree)
+
+      assert {output, 7} = Deployment.launcher(deployment, ["version"])
+      assert output =~ "refused"
+      assert {_output, 7} = Deployment.castle(deployment, ["releases"])
+    end
+
+    test "stopping tolerates a system that is not running", ctx do
+      # It belongs in an `on_exit`, where a setup that died half way through may
+      # have left nothing to stop - and a teardown that raised there would
+      # report itself instead of the failure that got it there.
+      deployment = refusing!(ctx.tree)
+
+      assert {_output, 7} = Deployment.stop(deployment)
+    end
+
+    test "the bang forms name the program that failed", ctx do
+      deployment = refusing!(ctx.tree)
+
+      assert_raise RuntimeError, ~r/my_app version exited with 7/, fn ->
+        Deployment.launcher!(deployment, ["version"])
+      end
+
+      assert_raise RuntimeError, ~r/castle releases exited with 7/, fn ->
+        Deployment.castle!(deployment, ["releases"])
+      end
+    end
+  end
+
   describe "installing while acting as the supervisor" do
     setup :release_tree
 
@@ -271,9 +329,7 @@ defmodule Forecastle.DeploymentTest do
       # It goes on holding the release's distribution name, and the readiness
       # rpc after the next start is as likely to reach it as the new system, at
       # which point the from-version assertions pass against last run's code.
-      into = Path.join(@root, "deployed-live")
-      File.mkdir_p!(Path.join(into, "bin"))
-      stub!(into, "my_app", ~s|[ "$1" = "pid" ] && echo 4242\nexit 0\n|)
+      into = occupied!(Path.join(@root, "deployed-live"), "my_app", "echo 4242\nexit 0\n")
 
       assert_raise Mix.Error, ~r/it is running as process 4242/, fn ->
         Deployment.deploy!("rel:#{ctx.rel_path}", into)
@@ -283,13 +339,47 @@ defmodule Forecastle.DeploymentTest do
       assert File.exists?(Path.join(into, "bin/my_app"))
     end
 
+    test "asks the destination's own release, not the one being deployed", ctx do
+      # A previous run may have put a different release here, or the same one
+      # under a name the project has since changed. Probing `bin/<incoming
+      # name>` asks about a launcher that is not even present, comes back
+      # "nothing running", and deletes a live tree.
+      into = occupied!(Path.join(@root, "deployed-renamed"), "old_app", "echo 4242\nexit 0\n")
+
+      assert_raise Mix.Error, ~r/holds a old_app deployment/, fn ->
+        Deployment.deploy!("rel:#{ctx.rel_path}", into)
+      end
+    end
+
+    test "reaches a deployment started with a node name of its own", ctx do
+      # A release started with `RELEASE_NODE` or `RELEASE_COOKIE` of its own is
+      # only reachable with them, and both are on the scrub list - so a probe
+      # built from the defaults asks the wrong node and is told nothing is
+      # running. The caller's `:env` is what the deployment will carry, and is
+      # what the run before it carried.
+      answers_only_by_name = """
+      if [ "$RELEASE_NODE" != "somewhere" ]; then exit 1; fi
+      echo 4242
+      """
+
+      without = occupied!(Path.join(@root, "deployed-unnamed"), "my_app", answers_only_by_name)
+      with_name = occupied!(Path.join(@root, "deployed-named"), "my_app", answers_only_by_name)
+
+      # Both halves, because the second says nothing on its own: a probe that
+      # answered either way would refuse here and look correct. This is the
+      # deletion of a live tree that carrying the caller's environment prevents.
+      assert Deployment.deploy!("rel:#{ctx.rel_path}", without)
+
+      assert_raise Mix.Error, ~r/it is running as process 4242/, fn ->
+        Deployment.deploy!("rel:#{ctx.rel_path}", with_name, env: [{"RELEASE_NODE", "somewhere"}])
+      end
+    end
+
     test "deploys over one that is not running", ctx do
       # The other half, so that the refusal is about a *live* release rather
       # than about the launcher being there at all - which it always is, since
       # the last deployment put it there.
-      into = Path.join(@root, "deployed-dead")
-      File.mkdir_p!(Path.join(into, "bin"))
-      stub!(into, "my_app", "exit 1\n")
+      into = occupied!(Path.join(@root, "deployed-dead"), "my_app", "exit 1\n")
 
       assert Deployment.deploy!("rel:#{ctx.rel_path}", into).root == Path.expand(into)
     end
@@ -422,6 +512,34 @@ defmodule Forecastle.DeploymentTest do
     stub!(tree, "castle", castle_body)
 
     Deployment.new(tree, "my_app", env: [{"STUB_PID", pid}])
+  end
+
+  # A launcher and a `bin/castle` that each report which of the two ran and with
+  # what, so a call reaching the wrong program is a failed comparison rather than
+  # an indistinguishable success.
+  defp echoing!(tree) do
+    stub!(tree, "my_app", ~s|echo "my_app: $*"\n|)
+    stub!(tree, "castle", ~s|echo "castle: $*"\n|)
+
+    Deployment.new(tree, "my_app")
+  end
+
+  defp refusing!(tree) do
+    stub!(tree, "my_app", ~s|echo refused\nexit 7\n|)
+    stub!(tree, "castle", ~s|echo refused\nexit 7\n|)
+
+    Deployment.new(tree, "my_app")
+  end
+
+  # A destination that already holds a deployment: the `.rel` that says which
+  # release is in it, and a launcher that answers `pid` however the case wants.
+  defp occupied!(into, name, launcher_body) do
+    File.mkdir_p!(Path.join(into, "bin"))
+    File.mkdir_p!(Path.join(into, "releases/1.0.0"))
+    write_rel!(Path.join(into, "releases/1.0.0/#{name}.rel"))
+    stub!(into, name, launcher_body)
+
+    into
   end
 
   defp stub!(tree, name, body) do

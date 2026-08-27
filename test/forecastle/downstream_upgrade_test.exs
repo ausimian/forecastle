@@ -147,6 +147,32 @@ defmodule Forecastle.DownstreamUpgradeTest do
     end
   end
 
+  describe "the environment a deployment starts a release in" do
+    test "covers every control the generated launcher takes from it",
+         %{deployment: deployment} do
+      # Read out of the launcher Mix actually generated rather than restated
+      # from a list written beside the scrub, which is the only way a variable a
+      # later Elixir adds shows up as a failure instead of as a hole. Every one
+      # of these is `${NAME:-default}`, so an inherited value wins: an args file
+      # carrying emulator flags, a boot script, a configuration file, `embedded`
+      # versus `interactive`, `sname` versus `name`. None announces itself, and
+      # what each produces is a test of a release materially unlike the one that
+      # would be deployed.
+      inherited =
+        deployment.root
+        |> Path.join("bin/#{deployment.name}")
+        |> File.read!()
+        |> then(&Regex.scan(~r/^(RELEASE_[A-Z_]+)="\$\{\1:-/m, &1))
+        |> Enum.map(fn [_line, name] -> name end)
+        |> Enum.uniq()
+
+      scrubbed = for {name, nil} <- Deployment.scrubbed_env(), do: name
+
+      assert length(inherited) > 5, "found no launcher defaults to check: #{inspect(inherited)}"
+      assert inherited -- scrubbed == []
+    end
+  end
+
   describe "what a project depending on Forecastle is given" do
     test "the harness compiled into its build" do
       # The fixture depends on Forecastle by path, so its build directory is a

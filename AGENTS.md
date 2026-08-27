@@ -3026,6 +3026,17 @@ Forecastle writes reads the variable, so what it changes is whatever the
 project routinely shares between a Mix run and a release. So it is unset rather
 than restored to `prod`, and the e2e suites run without it.
 
+**The `RELEASE_*` half of that list is a rule rather than a list**, and
+`Forecastle.DownstreamUpgradeTest` enforces it by reading the defaults out of
+the launcher Mix generated: every `RELEASE_*` the launcher spells
+`${NAME:-default}` has to be scrubbed. It began as the obvious four and was
+missing five — `RELEASE_MODE`, `RELEASE_DISTRIBUTION`, `RELEASE_BOOT_SCRIPT`,
+`RELEASE_BOOT_SCRIPT_CLEAN` and `RELEASE_PROG` — each of which changes what the
+release *is* rather than what it prints, and none of which announces itself. A
+hand-maintained list is exactly how that happens; measuring it against the
+artefact is what makes a variable a later Elixir adds a failure rather than a
+hole.
+
 `Forecastle.DownstreamUpgradeTest` is the check on the acceptance criterion
 rather than a restatement of it: everything it does below the build is shipped
 API, and one of its cases asserts that both modules really are compiled into the
