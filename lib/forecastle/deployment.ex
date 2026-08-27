@@ -541,6 +541,12 @@ defmodule Forecastle.Deployment do
   a dependency does not, and how long it should be given is a property of the
   project rather than of this harness.
 
+  It is a budget for waiting rather than a stopwatch, and is approximate to
+  within one probe: a probe already in flight is allowed to finish, and one is
+  always made even when the whole deadline is shorter than the polling interval.
+  Erring on the side of patience is deliberate - the alternative is failing a
+  release that answered a fraction of a second after an arbitrary number.
+
   `env` is the environment the rpc is made with, and it is not decoration: it is
   how a release started under a node name or cookie of its own is reached again.
   """
@@ -561,8 +567,13 @@ defmodule Forecastle.Deployment do
         :ok
 
       _not_yet ->
-        if remaining(deadline) > 0 do
-          Process.sleep(@boot_interval)
+        left = remaining(deadline)
+
+        if left > 0 do
+          # Never past the deadline: a probe that failed quickly with 10ms left
+          # should not sleep a full interval and ask again a tenth of a second
+          # late.
+          Process.sleep(min(@boot_interval, left))
           booted!(deployment, env, timeout, deadline)
         else
           flunk("#{deployment.root} did not accept an rpc within #{div(timeout, 1000)}s")
