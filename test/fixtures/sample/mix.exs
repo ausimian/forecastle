@@ -156,10 +156,10 @@ defmodule Sample.MixProject do
       "mix" ->
         [:assemble, :tar]
 
-      # The two modes that go through `Forecastle.steps/1` deliberately, because
-      # where the splice puts relup generation is exactly what it is for. Every
-      # other mode spells the list out so that a splice bug cannot produce both
-      # sides of the comparison.
+      # From here down, every mode goes through `Forecastle.steps/1`
+      # deliberately, because where the splice puts its steps is exactly what
+      # each of them is for. The default below spells the list out instead, so
+      # that a splice bug cannot produce both sides of the comparison.
       "custom" ->
         Forecastle.steps([:assemble, &Sample.MixProject.remove_dep_appup/1, :tar])
 
@@ -189,13 +189,62 @@ defmodule Sample.MixProject do
           &Forecastle.generate_relup/1
         ])
 
+      # The shape no guard about *placement* can see, and the worse of the two:
+      # generation exactly where `steps/1` puts it, and the step that names a
+      # baseline running after `:tar` has packed. Generation has already done its
+      # documented nothing by then, so this build asks for an upgrade plan, ships
+      # an archive with none in it, and says nothing at all - unless something
+      # reads the option once more after every step has run.
+      "late-option" ->
+        Forecastle.steps([:assemble, :tar, &Sample.MixProject.add_upgrade_from/1])
+
+      # The other half of the same shape: the project puts generation after
+      # `:tar` itself and names the baseline in between, so both placement guards
+      # see a release asking for nothing and pass it. `:tar` packs, the step names
+      # a baseline, and generation then writes a relup into the assembled release
+      # that the archive beside it does not carry.
+      "late-option-after-tar" ->
+        Forecastle.steps([
+          :assemble,
+          :tar,
+          &Sample.MixProject.add_upgrade_from/1,
+          &Forecastle.generate_relup/1
+        ])
+
+      # The one shape the refusal actually takes something away from, and the
+      # reason it is a mode of its own. A caller step between `:assemble` and
+      # `:tar` runs *before* generation, so this used to work: the stash did not
+      # cover the new spec, `staged_baselines/2` re-resolved, and the archive got
+      # a relup for the baseline the step named. It is refused now, so that
+      # `upgrade_from:` means one thing at one moment rather than two.
+      "mid-option" ->
+        Forecastle.steps([:assemble, &Sample.MixProject.add_upgrade_from/1, :tar])
+
+      # The capability that refusal is deliberately preserving, which is why it
+      # costs a project nothing real: the same step, placed before `:assemble`.
+      # `steps/1` inserts nothing in front of the caller's own pre-`:assemble`
+      # steps, so this one runs before `pre_assemble/1` and its baseline is
+      # resolved and honoured like one written in `mix.exs`. A project computing
+      # baselines from git tags or an artefact store would put the work here
+      # anyway - answering "what is in production" needs no assembled release.
+      "early-option" ->
+        Forecastle.steps([&Sample.MixProject.add_upgrade_from/1, :assemble, :tar])
+
+      # A step doing something else entirely, spelled the way that drops
+      # Forecastle's own keys. The release asks for no upgrade plan, so there is
+      # nothing wrong with what this build produces and nothing for Forecastle to
+      # refuse about it - which is the line the checks are not allowed to cross.
+      "replaced-options" ->
+        Forecastle.steps([:assemble, :tar, &Sample.MixProject.rebuild_options/1])
+
       _default ->
         [
           &Forecastle.pre_assemble/1,
           :assemble,
           &Forecastle.post_assemble/1,
           &Forecastle.generate_relup/1,
-          :tar
+          :tar,
+          &Forecastle.refuse_late_upgrade_from/1
         ]
     end
   end
@@ -229,19 +278,45 @@ defmodule Sample.MixProject do
   @doc """
   A caller-supplied step that adds `upgrade_from:` to a release that did not have
   it, which `mix release` permits: the `Mix.Release` handed between steps is the
-  project's to rewrite, and `Forecastle` says so itself about the baselines it
-  stashes in `pre_assemble/1`.
+  project's to rewrite.
 
-  It exists so that a build can reach `:tar` having become one that asks for a
-  relup *after* the guard that runs before `:assemble` has already passed it.
+  Where it is *placed* is what each mode using it is about. Before `:assemble` it
+  runs ahead of `pre_assemble/1` and the baseline is resolved and honoured
+  normally; anywhere after that the release is asking for an upgrade plan too
+  late for one to be generated or too late for one to be packed, and Forecastle
+  refuses the build rather than assembling it.
 
   The spec comes from the environment rather than being computed, so that the
   test naming it decides what the build asks for.
+
+  **How it writes the option comes from the environment too**, and that is not
+  cosmetic. `SAMPLE_LATE_UPGRADE_FROM_STYLE=put` rewrites the keyword list the
+  step was handed, which leaves Forecastle's own keys in place; `replace` puts a
+  fresh list in their stead, which drops them. Both are things a step can do to a
+  `Mix.Release`, and the second is the reason a missing record cannot be read as
+  "pre-assembly never ran" by the step that runs after every other one.
   """
   def add_upgrade_from(%Mix.Release{options: options} = release) do
     spec = System.fetch_env!("SAMPLE_LATE_UPGRADE_FROM")
 
-    %Mix.Release{release | options: Keyword.put(options, :upgrade_from, [spec])}
+    case System.get_env("SAMPLE_LATE_UPGRADE_FROM_STYLE", "put") do
+      "put" -> %Mix.Release{release | options: Keyword.put(options, :upgrade_from, [spec])}
+      "replace" -> %Mix.Release{release | options: [upgrade_from: [spec]]}
+    end
+  end
+
+  @doc """
+  A caller-supplied step that rebuilds `release.options` for reasons of its own
+  and never touches `upgrade_from:`.
+
+  The same spelling as `add_upgrade_from/1`'s `replace` style, without the
+  baseline: it drops the keys `Forecastle.pre_assemble/1` leaves behind, so a
+  check that refused their absence outright would fail a build that asks for no
+  upgrade plan and produces nothing wrong. `:quiet` is kept because it is Mix's
+  own and this step has no business dropping it.
+  """
+  def rebuild_options(%Mix.Release{options: options} = release) do
+    %Mix.Release{release | options: Keyword.take(options, [:quiet])}
   end
 
   @doc """
