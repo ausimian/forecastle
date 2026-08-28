@@ -106,6 +106,26 @@ defmodule Forecastle.DeploymentTest do
       assert Deployment.os_pid(deployment) == "4242"
     end
 
+    test "the pid is only the pid, whatever env.sh printed in front of it", ctx do
+      # Every command here merges stderr, so a project's own `env.sh` writing a
+      # line on the way past arrives before the answer. That value is what
+      # `install_supervised/3` hands to `ps -p`, which rejects the lot - and a
+      # rejected `ps` reads as "the process has gone", so the wait ends at once
+      # and a second node is started beside one that still holds the
+      # distribution name.
+      stub!(ctx.tree, "my_app", ~s|echo "warning: HEART_COMMAND ignored" >&2\necho 4242\n|)
+
+      assert Deployment.os_pid(Deployment.new(ctx.tree, "my_app")) == "4242"
+    end
+
+    test "and a pid that is not a pid is refused rather than guessed at", ctx do
+      stub!(ctx.tree, "my_app", ~s|echo "not a pid at all"\n|)
+
+      assert_raise ExUnit.AssertionError, ~r/did not report an operating system pid/, fn ->
+        Deployment.os_pid(Deployment.new(ctx.tree, "my_app"))
+      end
+    end
+
     test "the non-bang forms hand back the status", ctx do
       deployment = refusing!(ctx.tree)
 

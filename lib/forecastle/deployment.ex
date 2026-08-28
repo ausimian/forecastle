@@ -595,7 +595,38 @@ defmodule Forecastle.Deployment do
   first to go away.
   """
   @spec os_pid(t(), env()) :: binary()
-  def os_pid(%__MODULE__{} = deployment, env \\ []), do: launcher!(deployment, ["pid"], env)
+  def os_pid(%__MODULE__{} = deployment, env \\ []) do
+    deployment |> launcher!(["pid"], env) |> only_pid!(deployment)
+  end
+
+  # **What the launcher printed is not only the answer.** Every command here runs
+  # with `stderr_to_stdout`, so a project's own `env.sh` writing a line on the way
+  # past arrives in front of the pid - Forecastle's fragment says nothing on a
+  # `pid`, but nothing stops a project's from saying something on every
+  # invocation.
+  #
+  # That matters because of what this value is *for*: `install_supervised/3`
+  # waits on it with `ps -p`. Handed a warning and a number, `ps` rejects the
+  # whole string, which reads here as "the process has gone" - so the wait ends
+  # at once and a second node is started beside one that still holds the
+  # distribution name. The stale-node failure, reached through the reading of a
+  # pid.
+  #
+  # The pid is the last thing printed and is entirely digits. Anything else is
+  # refused rather than guessed at, because a guess here is that failure again.
+  defp only_pid!(output, deployment) do
+    answer =
+      output |> String.split("\n", trim: true) |> List.last() |> to_string() |> String.trim()
+
+    if Regex.match?(~r/\A\d+\z/, answer) do
+      answer
+    else
+      flunk(
+        "bin/#{deployment.name} pid did not report an operating system pid. " <>
+          "It printed:\n\n#{output}"
+      )
+    end
+  end
 
   @doc """
   Waits until the release accepts an rpc, or fails the test.
@@ -618,7 +649,7 @@ defmodule Forecastle.Deployment do
   def await_boot!(%__MODULE__{} = deployment, env \\ []) do
     timeout = deployment.boot_timeout
 
-    booted!(deployment, env, timeout, System.monotonic_time(:millisecond) + timeout)
+    booted!(deployment, env, timeout, deadline(timeout))
   end
 
   # A wall-clock deadline rather than a count of attempts, and the probe is asked
@@ -631,17 +662,28 @@ defmodule Forecastle.Deployment do
         :ok
 
       _not_yet ->
-        left = remaining(deadline)
-
-        if left > 0 do
-          # Never past the deadline: a probe that failed quickly with 10ms left
-          # should not sleep a full interval and ask again a tenth of a second
-          # late.
-          Process.sleep(min(@boot_interval, left))
-          booted!(deployment, env, timeout, deadline)
-        else
+        keep_waiting!(deadline, fn -> booted!(deployment, env, timeout, deadline) end, fn ->
           flunk("#{deployment.root} did not accept an rpc within #{div(timeout, 1000)}s")
-        end
+        end)
+    end
+  end
+
+  defp deadline(timeout), do: System.monotonic_time(:millisecond) + timeout
+
+  defp remaining(deadline), do: deadline - System.monotonic_time(:millisecond)
+
+  # Sleep and go round again while there is budget, and hand over to the caller's
+  # own account of the failure when there is not. Never *past* the deadline: a
+  # probe that failed quickly with 10ms left should not sleep a whole interval
+  # and ask again a tenth of a second late.
+  defp keep_waiting!(deadline, again, give_up) do
+    left = remaining(deadline)
+
+    if left > 0 do
+      Process.sleep(min(@boot_interval, left))
+      again.()
+    else
+      give_up.()
     end
   end
 
@@ -683,8 +725,6 @@ defmodule Forecastle.Deployment do
     end
   end
 
-  defp remaining(deadline), do: deadline - System.monotonic_time(:millisecond)
-
   @doc """
   Waits until the operating system process `pid` is gone, or fails the test.
 
@@ -695,17 +735,21 @@ defmodule Forecastle.Deployment do
   """
   @spec await_exit!(binary(), pos_integer()) :: :ok
   def await_exit!(pid, timeout \\ @exit_timeout) when is_integer(timeout) do
-    exited!(pid, timeout, div(timeout, @exit_interval))
+    exited!(pid, timeout, deadline(timeout))
   end
 
-  # Asked before the budget, for the reason `booted!/4` is: a timeout shorter
-  # than the polling interval otherwise fails without looking, and a process
-  # that has already gone is the commonest thing to be asked about.
-  defp exited!(pid, timeout, attempts) do
-    cond do
-      not running?(pid) -> :ok
-      attempts > 0 -> Process.sleep(@exit_interval) && exited!(pid, timeout, attempts - 1)
-      true -> flunk("process #{pid} was still running #{div(timeout, 1000)}s later")
+  # A wall-clock deadline, like every other wait here. An attempt count of
+  # `div(timeout, @exit_interval)` throws the remainder away, so a 250ms budget
+  # gave up after 200 and a process that exited at 220 was reported as still
+  # running - and a budget under one interval gave up without looking at all.
+  # Asked before the deadline is consulted, so the question always happens.
+  defp exited!(pid, timeout, deadline) do
+    if running?(pid) do
+      keep_waiting!(deadline, fn -> exited!(pid, timeout, deadline) end, fn ->
+        flunk("process #{pid} was still running #{div(timeout, 1000)}s later")
+      end)
+    else
+      :ok
     end
   end
 
