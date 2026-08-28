@@ -2998,7 +2998,19 @@ Three decisions in it are worth not relitigating:
   `Forecastle.UpgradeCase` names the directory and does nothing else to it, and
   the liveness question is asked in `deploy!/3`, which is the one place that
   knows the release's name. Refused rather than stopped: something is running
-  there that this run did not start. The probe goes through `cmd/4`, so it runs
+  there that this run did not start.
+
+  **It catches a running deployment, not one that is still starting**, and that
+  boundary is chosen rather than overlooked. A release answers the probe or it
+  does not, and a previous run interrupted in the seconds between `daemon`
+  spawning the VM and that VM accepting distribution answers "no" exactly as an
+  absent one does. Telling the two apart takes waiting and asking again, which
+  taxes every ordinary deployment — the common case is a destination holding a
+  release that really is stopped, and the probe already costs it a VM start — to
+  cover a few seconds of an already abnormal one. Filesystem proxies for "a beam
+  is running here" were considered and are worse: a stale `run_erl` pipe or a
+  `pgrep -f` matching the test runner's own command line refuses deployments for
+  ever, which is a bigger failure than the one being closed. The probe goes through `cmd/4`, so it runs
   from the directory the deployment runs its commands in and with the
   environment it carries — a release started elsewhere may have been given a
   *relative* `RELEASE_VM_ARGS`, which `Forecastle.UpgradeTest` covers on

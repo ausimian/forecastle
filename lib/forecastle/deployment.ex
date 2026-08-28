@@ -207,6 +207,17 @@ defmodule Forecastle.Deployment do
   overlaps the one it does. Both are asked *before* the destination is emptied:
   everything that can be found out about the source is found out while there is
   still nothing to lose by saying so.
+
+  It also refuses a destination whose release is **running**, by asking it. That
+  check is deliberately cheap and therefore not a proof of absence: a release
+  answers, or it does not, and a previous run interrupted in the seconds between
+  `daemon` spawning the VM and that VM accepting distribution answers "no"
+  exactly as an absent one does. Telling those apart takes waiting, and waiting
+  taxes every ordinary deployment - the common case is a destination holding a
+  release that really is stopped - to cover a few seconds of an already abnormal
+  one. So the guard catches a running deployment and not one that is still
+  starting, and `Forecastle.UpgradeCase`'s advice stands: stop what you started,
+  in an `on_exit`.
   """
   @spec deploy!(binary(), Path.t(), keyword()) :: t()
   def deploy!(spec, into, opts \\ []) when is_binary(spec) and is_binary(into) do
