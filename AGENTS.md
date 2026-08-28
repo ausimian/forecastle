@@ -3233,24 +3233,25 @@ with a live watchdog beside its supervisor. What is asserted is what the node
 says it was started with — `{nil, "TRUE", "65535"}` — plus the warning naming
 each displaced value, and, on the one start with a clean environment, silence.
 
-That first start also inherits `ELIXIR_ERL_OPTIONS` with a **tab-separated**
-`-heart` in it, which no e2e start used to set at all: the fixture scrubs the
-variable, so every boot here had the fragment *assigning* it rather than finding
-one, and the case where it has to recognise an inherited flag was covered only by
-a unit test asserting the exact string `-heart`. Two `-heart` flags hang the boot,
-so the suite failing to start is the regression. The value carries
-`-env CASTLE_TAB_PROBE tabbed` behind the tab so that the node answering with
-`"tabbed"` says the tabs were field separators, and
-`:init.get_argument(heart) == {ok, [[]]}` says the emulator got one flag.
+That first start gets `-he\art` from the fixture's `vm.args`. The launcher passes
+the file to the system emulator as `-args_file`; the RELEASES helper does not
+receive it. `ERL_AFLAGS` carries only `-env CASTLE_TAB_PROBE tabbed`, separated by
+tabs. The node answering `"tabbed"` proves erlexec split that value correctly,
+and `:init.get_argument(heart) == {ok, [[]]}` proves the system emulator received
+one heart flag from `vm.args`.
 
-**Which is why `Forecastle.Deployment.start!/2` puts a deadline on the launcher.**
-That regression does not fail, it *hangs*, and it hangs inside `daemon` rather
-than after it: `env.sh` runs the preboot VM synchronously on a first start and
-that VM inherits the same options, so the whole suite stops there.
-`System.cmd/3` has no deadline and `setup_all` has no ExUnit timeout, so the
-deadline is the only thing turning it into a named failure. Measured by putting
-the old guard back — the run had to be killed. Do not remove it as
-belt-and-braces.
+Environment-wide heart flags are different. `ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`
+and the other `ERL_*FLAGS` reach the RELEASES helper as well as the system VM.
+`env_script_test.exs` covers their flag-counting behavior, but quiet first-start
+output is outside the contract when one of them supplies `-heart`.
+
+**This is why `Forecastle.Deployment.start!/2` puts a deadline on the launcher.**
+If the guard misses the flag in `vm.args`, Forecastle adds another after the
+RELEASES helper returns. The system emulator then hangs inside `daemon` with two
+heart flags. `System.cmd/3` has no deadline and `setup_all` has no ExUnit timeout,
+so the deadline is the only thing turning that hang into a named failure.
+Measured by putting the old guard back — the run had to be killed. Do not remove
+it as belt-and-braces.
 
 `env_script_test.exs` is the other half of that, and the division between the two
 is worth keeping: this suite proves the effective configuration survives a real
