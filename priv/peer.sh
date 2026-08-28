@@ -38,10 +38,12 @@ set +e
 castle_peer_status=$?
 set -e
 
+castle_peer_status_stage="$castle_peer_work/launcher.status.$$"
 (
   set -C
   umask 077
-  printf '%s\n' "$castle_peer_status" > "$castle_peer_work/launcher.status"
-) 2>/dev/null || :
+  printf '%s\n' "$castle_peer_status" > "$castle_peer_status_stage"
+) 2>/dev/null &&
+  mv "$castle_peer_status_stage" "$castle_peer_work/launcher.status" 2>/dev/null || :
 
 exit "$castle_peer_status"

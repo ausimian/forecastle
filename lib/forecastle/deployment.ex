@@ -479,7 +479,11 @@ defmodule Forecastle.Deployment do
   the project's `env.sh`, runtime configuration and the release's own ERTS. The
   peer supplies ownership and a structured control channel only. Its alternative
   TCP connection is bound to loopback; standard I/O, epmd, a cookie and Erlang
-  distribution are not used for peer control.
+  distribution are not used for peer control. The socket has no separate
+  authentication layer: this harness assumes a single-tenant test host. Another
+  local process that wins a race to its ephemeral port can deny or impersonate
+  the peer, so do not use this session boundary against mutually untrusted local
+  workloads.
 
   `:env` supplies scenario environment variables after the normal deployment
   scrub. They are real variables in the child operating-system process, so they
@@ -489,7 +493,11 @@ defmodule Forecastle.Deployment do
   peer started through `init:notify_when_started/1`, after application startup,
   so that deadline covers both synchronous launcher/preboot work and cold boot.
   `:call_timeout`, `:command_timeout`, `:install_timeout`, `:shutdown_timeout`
-  and `:exit_timeout` override the other bounded waits in milliseconds.
+  and `:exit_timeout` override the other bounded waits in milliseconds. The
+  session gives `bin/castle` a polling deadline five seconds shorter than its own
+  install deadline. An explicit `CASTLE_INSTALL_TIMEOUT` must fit inside that
+  outer budget, and must still be long enough for the deployment's actual reboot
+  and cold boot.
 
   The returned value deliberately exposes neither the peer controller nor the
   node name. A `restart_emulator` install replaces that peer behind the same
@@ -707,7 +715,8 @@ defmodule Forecastle.Deployment do
   says nothing about the boot.
 
   A normal peer-session stop asks its peer to halt and waits up to the configured
-  process-exit budget for the release's operating-system pid to disappear. If a
+  process-exit budget for the release's operating-system pid to disappear,
+  returning `:timeout` if it does not. If a
   wedged controller exceeds that combined budget, it is killed and the stock
   launcher is asked to stop the deployment as a bounded fallback. That abnormal
   case returns `:killed`; callers should retain the pre-start deployment-level

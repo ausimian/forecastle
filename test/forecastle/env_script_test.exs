@@ -57,6 +57,8 @@ defmodule Forecastle.EnvScriptTest do
 
   use ExUnit.Case, async: true
 
+  alias Forecastle.Deployment.Session
+
   @moduletag :tmp_dir
 
   @vsn "0.1.0"
@@ -808,6 +810,27 @@ defmodule Forecastle.EnvScriptTest do
   end
 
   describe "OTP peer arguments" do
+    test "preserves spaces, comments, slashes and quotes in each peer argument", %{root: root} do
+      value = ~s(value with # comment \\ slash and "both' quotes")
+
+      encoded =
+        Session.encode_peer_args(["-env", "PEER_ARG_PROBE", value])
+
+      work = peer_work(root, encoded)
+      run = start(root, [{"FORECASTLE_PEER_WORK", work}])
+      combined = Path.join(work, "vm.args")
+
+      assert run.status == 0
+
+      expression =
+        ~s|io:format("~ts", [os:getenv("PEER_ARG_PROBE")]), erlang:halt().|
+
+      assert {^value, 0} =
+               System.cmd(@erl, ["-noshell", "-args_file", combined, "-eval", expression],
+                 stderr_to_stdout: true
+               )
+    end
+
     test "uses the selected args file without leaking its work directory", %{root: root} do
       work = peer_work(root)
       selected = Path.join(root, "selected.vm.args")
@@ -828,7 +851,7 @@ defmodule Forecastle.EnvScriptTest do
       assert File.stat!(combined).access == :read_write
       assert contents =~ ~s(-env RELEASE_VM_ARGS "#{selected}")
 
-      assert byte_offset(contents, "-user peer") <
+      assert byte_offset(contents, "'-user'\n'peer'") <
                byte_offset(contents, "-extra\napplication-argument")
     end
 
@@ -841,6 +864,18 @@ defmodule Forecastle.EnvScriptTest do
       refute run.status == 0
       assert run.stderr =~ "OTP peer work directory is absent or not owner-only"
       refute File.exists?(Path.join(work, "vm.args"))
+    end
+
+    test "refuses an invalid work directory without consuming restart evidence", %{root: root} do
+      arm(root, @next)
+      work = peer_work(root)
+      File.chmod!(work, 0o755)
+
+      run = start(root, [{"FORECASTLE_PEER_WORK", work}])
+
+      refute run.status == 0
+      assert armed?(root)
+      assert provisional?(root)
     end
 
     test "does not replace an existing combined args file", %{root: root} do
@@ -1667,11 +1702,14 @@ defmodule Forecastle.EnvScriptTest do
     end
   end
 
-  defp peer_work(root) do
+  defp peer_work(
+         root,
+         peer_args \\ Session.encode_peer_args(["-user", "peer"])
+       ) do
     work = Path.join(root, "peer-work")
     File.mkdir!(work)
     File.chmod!(work, 0o700)
-    File.write!(Path.join(work, "peer.args"), "-user peer\n")
+    File.write!(Path.join(work, "peer.args"), peer_args)
     File.chmod!(Path.join(work, "peer.args"), 0o600)
     work
   end

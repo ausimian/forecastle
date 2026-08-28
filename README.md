@@ -1051,14 +1051,24 @@ peer pid or node name. `install!/2` keeps the current incarnation for a hot
 upgrade and replaces it behind the same session when the transition restarts the
 emulator.
 
+Peer control is a bare loopback socket, not Erlang distribution: it uses no
+epmd, node cookie or separate authentication handshake. That is appropriate for
+the single-tenant test host this harness assumes. A mutually untrusted local
+process can race the ephemeral port and deny or impersonate a peer, so this is
+not a security boundary between workloads sharing a host.
+
 Pass scenario environment as `start_peer!(deployment, env: [...])`. Those are
 real variables in the child operating-system process, so runtime configuration,
 ports and NIFs see them, and every incarnation after a restart receives the same
 values. Pass an environment as the third argument to `install!/3` when the target
 incarnation must see different values; the override is retained by later
 restarts. Every call, launcher command, boot, install, shutdown and process-exit
-wait is bounded. A session controller that exceeds its shutdown budget is killed,
-and the deployment launcher is asked to stop as a bounded fallback. Register the
+wait is bounded. The session sets `CASTLE_INSTALL_TIMEOUT` five seconds inside
+its own install deadline unless the caller supplies a smaller valid value; an
+override must also allow the deployment enough time to reboot and cold boot.
+Normal stop returns `:timeout` if the owned operating-system process does not
+exit. A session controller that exceeds its shutdown budget is killed, and the
+deployment launcher is asked to stop as a bounded fallback. Register the
 deployment-level teardown before `start_peer!/2`, as in the recipe above, because
 a failed start returns no session value and the callback must still exist.
 

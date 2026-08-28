@@ -4,7 +4,8 @@
   `Forecastle.Deployment` session. The release still boots through its stock Mix
   launcher and own ERTS, while tests use structured MFA calls and keep one
   session across both hot upgrades and emulator restarts. Normal session teardown
-  stops the release it owns and waits for its operating-system process; the
+  stops the release it owns, waits for its operating-system process and reports
+  a timeout if that process remains; the
   documented recipe also registers a deployment-level fallback before startup.
   Peer startup retains a 180-second launcher/preboot
   allowance and adds the deployment's `:boot_timeout` to form the total boot
@@ -14,7 +15,13 @@
   killed with its owned release, and install/restart calls can retain an
   environment override for later incarnations. A launcher or env-hook refusal is
   reported from the adapter immediately instead of being mislabelled after the
-  full boot deadline. The old direct-deployment
+  full boot deadline. `bin/castle` receives a polling deadline five seconds
+  inside the session's install deadline, so the outer timeout does not abandon a
+  still-polling operating-system process. Peer arguments are quoted for erlexec's
+  args-file grammar, and invalid peer handoff files are refused before provisional
+  restart evidence is consumed. The loopback control connection has no separate
+  authentication layer and assumes a single-tenant test host; it is not a
+  security boundary against mutually untrusted local processes. The old direct-deployment
   `install_supervised/3` and `install_supervised!/3` helpers are deprecated in
   favour of the session API.
 - `bin/castle`, a release management CLI, is now installed alongside the

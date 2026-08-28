@@ -735,6 +735,23 @@ defmodule Forecastle.DeploymentTest do
       assert String.split(output, "\n", trim: true) ==
                ["start", "<unset>", "present", peer_work]
     end
+
+    test "the peer adapter publishes a complete launcher status" do
+      root = Path.join(@root, "peer-adapter-status")
+      launcher = Path.join(root, "launcher")
+      work = Path.join(root, "peer-work")
+      File.mkdir_p!(work)
+      File.chmod!(work, 0o700)
+      on_exit(fn -> File.rm_rf(root) end)
+      File.write!(launcher, "#!/bin/sh\nexit 7\n")
+      File.chmod!(launcher, 0o755)
+
+      adapter = Path.join(:code.priv_dir(:forecastle), "peer.sh")
+
+      assert {_output, 7} = System.cmd("sh", [adapter, launcher, "", work])
+      assert File.read!(Path.join(work, "launcher.status")) == "7\n"
+      assert Path.wildcard(Path.join(work, "launcher.status.*")) == []
+    end
   end
 
   describe "a peer session's bounded teardown" do
@@ -749,6 +766,80 @@ defmodule Forecastle.DeploymentTest do
 
       assert Session.stop(session) == :killed
       refute Process.alive?(server)
+    end
+
+    test "surfaces a release process that remains after normal teardown" do
+      state = %{
+        deployment: Deployment.new(Path.join(@root, "missing-release"), "my_app"),
+        env: [],
+        install: nil,
+        peer: nil,
+        os_pid: System.pid(),
+        last_os_pid: nil,
+        install_timeout: 10,
+        exit_timeout: 0,
+        cleaned: false
+      }
+
+      assert {:stop, :normal, :timeout, stopped} = Session.handle_call(:stop, self(), state)
+      assert stopped.cleaned
+    end
+
+    test "retries partial and unreadable launcher status observations" do
+      path = Path.join(@root, "launcher.status")
+      File.mkdir_p!(@root)
+      on_exit(fn -> File.rm_rf(@root) end)
+
+      assert Session.launcher_status(path) == :running
+      File.write!(path, "")
+      assert Session.launcher_status(path) == :running
+      File.write!(path, "not-a-status\n")
+      assert Session.launcher_status(path) == :running
+      File.write!(path, "7\n")
+      assert Session.launcher_status(path) == {:ok, 7}
+    end
+
+    test "keeps bin/castle's polling deadline inside the session deadline" do
+      root = Path.join(@root, "bounded-session-install")
+      File.rm_rf!(root)
+      File.mkdir_p!(Path.join(root, "bin"))
+      on_exit(fn -> File.rm_rf(root) end)
+      stub!(root, "castle", ~s|printf '%s\n' "$CASTLE_INSTALL_TIMEOUT"\n|)
+
+      state = %{
+        deployment: Deployment.new(root, "my_app"),
+        env: [],
+        down: nil,
+        install: nil,
+        install_timeout: 10_000,
+        os_pid: "unused"
+      }
+
+      assert {:noreply, started} =
+               Session.handle_call({:install, "1.0.1", []}, {self(), make_ref()}, state)
+
+      assert {:ok, {"5\n", 0}} = Task.yield(started.install.task, 1_000)
+      Process.cancel_timer(started.install.timer)
+    end
+
+    test "refuses a bin/castle deadline that can outlive its session" do
+      state = %{
+        deployment: Deployment.new(@root, "my_app"),
+        env: [],
+        down: nil,
+        install: nil,
+        install_timeout: 10_000,
+        os_pid: "unused"
+      }
+
+      assert {:reply, {:error, message}, ^state} =
+               Session.handle_call(
+                 {:install, "1.0.1", [{"CASTLE_INSTALL_TIMEOUT", "6"}]},
+                 self(),
+                 state
+               )
+
+      assert message =~ "no greater than 5"
     end
 
     test "bounds launcher commands without making the session owner wait forever" do

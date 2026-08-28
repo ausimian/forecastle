@@ -2964,6 +2964,12 @@ replaces the peer incarnation behind the same session. Keep one raw
 launcher/daemon e2e path for the supervision boundary, but do not move functional
 upgrade assertions back onto launcher `rpc` strings.
 
+The loopback control socket is deliberately unauthenticated: it avoids epmd,
+cookies and distribution, but it is not a boundary against another local
+account racing the ephemeral port. The harness assumes a single-tenant test
+host. Do not describe loopback as authentication or use these sessions between
+mutually untrusted workloads.
+
 Decisions in it worth not relitigating:
 
 - **A deployment is a copy, never the resolved baseline.** `tar:` and `ref:`
@@ -3058,11 +3064,14 @@ Decisions in it worth not relitigating:
   passed to the install command is retained by the replacement and later
   incarnations; this is how a test makes a target's runtime providers see a
   different scenario from the initial boot. Launcher and Castle commands have a
-  separate command deadline. If any operation nevertheless keeps the session
+  separate command deadline. The session derives `CASTLE_INSTALL_TIMEOUT` five
+  seconds inside its own install deadline, and refuses an explicit inner timeout
+  which could outlive the outer one; a shorter override still has to cover the
+  deployment's actual reboot and boot. If any operation nevertheless keeps the session
   from serving its stop request, teardown kills the controller after its budget;
   the controller-loss property then halts the release it owns, and a bounded
   stock-launcher stop is the fallback. Normal teardown also waits for the owned
-  operating-system pid to disappear. A deployment-level teardown is registered
+  operating-system pid to disappear and reports `:timeout` if it does not. A deployment-level teardown is registered
   **before** `start_peer!/2` as well: a failed start returns no session value, so
   no session-only callback can cover that path.
 
@@ -3100,6 +3109,9 @@ Decisions in it worth not relitigating:
   application's args so a trailing `-extra` cannot swallow them, while the
   original `RELEASE_VM_ARGS` value is restored inside the VM before the temporary
   directory is removed as soon as the peer connects.
+  Every argument is quoted for erlexec's args-file grammar, including embedded
+  quote handling; joining raw OTP arguments by newline would let
+  whitespace, `#` or an escape change their boundaries or meaning.
 - **Relup generation is not part of the harness.** `mix castle.relup` and
   `upgrade_from:` are already public, so a project has both without this, and
   `test/support` keeps `make_relup!/3` because what it wraps is the *fixture* —

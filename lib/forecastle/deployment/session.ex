@@ -18,6 +18,7 @@ defmodule Forecastle.Deployment.Session do
   @launcher_timeout 180_000
   @command_timeout 30_000
   @install_timeout 300_000
+  @install_slack 5_000
   @shutdown_timeout 10_000
   @exit_timeout 30_000
   @exit_interval 100
@@ -27,18 +28,19 @@ defmodule Forecastle.Deployment.Session do
     with {:ok, server} <- GenServer.start(__MODULE__, {deployment, opts}) do
       shutdown_timeout = Keyword.get(opts, :shutdown_timeout, @shutdown_timeout)
       exit_timeout = Keyword.get(opts, :exit_timeout, @exit_timeout)
+      install_timeout = Keyword.get(opts, :install_timeout, @install_timeout)
 
       {:ok,
        %__MODULE__{
          server: server,
-         stop_timeout: shutdown_timeout + exit_timeout + 1_000,
+         stop_timeout: install_timeout + shutdown_timeout + exit_timeout + 1_000,
          deployment: deployment
        }}
     end
   end
 
   def stop(%__MODULE__{server: server, stop_timeout: timeout, deployment: deployment}) do
-    if Process.alive?(server), do: GenServer.stop(server, :normal, timeout), else: :ok
+    if Process.alive?(server), do: GenServer.call(server, :stop, timeout), else: :ok
   catch
     :exit, {:timeout, _call} -> kill_server(server, deployment)
     :exit, {:noproc, _call} -> :ok
@@ -91,7 +93,8 @@ defmodule Forecastle.Deployment.Session do
       os_pid: nil,
       last_os_pid: nil,
       down: nil,
-      install: nil
+      install: nil,
+      cleaned: false
     }
 
     case start_peer(state) do
@@ -117,6 +120,11 @@ defmodule Forecastle.Deployment.Session do
     {:reply, operation_result(state, operation), state}
   end
 
+  def handle_call(:stop, _from, state) do
+    {result, state} = cleanup(state, :wait)
+    {:stop, :normal, result, state}
+  end
+
   def handle_call({:install, vsn, _env}, _from, %{down: reason} = state)
       when not is_nil(reason) do
     {:reply,
@@ -131,23 +139,29 @@ defmodule Forecastle.Deployment.Session do
   end
 
   def handle_call({:install, vsn, env}, from, state) when is_binary(vsn) and is_list(env) do
-    task =
-      Task.async(fn ->
-        Deployment.castle(state.deployment, ["install", vsn], state.env ++ env)
-      end)
+    case install_command_env(state, env) do
+      {:ok, command_env} ->
+        task =
+          Task.async(fn ->
+            Deployment.castle(state.deployment, ["install", vsn], command_env)
+          end)
 
-    timer = Process.send_after(self(), {:install_timeout, task.ref}, state.install_timeout)
+        timer = Process.send_after(self(), {:install_timeout, task.ref}, state.install_timeout)
 
-    install = %{
-      from: from,
-      task: task,
-      timer: timer,
-      vsn: vsn,
-      env: env,
-      old_os_pid: state.os_pid
-    }
+        install = %{
+          from: from,
+          task: task,
+          timer: timer,
+          vsn: vsn,
+          env: env,
+          old_os_pid: state.os_pid
+        }
 
-    {:noreply, %{state | install: install}}
+        {:noreply, %{state | install: install}}
+
+      {:error, message} ->
+        {:reply, {:error, message}, state}
+    end
   end
 
   def handle_call({:restart, _env}, _from, %{install: install} = state)
@@ -185,15 +199,20 @@ defmodule Forecastle.Deployment.Session do
     Process.demonitor(ref, [:flush])
     cancel_timer(install)
 
-    {reply, state} =
-      if status == 0 do
-        {{:ok, output}, %{state | env: state.env ++ install.env}}
-      else
-        {{:error, "bin/castle install #{install.vsn} exited with #{status}\n\n#{output}"}, state}
-      end
+    if install.from do
+      {reply, state} =
+        if status == 0 do
+          {{:ok, output}, %{state | env: state.env ++ install.env}}
+        else
+          {{:error, "bin/castle install #{install.vsn} exited with #{status}\n\n#{output}"},
+           state}
+        end
 
-    GenServer.reply(install.from, reply)
-    {:noreply, %{state | install: nil}}
+      GenServer.reply(install.from, reply)
+      {:noreply, %{state | install: nil}}
+    else
+      {:noreply, %{state | install: nil}}
+    end
   end
 
   def handle_info({:install_timeout, ref}, %{install: %{task: %{ref: ref}} = install} = state) do
@@ -206,7 +225,12 @@ defmodule Forecastle.Deployment.Session do
          state.deployment.root <> diagnosis}
     )
 
-    {:noreply, %{state | install: nil, down: :install_timeout}}
+    {:noreply,
+     %{
+       state
+       | install: %{install | from: nil, timer: nil},
+         down: :install_timeout
+     }}
   end
 
   def handle_info(
@@ -215,10 +239,12 @@ defmodule Forecastle.Deployment.Session do
       ) do
     cancel_timer(install)
 
-    GenServer.reply(
-      install.from,
-      {:error, "bin/castle install #{install.vsn} could not be run: #{inspect(reason)}"}
-    )
+    if install.from do
+      GenServer.reply(
+        install.from,
+        {:error, "bin/castle install #{install.vsn} could not be run: #{inspect(reason)}"}
+      )
+    end
 
     {:noreply, %{state | install: nil}}
   end
@@ -259,15 +285,7 @@ defmodule Forecastle.Deployment.Session do
 
   @impl true
   def terminate(_reason, state) do
-    if state.install, do: Task.shutdown(state.install.task, :brutal_kill)
-
-    if state.peer do
-      stop_peer(state.peer)
-    else
-      fallback_stop(state.deployment, state.env)
-    end
-
-    await_exit(state.os_pid || state.last_os_pid, state.exit_timeout)
+    unless state.cleaned, do: cleanup(state, :kill)
     :ok
   end
 
@@ -285,7 +303,7 @@ defmodule Forecastle.Deployment.Session do
       connection: {{127, 0, 0, 1}, 0},
       exec: {to_charlist(shell), [to_charlist(adapter)]},
       post_process_args: fn [_adapter | args] ->
-        File.write!(peer_args, Enum.join(args, "\n") <> "\n")
+        File.write!(peer_args, encode_peer_args(args))
         File.chmod!(peer_args, 0o600)
 
         [adapter, launcher, Enum.join(unset, ","), work]
@@ -368,6 +386,13 @@ defmodule Forecastle.Deployment.Session do
             File.rm(status_file)
             await_peer_boot(peer, boot_ref, state, status_file, timeout, deadline)
 
+          {:ok, 0} ->
+            stop_peer(peer)
+
+            {:error,
+             "#{state.deployment.root} did not boot through its stock launcher within " <>
+               "#{timeout}ms"}
+
           {:ok, status} ->
             stop_peer(peer)
 
@@ -388,19 +413,20 @@ defmodule Forecastle.Deployment.Session do
     end
   end
 
-  defp launcher_status(path) do
+  @doc false
+  def launcher_status(path) do
     case File.read(path) do
       {:ok, bytes} ->
         case Integer.parse(String.trim(bytes)) do
           {status, ""} -> {:ok, status}
-          _ -> {:ok, "an unreadable status"}
+          _ -> :running
         end
 
       {:error, :enoent} ->
         :running
 
-      {:error, reason} ->
-        {:ok, inspect(reason)}
+      {:error, _reason} ->
+        :running
     end
   end
 
@@ -554,7 +580,7 @@ defmodule Forecastle.Deployment.Session do
     {:noreply,
      %{
        state
-       | install: nil,
+       | install: %{install | from: nil, timer: nil},
          peer: nil,
          os_pid: nil,
          last_os_pid: state.os_pid,
@@ -563,22 +589,12 @@ defmodule Forecastle.Deployment.Session do
   end
 
   defp install_diagnosis(install) do
-    result = Task.yield(install.task, 100) || Task.shutdown(install.task, :brutal_kill)
-
-    case result do
-      {:ok, {output, status}} ->
-        "\n\nbin/castle install exited with #{status}:\n\n#{output}"
-
-      {:exit, reason} ->
-        "\n\nbin/castle install task exited: #{inspect(reason)}"
-
-      nil ->
-        "\n\nbin/castle install had not exited; its operating-system process may still be running."
-    end
+    "\n\nbin/castle install had not exited; its operating-system process remains owned " <>
+      "by task #{inspect(install.task.pid)} until it finishes or the session is stopped."
   end
 
   defp cancel_timer(install) do
-    if Process.cancel_timer(install.timer) == false do
+    if install.timer && Process.cancel_timer(install.timer) == false do
       receive do
         {:install_timeout, ref} when ref == install.task.ref -> :ok
       after
@@ -615,6 +631,82 @@ defmodule Forecastle.Deployment.Session do
     :peer.stop(peer)
   catch
     :exit, _reason -> :ok
+  end
+
+  @doc false
+  def encode_peer_args(args) do
+    Enum.map_join(args, "\n", fn arg ->
+      escaped =
+        arg
+        |> to_string()
+        |> String.replace("'", ~S('"'"'))
+
+      "'#{escaped}'"
+    end) <> "\n"
+  end
+
+  defp install_command_env(state, env) do
+    maximum = state.install_timeout - @install_slack
+
+    supplied =
+      final_env_value(state.deployment.env ++ state.env ++ env, "CASTLE_INSTALL_TIMEOUT")
+
+    cond do
+      maximum < 1_000 ->
+        {:error,
+         ":install_timeout must be at least #{@install_slack + 1_000}ms so bin/castle can time out before its session"}
+
+      is_nil(supplied) ->
+        seconds = div(maximum, 1_000)
+        {:ok, state.env ++ env ++ [{"CASTLE_INSTALL_TIMEOUT", Integer.to_string(seconds)}]}
+
+      true ->
+        case Integer.parse(supplied) do
+          {seconds, ""} when seconds > 0 and seconds * 1_000 <= maximum ->
+            {:ok, state.env ++ env}
+
+          _ ->
+            {:error,
+             "CASTLE_INSTALL_TIMEOUT must be a positive whole number of seconds no greater than #{div(maximum, 1_000)} for this session"}
+        end
+    end
+  end
+
+  defp final_env_value(env, name) do
+    Enum.reduce(env, nil, fn
+      {^name, value}, _current -> value
+      _entry, current -> current
+    end)
+  end
+
+  defp cleanup(state, install_mode) do
+    install_result = finish_install(state.install, state.install_timeout, install_mode)
+
+    if state.peer do
+      stop_peer(state.peer)
+    else
+      fallback_stop(state.deployment, state.env)
+    end
+
+    exit_result = await_exit(state.os_pid || state.last_os_pid, state.exit_timeout)
+    result = if install_result == :ok and exit_result == :ok, do: :ok, else: :timeout
+
+    {result, %{state | install: nil, peer: nil, os_pid: nil, cleaned: true}}
+  end
+
+  defp finish_install(nil, _timeout, _mode), do: :ok
+
+  defp finish_install(install, timeout, :wait) do
+    cancel_timer(install)
+    result = Task.yield(install.task, timeout) || Task.shutdown(install.task, :brutal_kill)
+    Process.demonitor(install.task.ref, [:flush])
+    if result, do: :ok, else: :timeout
+  end
+
+  defp finish_install(install, _timeout, :kill) do
+    cancel_timer(install)
+    Task.shutdown(install.task, :brutal_kill)
+    :ok
   end
 
   defp peer_env(extra) do
