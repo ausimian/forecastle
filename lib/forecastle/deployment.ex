@@ -729,10 +729,12 @@ defmodule Forecastle.Deployment do
   path. If a wedged controller exceeds the combined budget, it is killed and the
   stock launcher is asked to stop the deployment as a bounded fallback. That
   abnormal case returns `:killed` only when the fallback succeeds, and
-  `{:error, message}` when it cannot confirm the stop; callers should retain the
-  pre-start deployment-level
-  teardown shown in `Forecastle.UpgradeCase` so it can ask again after a failed
-  setup has unwound.
+  `{:error, message}` when it cannot confirm the stop. Failed stops retain the
+  session's private environment state so a later teardown can retry; a confirmed
+  stop releases it. A session that is never stopped retains that state until the
+  VM exits, which is another reason the teardown is mandatory. Retain the
+  pre-start deployment-level teardown shown in `Forecastle.UpgradeCase` so it
+  can ask again after a failed setup has unwound.
   """
   @spec stop(t() | session(), env()) ::
           {binary(), non_neg_integer()} | {:error, binary()} | :timeout | :ok | :killed

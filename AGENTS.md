@@ -3080,9 +3080,12 @@ Decisions in it worth not relitigating:
   controller and is idempotent, so a later callback cannot stop a new session at
   the same path. A brutal controller kill reports `:killed` only when the
   fallback confirms success; otherwise it returns an error rather than hiding a
-  live release. A deployment-level teardown is registered
-  **before** `start_peer!/2` as well: a failed start returns no session value, so
-  no session-only callback can cover that path.
+  live release. The private store holding the session environment and stop owner
+  survives controller death and failed stops so another teardown can retry, and
+  is released only after a confirmed stop. An abandoned session therefore keeps
+  that store until the VM exits; this is why a deployment-level teardown is
+  registered **before** `start_peer!/2` as well: a failed start returns no
+  session value, so no session-only callback can cover that path.
 
   OTP's own boot acknowledgement is already the application-readiness wait:
   `peer.erl` calls `init:notify_when_started/1` and sends `started` only when init

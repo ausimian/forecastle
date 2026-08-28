@@ -281,10 +281,15 @@ defmodule Forecastle.RestartUpgradeTest do
     owned_pid = Deployment.os_pid(controller_session)
     Process.exit(controller_session.server, :kill)
     Deployment.await_exit!(owned_pid)
+    first_stop = Deployment.stop(controller_session)
+    second_stop = Deployment.stop(controller_session)
 
     controller_loss = %{
       server_down?: not Process.alive?(controller_session.server),
-      os_pid: owned_pid
+      os_pid: owned_pid,
+      first_stop: first_stop,
+      second_stop: second_stop,
+      env_store_down?: not Process.alive?(controller_session.env_store)
     }
 
     {:ok,
@@ -559,6 +564,9 @@ defmodule Forecastle.RestartUpgradeTest do
                )
 
       refute status == 0
+      assert controller_loss.first_stop == :ok
+      assert controller_loss.second_stop == :ok
+      assert controller_loss.env_store_down?
     end
   end
 end

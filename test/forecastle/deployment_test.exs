@@ -780,14 +780,25 @@ defmodule Forecastle.DeploymentTest do
   end
 
   describe "a peer session's bounded teardown" do
+    test "derives its stop budget from every synchronous lifecycle wait" do
+      deployment = Deployment.new(@root, "my_app", boot_timeout: 7_000)
+
+      assert Session.stop_timeout(deployment,
+               call_timeout: 13_000,
+               launcher_timeout: 11_000,
+               install_timeout: 17_000,
+               shutdown_timeout: 3_000,
+               exit_timeout: 5_000
+             ) == 76_000
+    end
+
     test "kills a controller that did not stop within its own budget" do
       server = spawn(fn -> receive do: (_message -> Process.sleep(:infinity)) end)
 
       session = %Session{
         server: server,
         stop_timeout: 10,
-        deployment: Deployment.new(@root, "my_app"),
-        stop_state: :atomics.new(1, [])
+        deployment: Deployment.new(@root, "my_app")
       }
 
       assert {:error, message} = Session.stop(session)
@@ -810,15 +821,14 @@ defmodule Forecastle.DeploymentTest do
       )
 
       env = [{"RELEASE_NODE", "scenario@host"}, {"CAPTURE", capture}]
-      {:ok, env_store} = Agent.start(fn -> env end)
+      {:ok, env_store} = Agent.start(fn -> session_store(env) end)
       server = spawn(fn -> receive do: (_message -> Process.sleep(:infinity)) end)
 
       session = %Session{
         server: server,
         stop_timeout: 10,
         deployment: Deployment.new(root, "my_app"),
-        env_store: env_store,
-        stop_state: :atomics.new(1, [])
+        env_store: env_store
       }
 
       assert Session.stop(session) == :killed
@@ -835,7 +845,7 @@ defmodule Forecastle.DeploymentTest do
       stub!(root, "my_app", ~s|printf '%s\n' "$RELEASE_NODE" > "$CAPTURE"\n|)
 
       env = [{"RELEASE_NODE", "dead@host"}, {"CAPTURE", capture}]
-      {:ok, env_store} = Agent.start(fn -> env end)
+      {:ok, env_store} = Agent.start(fn -> session_store(env) end)
       server = spawn(fn -> :ok end)
       monitor = Process.monitor(server)
       assert_receive {:DOWN, ^monitor, :process, ^server, :normal}
@@ -844,12 +854,45 @@ defmodule Forecastle.DeploymentTest do
         server: server,
         stop_timeout: 10,
         deployment: Deployment.new(root, "my_app"),
-        env_store: env_store,
-        stop_state: :atomics.new(1, [])
+        env_store: env_store
       }
 
       assert Session.stop(session) == :ok
       assert File.read!(capture) == "dead@host\n"
+    end
+
+    test "a killed stop claimant can be replaced by the next teardown" do
+      parent = self()
+
+      server =
+        spawn(fn ->
+          receive do
+            {:"$gen_call", _first_from, :stop} ->
+              send(parent, :first_stop_arrived)
+
+              receive do
+                {:"$gen_call", second_from, :stop} -> GenServer.reply(second_from, :ok)
+              end
+          end
+        end)
+
+      {:ok, env_store} = Agent.start(fn -> session_store([]) end)
+
+      session = %Session{
+        server: server,
+        stop_timeout: 1_000,
+        deployment: Deployment.new(@root, "my_app"),
+        env_store: env_store
+      }
+
+      claimant = spawn(fn -> Session.stop(session) end)
+      claimant_monitor = Process.monitor(claimant)
+      assert_receive :first_stop_arrived
+      Process.exit(claimant, :kill)
+      assert_receive {:DOWN, ^claimant_monitor, :process, ^claimant, :killed}
+
+      assert Session.stop(session) == :ok
+      refute Process.alive?(env_store)
     end
 
     test "surfaces a release process that remains after normal teardown" do
@@ -893,7 +936,7 @@ defmodule Forecastle.DeploymentTest do
       state = %{
         deployment: Deployment.new(root, "my_app"),
         env: [],
-        env_store: start_supervised!({Agent, fn -> [] end}),
+        env_store: start_supervised!({Agent, fn -> session_store([]) end}),
         down: nil,
         install: nil,
         install_timeout: 10_000,
@@ -908,7 +951,7 @@ defmodule Forecastle.DeploymentTest do
                )
 
       assert {:ok, {"5\n", 0}} = Task.yield(started.install.task, 1_000)
-      assert Agent.get(started.env_store, & &1) == [{"RELEASE_NODE", "next@host"}]
+      assert Agent.get(started.env_store, & &1.env) == [{"RELEASE_NODE", "next@host"}]
       Process.cancel_timer(started.install.timer)
     end
 
@@ -916,7 +959,7 @@ defmodule Forecastle.DeploymentTest do
       state = %{
         deployment: Deployment.new(@root, "my_app"),
         env: [],
-        env_store: start_supervised!({Agent, fn -> [] end}),
+        env_store: start_supervised!({Agent, fn -> session_store([]) end}),
         down: nil,
         install: nil,
         install_timeout: 10_000,
@@ -944,7 +987,7 @@ defmodule Forecastle.DeploymentTest do
       state = %{
         deployment: Deployment.new(root, "my_app"),
         env: [],
-        env_store: start_supervised!({Agent, fn -> [] end}),
+        env_store: start_supervised!({Agent, fn -> session_store([]) end}),
         down: nil,
         install: nil,
         install_timeout: 10_000,
@@ -1126,6 +1169,10 @@ defmodule Forecastle.DeploymentTest do
 
     File.write!(path, "#!/bin/sh\n" <> body)
     File.chmod!(path, 0o755)
+  end
+
+  defp session_store(env) do
+    %{env: env, os_pid: nil, stop_status: :active, stop_owner: nil}
   end
 
   # An operating system process that is alive now and gone in about a second,

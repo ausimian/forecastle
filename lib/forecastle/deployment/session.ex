@@ -6,14 +6,14 @@ defmodule Forecastle.Deployment.Session do
   alias Forecastle.Deployment
 
   @enforce_keys [:server, :stop_timeout, :deployment]
-  defstruct [:server, :stop_timeout, :deployment, :env_store, :stop_state]
+  defstruct [:server, :stop_timeout, :deployment, :env_store, :exit_timeout]
 
   @opaque t :: %__MODULE__{
             server: pid(),
             stop_timeout: timeout(),
             deployment: Deployment.t(),
             env_store: pid(),
-            stop_state: reference()
+            exit_timeout: timeout()
           }
 
   @call_timeout 5_000
@@ -29,26 +29,20 @@ defmodule Forecastle.Deployment.Session do
   @boot_interval 50
 
   def start(%Deployment{} = deployment, opts) do
-    with {:ok, env_store} <- Agent.start(fn -> Keyword.get(opts, :env, []) end) do
+    with {:ok, env_store} <- Agent.start(fn -> new_store(Keyword.get(opts, :env, [])) end) do
       opts = Keyword.put(opts, :env_store, env_store)
 
       case GenServer.start(__MODULE__, {deployment, opts}) do
         {:ok, server} ->
-          shutdown_timeout = Keyword.get(opts, :shutdown_timeout, @shutdown_timeout)
           exit_timeout = Keyword.get(opts, :exit_timeout, @exit_timeout)
-          install_timeout = Keyword.get(opts, :install_timeout, @install_timeout)
-          launcher_timeout = Keyword.get(opts, :launcher_timeout, @launcher_timeout)
-          stop_state = :atomics.new(1, [])
 
           {:ok,
            %__MODULE__{
              server: server,
-             stop_timeout:
-               install_timeout + max(shutdown_timeout, @fallback_timeout) + 2 * exit_timeout +
-                 launcher_timeout + deployment.boot_timeout + @stop_slack,
+             stop_timeout: stop_timeout(deployment, opts),
              deployment: deployment,
              env_store: env_store,
-             stop_state: stop_state
+             exit_timeout: exit_timeout
            }}
 
         {:error, reason} ->
@@ -59,14 +53,14 @@ defmodule Forecastle.Deployment.Session do
   end
 
   def stop(%__MODULE__{} = session) do
-    case claim_stop(session.stop_state) do
+    case claim_stop(session.env_store) do
       :claimed -> finish_stop(session)
       :stopped -> :ok
-      :waiting -> await_stop(session)
+      {:waiting, owner} -> await_stop(session, owner)
     end
   catch
     kind, reason ->
-      release_stop(session.stop_state)
+      release_stop(session.env_store)
       :erlang.raise(kind, reason, __STACKTRACE__)
   end
 
@@ -74,36 +68,65 @@ defmodule Forecastle.Deployment.Session do
     result = stop_server(session)
 
     if result in [:ok, :killed] do
-      complete_stop(session.stop_state)
+      complete_stop(session.env_store)
       stop_env_store(session.env_store)
     else
-      release_stop(session.stop_state)
+      release_stop(session.env_store)
     end
 
     result
   end
 
-  defp await_stop(session) do
+  defp await_stop(session, owner) do
     deadline = System.monotonic_time(:millisecond) + session.stop_timeout
-    await_stop(session, deadline)
+    await_stop(session, owner, deadline)
   end
 
-  defp await_stop(session, deadline) do
-    case stop_status(session.stop_state) do
-      2 ->
-        :ok
-
-      0 ->
-        stop(session)
-
-      1 ->
-        if System.monotonic_time(:millisecond) < deadline do
-          Process.sleep(10)
-          await_stop(session, deadline)
-        else
-          :timeout
-        end
+  defp await_stop(session, owner, deadline) do
+    case stop_status(session.env_store) do
+      :stopped -> :ok
+      :active -> stop(session)
+      {:stopping, current_owner} -> await_stop_owner(session, owner, current_owner, deadline)
     end
+  end
+
+  defp await_stop_owner(session, owner, current_owner, deadline) when current_owner != owner,
+    do: await_stop(session, current_owner, deadline)
+
+  defp await_stop_owner(session, owner, owner, deadline) do
+    cond do
+      not Process.alive?(owner) -> reclaim_or_wait(session, owner, deadline)
+      System.monotonic_time(:millisecond) >= deadline -> :timeout
+      true -> wait_for_stop(session, owner, deadline)
+    end
+  end
+
+  defp reclaim_or_wait(session, owner, deadline) do
+    case reclaim_stop(session.env_store, owner) do
+      :claimed -> finish_stop(session)
+      {:waiting, next_owner} -> await_stop(session, next_owner, deadline)
+      :stopped -> :ok
+    end
+  end
+
+  defp wait_for_stop(session, owner, deadline) do
+    Process.sleep(10)
+    await_stop(session, owner, deadline)
+  end
+
+  @doc false
+  def stop_timeout(deployment, opts) do
+    call_timeout = Keyword.get(opts, :call_timeout, @call_timeout)
+    launcher_timeout = Keyword.get(opts, :launcher_timeout, @launcher_timeout)
+    install_timeout = Keyword.get(opts, :install_timeout, @install_timeout)
+    shutdown_timeout = Keyword.get(opts, :shutdown_timeout, @shutdown_timeout)
+    exit_timeout = Keyword.get(opts, :exit_timeout, @exit_timeout)
+
+    worst_case_start =
+      exit_timeout + launcher_timeout + deployment.boot_timeout + call_timeout + shutdown_timeout
+
+    worst_case_cleanup = install_timeout + @fallback_timeout + exit_timeout
+    worst_case_start + worst_case_cleanup + @stop_slack
   end
 
   defp stop_server(%__MODULE__{server: server, stop_timeout: timeout} = session) do
@@ -513,6 +536,7 @@ defmodule Forecastle.Deployment.Session do
   defp peer_started(peer, state) do
     case safe_call(peer, System, :pid, [], state.call_timeout) do
       {:ok, os_pid} ->
+        remember_pid(state, os_pid)
         {:ok, %{state | peer: peer, os_pid: os_pid, last_os_pid: nil, down: nil}}
 
       {:error, message} ->
@@ -624,37 +648,97 @@ defmodule Forecastle.Deployment.Session do
 
   defp claim_stop(nil), do: :claimed
 
-  defp claim_stop(stop_state) do
-    case :atomics.compare_exchange(stop_state, 1, 0, 1) do
-      :ok -> :claimed
-      1 -> :waiting
-      2 -> :stopped
-    end
+  defp claim_stop(env_store) do
+    owner = self()
+
+    Agent.get_and_update(env_store, fn
+      %{stop_status: :active} = store ->
+        {:claimed, %{store | stop_status: :stopping, stop_owner: owner}}
+
+      %{stop_status: :stopping, stop_owner: owner} = store ->
+        {{:waiting, owner}, store}
+
+      %{stop_status: :stopped} = store ->
+        {:stopped, store}
+    end)
+  catch
+    :exit, _reason -> :stopped
+  end
+
+  defp reclaim_stop(nil, _owner), do: :claimed
+
+  defp reclaim_stop(env_store, owner) do
+    claimant = self()
+
+    Agent.get_and_update(env_store, fn
+      %{stop_status: :stopping, stop_owner: ^owner} = store ->
+        {:claimed, %{store | stop_owner: claimant}}
+
+      %{stop_status: :stopping, stop_owner: next_owner} = store ->
+        {{:waiting, next_owner}, store}
+
+      %{stop_status: :active} = store ->
+        {:claimed, %{store | stop_status: :stopping, stop_owner: claimant}}
+
+      %{stop_status: :stopped} = store ->
+        {:stopped, store}
+    end)
+  catch
+    :exit, _reason -> :stopped
   end
 
   defp release_stop(nil), do: :ok
-  defp release_stop(stop_state), do: :atomics.put(stop_state, 1, 0)
 
-  defp complete_stop(nil), do: :ok
-  defp complete_stop(stop_state), do: :atomics.put(stop_state, 1, 2)
-
-  defp stop_status(nil), do: 2
-  defp stop_status(stop_state), do: :atomics.get(stop_state, 1)
-
-  defp fallback_session_stop(session) do
-    fallback_stop(session.deployment, fallback_env(session.env_store))
+  defp release_stop(env_store) do
+    Agent.update(env_store, fn store ->
+      %{store | stop_status: :active, stop_owner: nil}
+    end)
+  catch
+    :exit, _reason -> :ok
   end
 
-  defp fallback_env(nil), do: []
+  defp complete_stop(nil), do: :ok
 
-  defp fallback_env(env_store) do
-    Agent.get(env_store, & &1, 1_000)
+  defp complete_stop(env_store) do
+    Agent.update(env_store, fn store ->
+      %{store | env: [], os_pid: nil, stop_status: :stopped, stop_owner: nil}
+    end)
   catch
-    :exit, _reason -> []
+    :exit, _reason -> :ok
+  end
+
+  defp stop_status(nil), do: :stopped
+
+  defp stop_status(env_store) do
+    Agent.get(env_store, fn
+      %{stop_status: :stopping, stop_owner: owner} -> {:stopping, owner}
+      %{stop_status: status} -> status
+    end)
+  catch
+    :exit, _reason -> :stopped
+  end
+
+  defp fallback_session_stop(session) do
+    {env, os_pid} = fallback_details(session.env_store)
+    fallback_stop(session.deployment, env, os_pid, session.exit_timeout)
+  end
+
+  defp fallback_details(nil), do: {[], nil}
+
+  defp fallback_details(env_store) do
+    Agent.get(env_store, fn store -> {store.env, store.os_pid} end, 1_000)
+  catch
+    :exit, _reason -> {[], nil}
   end
 
   defp remember_env(state, env) do
-    Agent.update(state.env_store, fn _current -> env end)
+    Agent.update(state.env_store, fn store -> %{store | env: env} end)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp remember_pid(state, os_pid) do
+    Agent.update(state.env_store, fn store -> %{store | os_pid: os_pid} end)
   catch
     :exit, _reason -> :ok
   end
@@ -667,21 +751,11 @@ defmodule Forecastle.Deployment.Session do
     :exit, _reason -> :ok
   end
 
-  defp fallback_stop(deployment, env) do
+  defp fallback_stop(deployment, env, os_pid, exit_timeout) do
     launcher = Path.join(deployment.root, "bin/#{deployment.name}")
 
     if File.regular?(launcher) do
-      case Deployment.stop(deployment, env) do
-        {_output, 0} ->
-          :ok
-
-        {output, status} ->
-          {:error,
-           "fallback #{deployment.name} stop exited with #{status}: #{String.trim(output)}"}
-
-        :timeout ->
-          {:error, "fallback #{deployment.name} stop did not finish within its deadline"}
-      end
+      run_fallback_stop(deployment, env, os_pid, exit_timeout)
     else
       {:error, "fallback launcher does not exist: #{launcher}"}
     end
@@ -692,6 +766,41 @@ defmodule Forecastle.Deployment.Session do
       {:error,
        "fallback #{deployment.name} stop failed: " <>
          Exception.format(kind, reason, __STACKTRACE__)}
+  end
+
+  defp run_fallback_stop(deployment, env, os_pid, exit_timeout) do
+    case Deployment.stop(deployment, env) do
+      {_output, 0} ->
+        :ok
+
+      {output, status} ->
+        prefix =
+          "fallback #{deployment.name} stop exited with #{status}: #{String.trim(output)}"
+
+        confirm_fallback_exit(os_pid, exit_timeout, prefix)
+
+      :timeout ->
+        confirm_fallback_exit(
+          os_pid,
+          exit_timeout,
+          "fallback #{deployment.name} stop did not finish within its deadline"
+        )
+    end
+  end
+
+  defp confirm_fallback_exit(nil, _timeout, prefix) do
+    {:error, prefix <> "; the session had no operating-system pid to verify"}
+  end
+
+  defp confirm_fallback_exit(os_pid, timeout, prefix) do
+    case await_exit(os_pid, timeout) do
+      :ok -> :ok
+      {:error, why} -> {:error, prefix <> "; " <> why}
+    end
+  end
+
+  defp new_store(env) do
+    %{env: env, os_pid: nil, stop_status: :active, stop_owner: nil}
   end
 
   defp expected_reboot(deployment, vsn) do
@@ -833,7 +942,12 @@ defmodule Forecastle.Deployment.Session do
         stop_peer(state.peer)
         :ok
       else
-        fallback_stop(state.deployment, state.env)
+        fallback_stop(
+          state.deployment,
+          state.env,
+          state.os_pid || state.last_os_pid,
+          state.exit_timeout
+        )
       end
 
     exit_result = await_exit(state.os_pid || state.last_os_pid, state.exit_timeout)

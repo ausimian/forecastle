@@ -1074,9 +1074,11 @@ operating-system process does not exit. A session controller that exceeds its
 shutdown budget is killed, and the deployment launcher is asked to stop with
 the session's effective environment as a bounded fallback. A successful stop is
 idempotent; a failed fallback returns `{:error, message}` instead of claiming the
-release stopped. Register the
-deployment-level teardown before `start_peer!/2`, as in the recipe above, because
-a failed start returns no session value and the callback must still exist.
+release stopped and retains the session's private environment state for a retry.
+A confirmed stop releases that state. A session that is never stopped retains it
+until the test VM exits, so register the deployment-level teardown before
+`start_peer!/2`, as in the recipe above, because a failed start returns no
+session value and the callback must still exist.
 
 ### What it does for you, and what it does not
 
