@@ -169,12 +169,11 @@ defmodule Forecastle.RestartUpgradeTest do
       )
 
     on_exit(fn ->
-      # Internal lifecycle assertion: losing the session controller, without an
-      # orderly public stop, still takes the owned peer process with it.
-      os_pid = Deployment.os_pid(session)
-      Process.exit(session.server, :kill)
-      Deployment.await_exit!(os_pid)
-      File.rm(relup)
+      try do
+        Deployment.stop(session)
+      after
+        File.rm(relup)
+      end
     end)
 
     Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
@@ -212,6 +211,7 @@ defmodule Forecastle.RestartUpgradeTest do
       greeting: Deployment.call!(session, Sample, :greeting, []),
       env_marker: Deployment.call!(session, Sample, :env_marker, []),
       release_env: Deployment.call!(session, Sample, :release_env, []),
+      peer_work: Deployment.call!(session, System, :get_env, ["FORECASTLE_PEER_WORK"]),
       releases: Deployment.castle!(session, ["releases"]),
       version: Deployment.launcher!(session, ["version"]),
       start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data")),
@@ -223,7 +223,6 @@ defmodule Forecastle.RestartUpgradeTest do
     # A crash, not a stop: `bin/sample stop` would be an orderly shutdown, and
     # what has to be survivable is the other kind.
     {_output, 0} = System.cmd("kill", ["-9", provisional.os_pid])
-    Deployment.await_exit!(provisional.os_pid)
     Deployment.restart_peer!(session)
 
     rolled_back = %{
@@ -257,6 +256,15 @@ defmodule Forecastle.RestartUpgradeTest do
       releases: Deployment.castle!(session, ["releases"])
     }
 
+    # Internal lifecycle assertion, after every setup operation that can fail:
+    # losing the controller without an orderly public stop still takes the owned
+    # release with it. The tolerant on_exit above remains safe on every earlier
+    # failure path and after this successful one.
+    owned_pid = Deployment.os_pid(session)
+    Process.exit(session.server, :kill)
+    Deployment.await_exit!(owned_pid)
+    controller_loss = %{server_down?: not Process.alive?(session.server), os_pid: owned_pid}
+
     {:ok,
      deploy: deploy,
      session: session,
@@ -265,7 +273,8 @@ defmodule Forecastle.RestartUpgradeTest do
      rolled_back: rolled_back,
      installed: installed,
      committed: committed,
-     restarted: restarted}
+     restarted: restarted,
+     controller_loss: controller_loss}
   end
 
   describe "heart, on a release that is going to need it" do
@@ -462,6 +471,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # possible at all.
       refute provisional.pending?, "Castle's restart marker survived the boot that used it"
       refute provisional.marker?, "releases/new_start_erl.data survived the boot that used it"
+      assert provisional.peer_work == nil
     end
 
     test "leaves nothing of the protocol behind", %{provisional: provisional} do
@@ -512,6 +522,19 @@ defmodule Forecastle.RestartUpgradeTest do
       # With no marker in sight, so nothing but start_erl.data selected it.
       assert restarted.counter == {@to, 0}
       assert restarted.releases =~ ~r/#{@to}\s+permanent/
+    end
+  end
+
+  describe "losing the peer session controller" do
+    test "takes the release process with it", %{controller_loss: controller_loss} do
+      assert controller_loss.server_down?
+
+      assert {_, status} =
+               System.cmd("ps", ["-o", "pid=", "-p", controller_loss.os_pid],
+                 stderr_to_stdout: true
+               )
+
+      refute status == 0
     end
   end
 end

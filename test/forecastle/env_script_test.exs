@@ -807,6 +807,71 @@ defmodule Forecastle.EnvScriptTest do
     end
   end
 
+  describe "OTP peer arguments" do
+    test "uses the selected args file without leaking its work directory", %{root: root} do
+      work = peer_work(root)
+      selected = Path.join(root, "selected.vm.args")
+      File.write!(selected, "-setcookie selected\n-extra\napplication-argument\n")
+
+      run =
+        start(root, [
+          {"FORECASTLE_PEER_WORK", work},
+          {"RELEASE_VM_ARGS", selected}
+        ])
+
+      combined = Path.join(work, "vm.args")
+      contents = File.read!(combined)
+
+      assert run.status == 0
+      assert run.env["FORECASTLE_PEER_WORK"] == "<unset>"
+      assert run.env["RELEASE_VM_ARGS"] == combined
+      assert File.stat!(combined).access == :read_write
+      assert contents =~ ~s(-env RELEASE_VM_ARGS "#{selected}")
+
+      assert byte_offset(contents, "-user peer") <
+               byte_offset(contents, "-extra\napplication-argument")
+    end
+
+    test "refuses a work directory that is not owner-only", %{root: root} do
+      work = peer_work(root)
+      File.chmod!(work, 0o755)
+
+      run = start(root, [{"FORECASTLE_PEER_WORK", work}])
+
+      refute run.status == 0
+      assert run.stderr =~ "OTP peer work directory is absent or not owner-only"
+      refute File.exists?(Path.join(work, "vm.args"))
+    end
+
+    test "does not replace an existing combined args file", %{root: root} do
+      work = peer_work(root)
+      combined = Path.join(work, "vm.args")
+      File.write!(combined, "not ours\n")
+
+      run = start(root, [{"FORECASTLE_PEER_WORK", work}])
+
+      refute run.status == 0
+      assert run.stderr =~ "refusing an existing OTP peer vm.args"
+      assert File.read!(combined) == "not ours\n"
+    end
+
+    test "refuses an application args file that already controls the user process", %{root: root} do
+      work = peer_work(root)
+      selected = Path.join(root, "selected.vm.args")
+      File.write!(selected, "-user application_user\n")
+
+      run =
+        start(root, [
+          {"FORECASTLE_PEER_WORK", work},
+          {"RELEASE_VM_ARGS", selected}
+        ])
+
+      refute run.status == 0
+      assert run.stderr =~ "supplies -user, which cannot be combined with OTP peer control"
+      refute File.exists?(Path.join(work, "vm.args"))
+    end
+  end
+
   describe "the provisional version" do
     test "is selected from a pair that agrees, by exec'ing the launcher",
          %{root: root} do
@@ -1521,7 +1586,8 @@ defmodule Forecastle.EnvScriptTest do
     """
 
     for castle_var in ELIXIR_ERL_OPTIONS ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS \\
-                      HEART_COMMAND HEART_NO_KILL HEART_BEAT_TIMEOUT; do
+                      HEART_COMMAND HEART_NO_KILL HEART_BEAT_TIMEOUT \\
+                      FORECASTLE_PEER_WORK RELEASE_VM_ARGS; do
       eval "castle_val=\\${$castle_var-<unset>}"
       printf 'env %s=%s\\n' "$castle_var" "$castle_val"
     done
@@ -1549,6 +1615,20 @@ defmodule Forecastle.EnvScriptTest do
       [name, value] = String.split(line, "=", parts: 2)
       {name, value}
     end
+  end
+
+  defp peer_work(root) do
+    work = Path.join(root, "peer-work")
+    File.mkdir!(work)
+    File.chmod!(work, 0o700)
+    File.write!(Path.join(work, "peer.args"), "-user peer\n")
+    File.chmod!(Path.join(work, "peer.args"), 0o600)
+    work
+  end
+
+  defp byte_offset(contents, needle) do
+    {offset, _length} = :binary.match(contents, needle)
+    offset
   end
 
   # A pair that agrees, as Castle and release_handler leave it: the marker with

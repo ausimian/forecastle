@@ -3061,9 +3061,15 @@ Decisions in it worth not relitigating:
   control connection, and leaving it in an ERL flag contaminates Castle's nested
   configuration peer. The session supplies OTP's exact peer arguments in an
   owner-only working directory. After preboot, the env hook combines them with
-  the `vm.args` under the `REL_VSN_DIR` the stock launcher actually selected and
-  points that invocation at the result. A provisional re-exec therefore selects
-  the target's args itself; the session never guesses the version. The working
+  the explicit `RELEASE_VM_ARGS`, or the `vm.args` under the `REL_VSN_DIR` the
+  stock launcher actually selected when that variable is absent, and points that
+  invocation at the result. A provisional re-exec therefore selects the target's
+  args itself; the session never guesses the version. The hook accepts only an
+  owner-only work directory and regular owner-only argument file, refuses an
+  existing output name and an application-supplied `-user`, and creates the
+  combined file with noclobber under a private umask. Peer arguments precede the
+  application's args so a trailing `-extra` cannot swallow them, while the
+  original `RELEASE_VM_ARGS` value is restored inside the VM before the temporary
   directory is removed as soon as the peer connects.
 - **Relup generation is not part of the harness.** `mix castle.relup` and
   `upgrade_from:` are already public, so a project has both without this, and

@@ -180,11 +180,13 @@ defmodule Forecastle.Deployment do
       tests from covering it.
     * `:env` - environment carried by every command this deployment runs, on top
       of `scrubbed_env/1` and underneath anything a call passes for itself.
-    * `:boot_timeout` - how long, in milliseconds, the release is given to answer
-      an rpc after `daemon` has returned. Defaults to 20 seconds, which is a
-      description of a release that does nothing on the way up: an application
-      that runs migrations, warms a cache or waits on a dependency takes longer,
-      and its project is the only thing that knows how much longer.
+    * `:boot_timeout` - the application's cold-boot allowance in milliseconds.
+      Raw daemon starts use it after `daemon` returns. Peer sessions add it to a
+      separate launcher allowance covering the adapter and first-start preboot
+      VM. Defaults to 20 seconds, which describes a release that does nothing on
+      the way up: an application that runs migrations, warms a cache or waits on
+      a dependency takes longer, and its project is the only thing that knows
+      how much longer.
   """
   @spec new(Path.t(), binary(), keyword()) :: t()
   def new(root, name, opts \\ []) when is_binary(root) and is_binary(name) do
@@ -479,9 +481,11 @@ defmodule Forecastle.Deployment do
 
   `:env` supplies scenario environment variables after the normal deployment
   scrub. They are real variables in the child operating-system process, so they
-  are visible to runtime configuration, ports and NIFs. `:call_timeout`,
-  `:install_timeout`, `:shutdown_timeout` and `:exit_timeout` override the
-  corresponding bounded waits in milliseconds.
+  are visible to runtime configuration, ports and NIFs. `:launcher_timeout` is
+  the allowance for the adapter, env hook and first-start preboot VM and defaults
+  to 180 seconds; the deployment's `:boot_timeout` is added to it.
+  `:call_timeout`, `:install_timeout`, `:shutdown_timeout` and `:exit_timeout`
+  override the other bounded waits in milliseconds.
 
   The returned value deliberately exposes neither the peer controller nor the
   node name. A `restart_emulator` install replaces that peer behind the same

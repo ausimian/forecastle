@@ -80,7 +80,7 @@ defmodule Forecastle.UpgradeTest do
       scenario: Deployment.call!(session, System, :get_env, ["FORECASTLE_SCENARIO"]),
       mix_env: Deployment.call!(session, System, :get_env, ["MIX_ENV"]),
       erl_zflags: Deployment.call!(session, System, :get_env, ["ERL_ZFLAGS"]),
-      peer_args: Deployment.call!(session, System, :get_env, ["FORECASTLE_PEER_ARGS"]),
+      peer_work: Deployment.call!(session, System, :get_env, ["FORECASTLE_PEER_WORK"]),
       bounded_call: Deployment.call(session, Process, :sleep, [100], 20),
       root_dir: session |> Deployment.call!(:code, :root_dir, []) |> to_string()
     }
@@ -198,7 +198,7 @@ defmodule Forecastle.UpgradeTest do
       assert booted.scenario == "present"
       assert booted.mix_env == nil
       assert booted.erl_zflags == nil
-      assert booted.peer_args == nil
+      assert booted.peer_work == nil
       assert {:error, message} = booted.bounded_call
       assert message =~ "did not answer within 20ms"
     end

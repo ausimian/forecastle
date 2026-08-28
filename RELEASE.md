@@ -4,7 +4,9 @@
   `Forecastle.Deployment` session. The release still boots through its stock Mix
   launcher and own ERTS, while tests use structured MFA calls and keep one
   session across both hot upgrades and emulator restarts. Session teardown also
-  stops the release it owns.
+  stops the release it owns. Peer startup retains a 180-second launcher/preboot
+  allowance and adds the deployment's `:boot_timeout`, so the first-start
+  preboot VM does not consume an application's cold-boot budget.
 - `bin/castle`, a release management CLI, is now installed alongside the
   standard launcher. It provides `releases`, `upgradable`, `unpack`, `install`,
   `commit` and `remove`, and delegates to the running system through the standard

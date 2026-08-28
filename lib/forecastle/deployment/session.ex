@@ -11,6 +11,7 @@ defmodule Forecastle.Deployment.Session do
   @opaque t :: %__MODULE__{server: pid(), stop_timeout: timeout()}
 
   @call_timeout 5_000
+  @launcher_timeout 180_000
   @install_timeout 300_000
   @shutdown_timeout 10_000
   @exit_timeout 30_000
@@ -68,11 +69,13 @@ defmodule Forecastle.Deployment.Session do
       deployment: deployment,
       env: Keyword.get(opts, :env, []),
       call_timeout: Keyword.get(opts, :call_timeout, @call_timeout),
+      launcher_timeout: Keyword.get(opts, :launcher_timeout, @launcher_timeout),
       install_timeout: Keyword.get(opts, :install_timeout, @install_timeout),
       shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @shutdown_timeout),
       exit_timeout: Keyword.get(opts, :exit_timeout, @exit_timeout),
       peer: nil,
       os_pid: nil,
+      last_os_pid: nil,
       down: nil,
       install: nil
     }
@@ -141,15 +144,17 @@ defmodule Forecastle.Deployment.Session do
 
   def handle_call(:restart, _from, state) do
     old_peer = state.peer
-    old_pid = state.os_pid
+    old_pid = state.os_pid || state.last_os_pid
     stop_peer(old_peer)
 
     with :ok <- await_exit(old_pid, state.exit_timeout),
-         {:ok, restarted} <- start_peer(%{state | peer: nil, os_pid: nil, down: nil}) do
+         {:ok, restarted} <-
+           start_peer(%{state | peer: nil, os_pid: nil, last_os_pid: nil, down: nil}) do
       {:reply, {:ok, :restarted}, restarted}
     else
       {:error, message} ->
-        {:reply, {:error, message}, %{state | peer: nil, os_pid: nil, down: message}}
+        {:reply, {:error, message},
+         %{state | peer: nil, os_pid: nil, last_os_pid: old_pid, down: message}}
     end
   end
 
@@ -197,14 +202,15 @@ defmodule Forecastle.Deployment.Session do
   end
 
   def handle_info({:EXIT, peer, reason}, %{peer: peer, install: nil} = state) do
-    {:noreply, %{state | peer: nil, os_pid: nil, down: reason}}
+    {:noreply, %{state | peer: nil, os_pid: nil, last_os_pid: state.os_pid, down: reason}}
   end
 
   def handle_info({:EXIT, peer, reason}, %{peer: peer, install: install} = state) do
     case expected_reboot(state.deployment, install.vsn) do
       :ok ->
         with :ok <- await_exit(install.old_os_pid, state.exit_timeout),
-             {:ok, restarted} <- start_peer(%{state | peer: nil, os_pid: nil, down: nil}) do
+             {:ok, restarted} <-
+               start_peer(%{state | peer: nil, os_pid: nil, last_os_pid: nil, down: nil}) do
           {:noreply, %{restarted | install: install}}
         else
           {:error, message} -> fail_install(state, message)
@@ -249,7 +255,7 @@ defmodule Forecastle.Deployment.Session do
         |> Enum.map(&to_charlist/1)
       end,
       env: Enum.map(env, fn {name, value} -> {to_charlist(name), to_charlist(value)} end),
-      wait_boot: deployment.boot_timeout,
+      wait_boot: state.launcher_timeout + deployment.boot_timeout,
       shutdown: {:halt, state.shutdown_timeout},
       peer_down: :stop
     }
@@ -265,7 +271,7 @@ defmodule Forecastle.Deployment.Session do
         {:error, reason} ->
           {:error,
            "#{deployment.root} did not boot through its stock launcher within " <>
-             "#{deployment.boot_timeout}ms: #{inspect(reason)}"}
+             "#{state.launcher_timeout + deployment.boot_timeout}ms: #{inspect(reason)}"}
       end
     after
       File.rm_rf(work)
@@ -280,7 +286,7 @@ defmodule Forecastle.Deployment.Session do
   defp peer_started(peer, state) do
     case safe_call(peer, System, :pid, [], state.call_timeout) do
       {:ok, os_pid} ->
-        {:ok, %{state | peer: peer, os_pid: os_pid, down: nil}}
+        {:ok, %{state | peer: peer, os_pid: os_pid, last_os_pid: nil, down: nil}}
 
       {:error, message} ->
         stop_peer(peer)
@@ -374,7 +380,16 @@ defmodule Forecastle.Deployment.Session do
     diagnosis = install_diagnosis(install)
     cancel_timer(install)
     GenServer.reply(install.from, {:error, message <> diagnosis})
-    {:noreply, %{state | install: nil, peer: nil, os_pid: nil, down: message}}
+
+    {:noreply,
+     %{
+       state
+       | install: nil,
+         peer: nil,
+         os_pid: nil,
+         last_os_pid: state.os_pid,
+         down: message
+     }}
   end
 
   defp install_diagnosis(install) do
