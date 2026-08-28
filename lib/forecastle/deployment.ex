@@ -595,9 +595,34 @@ defmodule Forecastle.Deployment do
   first to go away.
   """
   @spec os_pid(t(), env()) :: binary()
-  def os_pid(%__MODULE__{} = deployment, env \\ []) do
-    deployment |> launcher!(["pid"], env) |> only_pid!(deployment)
+  def os_pid(%__MODULE__{name: name} = deployment, env \\ []) do
+    deployment
+    |> within(Path.join(deployment.root, "bin/#{name}"), ["pid"], env, @probe_timeout)
+    |> answered!(deployment, "pid")
+    |> only_pid!(deployment)
   end
+
+  # **Bounded, because this is the harness asking a node whose health it does not
+  # know.** `install_supervised/3` reads the pid *before* it starts the install
+  # task or the reboot wait, so an unbounded read there is a wedged node stalling
+  # the whole upgrade before any of that function's own deadlines exist.
+  #
+  # That is the line: the rpcs this module makes on its own account -
+  # `await_boot!/2`'s probe, `deploy!/3`'s liveness check, `stop/1`, and this -
+  # are bounded, because each of them can meet a node that accepts a connection
+  # and never replies. The ones a *project* makes through `rpc!/3`, `castle!/3`
+  # or `launcher!/3` are not, because their duration is the project's business -
+  # an install legitimately takes minutes - and the module's own ExUnit timeout
+  # is the backstop for them.
+  defp answered!(:timeout, deployment, command) do
+    flunk(
+      "bin/#{deployment.name} #{command} did not answer within " <>
+        "#{div(@probe_timeout, 1000)}s. A node that accepts a distribution connection " <>
+        "and then does not reply is wedged rather than absent."
+    )
+  end
+
+  defp answered!(result, deployment, command), do: ok!(result, deployment.name, [command])
 
   # **What the launcher printed is not only the answer.** Every command here runs
   # with `stderr_to_stdout`, so a project's own `env.sh` writing a line on the way

@@ -118,6 +118,22 @@ defmodule Forecastle.DeploymentTest do
       assert Deployment.os_pid(Deployment.new(ctx.tree, "my_app")) == "4242"
     end
 
+    test "reading the pid is bounded, since it is read before any other deadline", ctx do
+      # `install_supervised/3` reads the pid before it starts the install task or
+      # the reboot wait, so an unbounded read there is a wedged node stalling the
+      # upgrade before any of that function's own deadlines exist.
+      stub!(ctx.tree, "my_app", "sleep 60\n")
+
+      {elapsed, _} =
+        :timer.tc(fn ->
+          assert_raise ExUnit.AssertionError, ~r/did not answer within/, fn ->
+            Deployment.os_pid(Deployment.new(ctx.tree, "my_app"))
+          end
+        end)
+
+      assert elapsed < 30_000_000, "waited #{div(elapsed, 1_000_000)}s on a 60s sleep"
+    end
+
     test "and a pid that is not a pid is refused rather than guessed at", ctx do
       stub!(ctx.tree, "my_app", ~s|echo "not a pid at all"\n|)
 
