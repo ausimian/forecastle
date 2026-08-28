@@ -195,11 +195,12 @@ In the post-assembly step:
     deployment it creates `releases/RELEASES`, which is what lets the system
     manage its own releases — a short-lived VM, once, and only while that file
     is absent. That helper finishes before Forecastle adds its own `-heart`, so
-    its normal exit cannot look like the daemon stopped and tried to reboot. If
-    the release root is read-only, the start warns and carries on; the system can
-    run and restart but cannot unpack or install upgrades. If the root is
-    intended to be writable, fix the reported error and restart before
-    upgrading.
+    its normal exit cannot look like the daemon stopped and tried to reboot. A
+    `-heart` in `rel/vm.args.eex` is also absent from the helper: that file is
+    passed to the system VM, not this one. If the release root is read-only, the
+    start warns and carries on; the system can run and restart but cannot unpack
+    or install upgrades. If the root is intended to be writable, fix the
+    reported error and restart before upgrading.
 
     Every start also runs OTP's `heart`, deliberately configured to do nothing:
     `HEART_NO_KILL`, no `HEART_COMMAND`, a beat timeout at heart's documented
@@ -209,15 +210,21 @@ In the post-assembly step:
 
     If your deployment already asks for `-heart` — in `rel/vm.args.eex`, in
     `ELIXIR_ERL_OPTIONS`, in one of `ERL_AFLAGS`, `ERL_FLAGS` and `ERL_ZFLAGS`,
-    or in `ERL_OTP<major>_FLAGS` — that is fine, and nothing is added beside it:
-    two of the flag make `init:get_argument(heart)` answer `{ok, [[], []]}`,
-    which heart's own startup check has no clause for, so the boot would hang
-    having printed nothing. The hook settles it by asking `erl` what argument
-    list it would build, so quoting and escaping in those values are read the way
-    `erl` reads them, and all six places a flag can come from are covered at
-    once. It asks on every start, which costs one short-lived `erl` that exits
-    without booting anything; commands that do not start the system — `eval`,
-    `rpc`, `remote` — ask nothing.
+    or in `ERL_OTP<major>_FLAGS` — nothing is added beside it: two of the flag
+    make `init:get_argument(heart)` answer `{ok, [[], []]}`, which heart's own
+    startup check has no clause for, so the boot would hang having printed
+    nothing. The hook settles it by asking `erl` what argument list it would
+    build, so quoting and escaping in those values are read the way `erl` reads
+    them, and all six places a flag can come from are covered at once.
+
+    That duplicate protection does not make an environment-wide `-heart` quiet.
+    `ELIXIR_ERL_OPTIONS` and the `ERL_*FLAGS` variables apply to the first-start
+    helper as well as the system VM, so OTP prints the helper's heart lifecycle
+    messages before the daemon starts. Clean first-start output is not supported
+    with `-heart` in those variables; put the flag in `rel/vm.args.eex`, or let
+    Forecastle add it. The hook asks on every start, which costs one short-lived
+    `erl` that exits without booting anything; commands that do not start the
+    system — `eval`, `rpc`, `remote` — ask nothing.
 
     Those three are **assigned**, and `HEART_COMMAND` is **unset**, rather than
     defaulted — so a deployment that already has any of them in its environment

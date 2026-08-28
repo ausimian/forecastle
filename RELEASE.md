@@ -1197,14 +1197,18 @@
 
 ### Fixed
 
-- A deployment's first `bin/<name> daemon` no longer prints a stopped Erlang VM
-  and a proposed reboot while successfully starting the daemon. Those lines came
-  from the short-lived VM that creates `releases/RELEASES`: Forecastle added its
-  own `-heart` before launching the helper, so heart reported the helper's
-  orderly exit immediately before the real daemon started. Forecastle now waits
-  for that helper to return before adding its flag. It still clears
-  `HEART_COMMAND` and assigns the no-kill and maximum-timeout settings first,
-  keeping the helper safe when a deployment supplies a heart flag of its own.
+- An ordinary deployment's first `bin/<name> daemon` no longer prints a stopped
+  Erlang VM and a proposed reboot while successfully starting the daemon. Those
+  lines came from the short-lived VM that creates `releases/RELEASES`:
+  Forecastle added its own `-heart` before launching the helper, so heart
+  reported the helper's orderly exit immediately before the real daemon started.
+  Forecastle now waits for that helper to return before adding its flag. It still
+  clears `HEART_COMMAND` and assigns the no-kill and maximum-timeout settings
+  first, keeping the helper safe when a deployment supplies a heart flag of its
+  own. A flag supplied through `ELIXIR_ERL_OPTIONS` or erlexec's `ERL_*FLAGS`
+  applies to the helper itself, so clean first-start output is not supported for
+  those deployments; use `rel/vm.args.eex` or Forecastle's flag when that output
+  must stay quiet.
 - `Forecastle.steps/1` no longer splices a second `&Forecastle.generate_relup/1`
   into a steps list that already has one. A project that packs its own archive in
   a step of its own is told to place generation itself, so the one documented

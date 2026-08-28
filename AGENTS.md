@@ -666,6 +666,10 @@ around it composes instead:
   closed` and `Would reboot` directly from `bin/<name> daemon`, even though the
   real daemon starts immediately afterwards. The safety variables are applied
   before the helper, because a deployment may supply a heart flag of its own.
+  A flag in `rel/vm.args.eex` reaches only the system VM and stays quiet here; a
+  flag in `ELIXIR_ERL_OPTIONS` or one of erlexec's `ERL_*FLAGS` reaches the helper
+  too, so its lifecycle output remains. Those sources are protected from a
+  duplicate flag, but clean first-start output is not supported with them.
 - **`$ROOT/bin/start`, inert.** `install_start_program/1` writes it, and
   `priv/start.sh.eex` is the whole of it: a comment and `exit 0`. It is at the
   *default* `start_prg` path deliberately — `init/1` yields
