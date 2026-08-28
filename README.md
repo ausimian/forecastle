@@ -194,9 +194,11 @@ In the post-assembly step:
     only for the commands that start the system. On the **first** start of a
     deployment it creates `releases/RELEASES`, which is what lets the system
     manage its own releases — a short-lived VM, once, and only while that file
-    is absent. If the release root is read-only, the start warns and carries on;
-    the system can run and restart but cannot unpack or install upgrades. If the
-    root is intended to be writable, fix the reported error and restart before
+    is absent. That helper finishes before Forecastle adds its own `-heart`, so
+    its normal exit cannot look like the daemon stopped and tried to reboot. If
+    the release root is read-only, the start warns and carries on; the system can
+    run and restart but cannot unpack or install upgrades. If the root is
+    intended to be writable, fix the reported error and restart before
     upgrading.
 
     Every start also runs OTP's `heart`, deliberately configured to do nothing:

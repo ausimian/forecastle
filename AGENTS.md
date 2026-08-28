@@ -659,8 +659,13 @@ around it composes instead:
   `env.sh` and that it assigns.
 
   Incidental, measured: heart prints `heart_beat_kill_pid = <pid>` on every
-  start, and `heart_beat_timeout = <n>` when the variable is set. Two lines of
-  noise on the release's own output, not a fault.
+  start, and `heart_beat_timeout = <n>` when the variable is set. The daemon's
+  own pair is captured by `run_erl`. Forecastle's flag must be added only after
+  the first-start VM that creates `releases/RELEASES` has returned; otherwise
+  that short-lived helper prints its startup lines followed by `Erlang has
+  closed` and `Would reboot` directly from `bin/<name> daemon`, even though the
+  real daemon starts immediately afterwards. The safety variables are applied
+  before the helper, because a deployment may supply a heart flag of its own.
 - **`$ROOT/bin/start`, inert.** `install_start_program/1` writes it, and
   `priv/start.sh.eex` is the whole of it: a comment and `exit 0`. It is at the
   *default* `start_prg` path deliberately — `init/1` yields

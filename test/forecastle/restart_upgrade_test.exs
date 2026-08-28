@@ -314,6 +314,20 @@ defmodule Forecastle.RestartUpgradeTest do
       assert booted.start_output =~ "overriding HEART_BEAT_TIMEOUT=[11] with 65535"
     end
 
+    test "does not report the RELEASES helper stopping as the daemon stopping",
+         %{booted: booted} do
+      # The first start has no releases/RELEASES, so env.sh boots a short-lived
+      # VM to create it before the daemon starts. Forecastle used to add -heart
+      # before that call. The helper then printed heart's orderly-shutdown report
+      # to the daemon command, including "Would reboot", even though the daemon
+      # started immediately afterwards and remained alive. The live-node checks
+      # in setup prove the second half; these pin the command's side of it.
+      refute booted.start_output =~ "heart_beat_kill_pid"
+      refute booted.start_output =~ "heart_beat_timeout"
+      refute booted.start_output =~ "Erlang has closed"
+      refute booted.start_output =~ "Would reboot"
+    end
+
     test "says nothing on a start that inherited none of them", %{restarted: restarted} do
       # The ordinary deployment, which is every one that does not set these. A
       # warning on every start is a warning nobody reads, and the heart
