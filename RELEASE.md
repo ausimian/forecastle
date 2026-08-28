@@ -977,6 +977,9 @@
 
 ### Changed
 
+- `bin/castle` now uses shorter, plainer help and error messages. Diagnostics
+  lead with the problem and give the recovery step directly; command behaviour,
+  exit statuses and output streams are unchanged.
 - **Breaking:** `mix forecastle.relup` is now `mix castle.relup`. The task is
   still implemented in Forecastle and still ships with it; only the name has
   changed. Where build-time code lives is a packaging decision and what the task
