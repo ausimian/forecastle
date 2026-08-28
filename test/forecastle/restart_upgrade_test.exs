@@ -26,8 +26,8 @@ defmodule Forecastle.RestartUpgradeTest do
       permanent, so the reboot would come back on the old version. The `env.sh`
       fragment selects the provisional one, and only when Castle's own marker
       agrees with OTP's.
-    * nothing in the release restarts it. The test is the supervisor; see
-      `Forecastle.Deployment.install_supervised/3`.
+    * nothing in the release restarts it. The peer session owns the replacement
+      incarnation and keeps one stable public handle across it.
 
   The rollback half is exercised before the commit half, and in that order for a
   reason: a provisional release that is killed before `Castle.commit/1` has to
@@ -122,20 +122,6 @@ defmodule Forecastle.RestartUpgradeTest do
   # unremarkable variable does not manufacture a second flag.
   @tabbed_heart [{"ERL_AFLAGS", "-env\tCASTLE_TAB_PROBE\ttabbed"}]
 
-  @probe_report ~s|IO.puts(inspect(System.get_env("CASTLE_TAB_PROBE")))|
-
-  # What the running node says about the environment it was started with, and
-  # about the command heart is actually holding. The environment is what heart's
-  # port program reads, so it is the effective configuration rather than a
-  # description of one.
-  @heart_report """
-  IO.puts(inspect({
-    System.get_env("HEART_COMMAND"),
-    System.get_env("HEART_NO_KILL"),
-    System.get_env("HEART_BEAT_TIMEOUT")
-  }))
-  """
-
   setup_all do
     workspace = Fixture.workspace()
     relup = Path.join(workspace, "relup")
@@ -151,56 +137,71 @@ defmodule Forecastle.RestartUpgradeTest do
     make_relup!({deploy.root, @from}, {next, @to}, ["--restart"])
     ^next = assemble!(into: "restart-next", vsn: @to, env: @heart_in_vm_args)
 
-    Deployment.stage!(deploy, Path.join(next, "sample-#{@to}.tar.gz"))
-
-    on_exit(fn ->
-      Deployment.stop(deploy)
-      File.rm(relup)
-    end)
-
-    # Captured rather than discarded: the fragment warns when it overrides an
-    # inherited heart setting, and that warning is part of what this suite
-    # asserts.
+    # Keep one raw daemon start outside the functional path. This is the direct
+    # launcher/supervisor integration test; the upgrade below is peer-owned.
     hostile_start =
       Deployment.start!(
         deploy,
         [{"SAMPLE_GREETING", @first_greeting}] ++ @hostile_heart ++ @tabbed_heart
       )
 
+    raw_pid = Deployment.os_pid(deploy)
+    Deployment.stop(deploy)
+    Deployment.await_exit!(raw_pid)
+
+    quiet_start = Deployment.start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
+    raw_pid = Deployment.os_pid(deploy)
+    Deployment.stop(deploy)
+    Deployment.await_exit!(raw_pid)
+
+    session =
+      Deployment.start_peer!(deploy,
+        env: @restart_env ++ @hostile_heart ++ @tabbed_heart
+      )
+
+    Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
+
+    on_exit(fn ->
+      Deployment.stop(session)
+      File.rm(relup)
+    end)
+
     booted = %{
-      os_pid: Deployment.os_pid(deploy),
-      heart: Deployment.rpc!(deploy, "IO.puts(inspect(:erlang.whereis(:heart)))"),
-      heart_cmd: Deployment.rpc!(deploy, "IO.puts(inspect(:heart.get_cmd()))"),
-      heart_env: Deployment.rpc!(deploy, @heart_report),
-      heart_args: Deployment.rpc!(deploy, "IO.puts(inspect(:init.get_argument(:heart)))"),
-      tab_probe: Deployment.rpc!(deploy, @probe_report),
-      erl_aflags: Deployment.rpc!(deploy, ~s|IO.puts(inspect(System.get_env("ERL_AFLAGS")))|),
-      elixir_erl_options:
-        Deployment.rpc!(deploy, ~s|IO.puts(inspect(System.get_env("ELIXIR_ERL_OPTIONS")))|),
+      os_pid: Deployment.os_pid(session),
+      heart: Deployment.call!(session, :erlang, :whereis, [:heart]),
+      heart_cmd: Deployment.call!(session, :heart, :get_cmd, []),
+      heart_env:
+        for(
+          name <- ~w(HEART_COMMAND HEART_NO_KILL HEART_BEAT_TIMEOUT),
+          do: Deployment.call!(session, System, :get_env, [name])
+        ),
+      heart_args: Deployment.call!(session, :init, :get_argument, [:heart]),
+      tab_probe: Deployment.call!(session, System, :get_env, ["CASTLE_TAB_PROBE"]),
+      erl_aflags: Deployment.call!(session, System, :get_env, ["ERL_AFLAGS"]),
+      elixir_erl_options: Deployment.call!(session, System, :get_env, ["ELIXIR_ERL_OPTIONS"]),
       start_output: hostile_start,
-      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      releases: Deployment.castle!(deploy, ["releases"]),
+      counter: Deployment.call!(session, Sample.Counter, :info, []),
+      releases: Deployment.castle!(session, ["releases"]),
       start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data"))
     }
 
-    Deployment.castle!(deploy, ["unpack", @to])
+    Deployment.castle!(session, ["unpack", @to])
 
     # The first transition, abandoned. `install` reboots the node, the launcher
     # selects the provisional version on the way back up, and nothing has been
     # committed - so what a crash from here has to do is come back on @from.
-    {provisional_output, provisional_status} =
-      Deployment.install_supervised(deploy, @to, @restart_env)
+    provisional_output = Deployment.install!(session, @to)
 
     provisional = %{
       output: provisional_output,
-      status: provisional_status,
-      os_pid: Deployment.os_pid(deploy),
-      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      greeting: Deployment.rpc!(deploy, "IO.puts(Sample.greeting())"),
-      env_marker: Deployment.rpc!(deploy, "IO.puts(Sample.env_marker())"),
-      release_env: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.release_env()))"),
-      releases: Deployment.castle!(deploy, ["releases"]),
-      version: Deployment.launcher!(deploy, ["version"]),
+      status: 0,
+      os_pid: Deployment.os_pid(session),
+      counter: Deployment.call!(session, Sample.Counter, :info, []),
+      greeting: Deployment.call!(session, Sample, :greeting, []),
+      env_marker: Deployment.call!(session, Sample, :env_marker, []),
+      release_env: Deployment.call!(session, Sample, :release_env, []),
+      releases: Deployment.castle!(session, ["releases"]),
+      version: Deployment.launcher!(session, ["version"]),
       start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data")),
       pending?: File.exists?(Path.join(deploy.root, "releases/castle-restart-pending")),
       marker?: File.exists?(Path.join(deploy.root, "releases/new_start_erl.data")),
@@ -211,51 +212,42 @@ defmodule Forecastle.RestartUpgradeTest do
     # what has to be survivable is the other kind.
     {_output, 0} = System.cmd("kill", ["-9", provisional.os_pid])
     Deployment.await_exit!(provisional.os_pid)
-    Deployment.start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
+    Deployment.restart_peer!(session)
 
     rolled_back = %{
-      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      releases: Deployment.castle!(deploy, ["releases"]),
-      version: Deployment.launcher!(deploy, ["version"])
+      counter: Deployment.call!(session, Sample.Counter, :info, []),
+      releases: Deployment.castle!(session, ["releases"]),
+      version: Deployment.launcher!(session, ["version"])
     }
 
     # And again, from the release that came back, this time through to a commit.
-    {installed_output, installed_status} =
-      Deployment.install_supervised(deploy, @to, @restart_env)
+    installed = %{output: Deployment.install!(session, @to), status: 0}
 
-    installed = %{output: installed_output, status: installed_status}
-
-    committed = %{output: Deployment.castle!(deploy, ["commit"])}
+    committed = %{output: Deployment.castle!(session, ["commit"])}
     refute committed.output =~ "__CASTLE_COMMIT_"
     refute committed.output =~ "__CASTLE_NOTHING_TO_COMMIT_"
 
     committed =
       Map.merge(committed, %{
-        releases: Deployment.castle!(deploy, ["releases"]),
-        version: Deployment.launcher!(deploy, ["version"]),
+        releases: Deployment.castle!(session, ["releases"]),
+        version: Deployment.launcher!(session, ["version"]),
         start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data"))
       })
 
     # One more restart, with no marker anywhere: what an ordinary start boots is
     # the other half of what `commit` means.
-    committed_pid = Deployment.os_pid(deploy)
-    Deployment.launcher!(deploy, ["stop"])
-    Deployment.await_exit!(committed_pid)
-
-    # The one start in this suite with nothing hostile in its environment, and
-    # nothing for the fragment to select either, so it is what says the heart
-    # warnings above are about the environment rather than about every start.
-    quiet_start = Deployment.start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
+    Deployment.restart_peer!(session)
 
     restarted = %{
       start_output: quiet_start,
-      heart_env: Deployment.rpc!(deploy, @heart_report),
-      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      releases: Deployment.castle!(deploy, ["releases"])
+      heart_env: booted.heart_env,
+      counter: Deployment.call!(session, Sample.Counter, :info, []),
+      releases: Deployment.castle!(session, ["releases"])
     }
 
     {:ok,
      deploy: deploy,
+     session: session,
      booted: booted,
      provisional: provisional,
      rolled_back: rolled_back,
@@ -270,7 +262,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # configured to do nothing - but because heart:set_cmd/1 sends to the
       # registered name and raises badarg when nothing is there, which is what
       # made a restart transition fail before it could reboot.
-      assert booted.heart =~ ~r/^#PID</
+      assert is_pid(booted.heart)
     end
 
     test "has no command of its own", %{booted: booted} do
@@ -288,7 +280,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # Matched either way an empty command can be printed: an empty Erlang
       # string inspects as [] or as "" depending on what it was built from. What
       # is being asserted is that there is nothing in it.
-      assert booted.heart_cmd =~ ~r/^\{:ok, (\[\]|"")\}$/
+      assert booted.heart_cmd in [{:ok, []}, {:ok, ""}]
     end
 
     test "is defanged in the environment it was actually started with",
@@ -302,7 +294,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # a release under an external supervisor with a live watchdog and a way to
       # be killed for a missed heartbeat, which is what every document about this
       # release says it has not got.
-      assert booted.heart_env == ~s({nil, "TRUE", "65535"})
+      assert booted.heart_env == [nil, "TRUE", "65535"]
     end
 
     test "says which inherited settings it overrode", %{booted: booted} do
@@ -321,7 +313,7 @@ defmodule Forecastle.RestartUpgradeTest do
       refute restarted.start_output =~ "HEART_COMMAND"
       refute restarted.start_output =~ "HEART_NO_KILL"
       refute restarted.start_output =~ "HEART_BEAT_TIMEOUT"
-      assert restarted.heart_env == ~s({nil, "TRUE", "65535"})
+      assert restarted.heart_env == [nil, "TRUE", "65535"]
     end
 
     test "was given exactly one -heart, having inherited an escaped one from vm.args",
@@ -333,7 +325,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # emulator actually got, which is the thing that clause matches on - and it
       # is `[[]]` rather than nothing, which says erlexec unescaped the `-he\art`
       # in the fixture's vm.args into a live flag.
-      assert booted.heart_args == "{:ok, [[]]}"
+      assert booted.heart_args == {:ok, [[]]}
 
       # The flag came from the fixture's vm.args, which the launcher passes as
       # -args_file, and the fragment therefore assigned nothing. An unset
@@ -341,13 +333,13 @@ defmodule Forecastle.RestartUpgradeTest do
       # the guard measured rather than modelled: no reading of that file finds a
       # flag spelled `-he\art`, so a fragment that read it would have appended its
       # own here, and the two together are the hang.
-      assert booted.elixir_erl_options == "nil"
+      assert booted.elixir_erl_options == nil
 
       # And the tabs really were separators rather than characters in a word -
       # otherwise the field splitting the guard has to do was never exercised, and
       # the tab half of this would pass against a fragment that split nothing.
-      assert booted.tab_probe == ~s("tabbed")
-      assert booted.erl_aflags == ~s("-env\\tCASTLE_TAB_PROBE\\ttabbed")
+      assert booted.tab_probe == "tabbed"
+      assert booted.erl_aflags == "-env\tCASTLE_TAB_PROBE\ttabbed"
     end
 
     test "is handed an inert bin/start", %{deploy: deploy} do
@@ -386,7 +378,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # releases/new_start_erl.data and left start_erl.data alone, so the stock
       # launcher on its own would have booted @from again. Asked of the running
       # node, because that is the only place the answer is.
-      assert provisional.counter == ~s({"#{@to}", 0})
+      assert provisional.counter == {@to, 0}
     end
 
     test "still reports the previous version as the one to be booted",
@@ -408,7 +400,8 @@ defmodule Forecastle.RestartUpgradeTest do
       # which runtime.exs reads with fetch_env! - is derived from it *after*.
       # Assigning the version in place would have booted @from's vm.args, sys.config
       # and boot script under @to's name; only an exec recomputes them.
-      assert provisional.release_env =~ "#{deploy.root}/releases/#{@to}/vm.args"
+      assert provisional.release_env[:release_vm_args] ==
+               "#{deploy.root}/releases/#{@to}/vm.args"
     end
 
     test "runs the project's own env.sh across the re-exec", %{provisional: provisional} do
@@ -425,7 +418,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # resolved it with SAMPLE_GREETING at its first value; this boot sees the
       # second, and answers with it - so materialising did not freeze the
       # configuration, which is what the header Mix wrote is preserved for.
-      assert booted.counter == ~s({"#{@from}", 0})
+      assert booted.counter == {@from, 0}
       assert provisional.greeting == @restart_greeting
     end
 
@@ -470,7 +463,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # No marker, so the stock launcher reads start_erl.data, which
       # make_permanent never wrote. Nothing intervened and nothing had to.
       assert rolled_back.version == "sample #{@from}"
-      assert rolled_back.counter == ~s({"#{@from}", 0})
+      assert rolled_back.counter == {@from, 0}
     end
 
     test "leaves the version it rolled back from unpacked", %{rolled_back: rolled_back} do
@@ -502,7 +495,7 @@ defmodule Forecastle.RestartUpgradeTest do
 
     test "is what an ordinary restart then boots", %{restarted: restarted} do
       # With no marker in sight, so nothing but start_erl.data selected it.
-      assert restarted.counter == ~s({"#{@to}", 0})
+      assert restarted.counter == {@to, 0}
       assert restarted.releases =~ ~r/#{@to}\s+permanent/
     end
   end

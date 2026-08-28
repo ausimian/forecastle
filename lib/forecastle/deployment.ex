@@ -4,9 +4,10 @@ defmodule Forecastle.Deployment do
 
   Assembling a release proves it builds. Only starting one and moving it to the
   next version proves the upgrade *works*, and that is what this is for: it
-  starts a release under its own stock Mix launcher, drives `bin/castle` against
-  it, asks the running node questions over `rpc`, and stands in for the external
-  supervisor a transition that restarts the emulator needs.
+  starts a release under an owned OTP `:peer` through its own stock Mix launcher,
+  drives `bin/castle` against it, makes structured calls over a loopback control
+  connection, and preserves one opaque session when a transition restarts the
+  emulator.
 
   It is deliberately not a test of anything. What "the upgrade worked" means is
   the project's to say - a counter that survived, a socket still open, a job
@@ -58,7 +59,8 @@ defmodule Forecastle.Deployment do
   shows up as a failure rather than as a hole.
 
   Anything a caller passes is applied after the scrub, so a test that wants one
-  of these set says so and gets it.
+  of these set says so and gets it. For a peer session, `:env` is real
+  child-process environment and is reused for every incarnation.
   """
 
   # `flunk/1` only. A deployment that never answers is a test failure and wants
@@ -67,6 +69,7 @@ defmodule Forecastle.Deployment do
   import ExUnit.Assertions, only: [flunk: 1]
 
   alias Forecastle.Baseline
+  alias Forecastle.Deployment.Session
 
   @enforce_keys [:root, :name, :cd]
   defstruct [:root, :name, :cd, env: [], boot_timeout: 20_000]
@@ -89,6 +92,9 @@ defmodule Forecastle.Deployment do
           env: env(),
           boot_timeout: pos_integer()
         }
+
+  @typedoc "An opaque controller for one logical deployment across peer incarnations."
+  @type session :: Session.t()
 
   # How long `daemon` itself is given to return. Generous, because on a first
   # start it sources `env.sh`, which runs a preboot VM to create
@@ -462,6 +468,83 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
+  Starts the release under an OTP `:peer` and returns an opaque session.
+
+  The release still boots through its stock `bin/<name>` launcher, including
+  the project's `env.sh`, runtime configuration and the release's own ERTS. The
+  peer supplies ownership and a structured control channel only. Its alternative
+  TCP connection is bound to loopback; standard I/O, epmd, a cookie and Erlang
+  distribution are not used for peer control.
+
+  `:env` supplies scenario environment variables after the normal deployment
+  scrub. They are real variables in the child operating-system process, so they
+  are visible to runtime configuration, ports and NIFs. `:call_timeout`,
+  `:install_timeout`, `:shutdown_timeout` and `:exit_timeout` override the
+  corresponding bounded waits in milliseconds.
+
+  The returned value deliberately exposes neither the peer controller nor the
+  node name. A `restart_emulator` install replaces that peer behind the same
+  session, so retaining either raw handle would make a caller stale precisely
+  when the abstraction is earning its keep.
+  """
+  @spec start_peer!(t(), keyword()) :: session()
+  def start_peer!(%__MODULE__{} = deployment, opts \\ []) do
+    case Session.start(deployment, opts) do
+      {:ok, session} ->
+        session
+
+      {:error, reason} ->
+        raise "cannot start deployment session for #{deployment.root}: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Calls an MFA in the running release over the peer control connection.
+
+  Returns `{:ok, term}` or `{:error, message}`. The five-second default is a
+  bound on one structured call rather than on a test; pass the fifth argument
+  when the operation deliberately takes longer.
+  """
+  @spec call(session(), module(), atom(), [term()], timeout()) ::
+          {:ok, term()} | {:error, binary()}
+  def call(%Session{} = session, module, function, args, timeout \\ 5_000)
+      when is_atom(module) and is_atom(function) and is_list(args) do
+    Session.call(session, module, function, args, timeout)
+  end
+
+  @doc "`call/5`, returning the Erlang term or raising with deployment context."
+  @spec call!(session(), module(), atom(), [term()], timeout()) :: term()
+  def call!(%Session{} = session, module, function, args, timeout \\ 5_000) do
+    session |> call(module, function, args, timeout) |> session_result!()
+  end
+
+  @doc """
+  Installs a release through `bin/castle`, preserving one logical session.
+
+  A hot transition keeps the current peer and operating-system process. When a
+  `restart_emulator` transition closes the control connection, matching Castle
+  and OTP restart markers distinguish the expected reboot from a crash; the
+  session waits for the old process to exit, starts the stock launcher again as
+  a new peer incarnation, and remains usable by the caller.
+  """
+  @spec install(session(), binary()) :: {:ok, binary()} | {:error, binary()}
+  def install(%Session{} = session, vsn) when is_binary(vsn), do: Session.install(session, vsn)
+
+  @doc "`install/2`, returning the command output or raising on failure."
+  @spec install!(session(), binary()) :: binary()
+  def install!(%Session{} = session, vsn), do: session |> install(vsn) |> session_result!()
+
+  @doc """
+  Stops and cold-starts the release behind an existing session.
+
+  This models an external supervisor restart without exposing a peer handle. It
+  is useful for asserting rollback before commit and for checking what an
+  ordinary start selects afterwards.
+  """
+  @spec restart_peer!(session()) :: :restarted
+  def restart_peer!(%Session{} = session), do: session |> Session.restart() |> session_result!()
+
+  @doc """
   The release version an ordinary start of this deployment would boot.
 
   Read from `releases/start_erl.data`, which is `<erts vsn> <release vsn>`, and
@@ -477,7 +560,10 @@ defmodule Forecastle.Deployment do
   follows it this still names the version being upgraded *from* - which is the
   rollback target, and is right rather than stale.
   """
-  @spec version(t()) :: binary()
+  @spec version(t() | session()) :: binary()
+  def version(%Session{} = session),
+    do: session |> Session.operation(:version) |> session_result!()
+
   def version(%__MODULE__{} = deployment) do
     file = path(deployment, "releases/start_erl.data")
 
@@ -494,7 +580,11 @@ defmodule Forecastle.Deployment do
   root, which is the name `mix release` gives the archive it packs, so the
   archive is copied under the name it already has. Returns where it was put.
   """
-  @spec stage!(t(), Path.t()) :: Path.t()
+  @spec stage!(t() | session(), Path.t()) :: Path.t()
+  def stage!(%Session{} = session, tarball) do
+    session |> Session.operation({:stage, tarball}) |> session_result!()
+  end
+
   def stage!(%__MODULE__{} = deployment, tarball) do
     staged = path(deployment, Path.join("releases", Path.basename(tarball)))
     File.cp!(tarball, staged)
@@ -592,8 +682,11 @@ defmodule Forecastle.Deployment do
   Answers `:timeout` in that case, which is neither a stop nor a failure to find
   anything to stop, and should not be mistaken for either.
   """
-  @spec stop(t(), env()) :: {binary(), non_neg_integer()} | :timeout
-  def stop(%__MODULE__{name: name} = deployment, env \\ []) do
+  @spec stop(t() | session(), env()) :: {binary(), non_neg_integer()} | :timeout | :ok
+  def stop(deployment_or_session, env \\ [])
+  def stop(%Session{} = session, _env), do: Session.stop(session)
+
+  def stop(%__MODULE__{name: name} = deployment, env) do
     within(deployment, Path.join(deployment.root, "bin/#{name}"), ["stop"], env, @probe_timeout)
   end
 
@@ -605,8 +698,14 @@ defmodule Forecastle.Deployment do
   for telling one incarnation of the node from another and for waiting on the
   first to go away.
   """
-  @spec os_pid(t(), env()) :: binary()
-  def os_pid(%__MODULE__{name: name} = deployment, env \\ []) do
+  @spec os_pid(t() | session(), env()) :: binary()
+  def os_pid(deployment_or_session, env \\ [])
+
+  def os_pid(%Session{} = session, _env) do
+    session |> Session.operation(:os_pid) |> session_result!()
+  end
+
+  def os_pid(%__MODULE__{name: name} = deployment, env) do
     deployment
     |> within(Path.join(deployment.root, "bin/#{name}"), ["pid"], env, @probe_timeout)
     |> answered!(deployment, "pid")
@@ -896,8 +995,14 @@ defmodule Forecastle.Deployment do
   end
 
   @doc "Runs the stock Mix launcher, raising on a non-zero exit."
-  @spec launcher!(t(), [binary()], env()) :: binary()
-  def launcher!(%__MODULE__{} = deployment, args, env \\ []) do
+  @spec launcher!(t() | session(), [binary()], env()) :: binary()
+  def launcher!(deployment_or_session, args, env \\ [])
+
+  def launcher!(%Session{} = session, args, env) do
+    session |> Session.operation({:launcher, args, env}) |> session_result!()
+  end
+
+  def launcher!(%__MODULE__{} = deployment, args, env) do
     deployment |> launcher(args, env) |> ok!(deployment.name, args)
   end
 
@@ -908,8 +1013,14 @@ defmodule Forecastle.Deployment do
   end
 
   @doc "Runs `bin/castle`, raising on a non-zero exit."
-  @spec castle!(t(), [binary()], env()) :: binary()
-  def castle!(%__MODULE__{} = deployment, args, env \\ []) do
+  @spec castle!(t() | session(), [binary()], env()) :: binary()
+  def castle!(deployment_or_session, args, env \\ [])
+
+  def castle!(%Session{} = session, args, env) do
+    session |> Session.operation({:castle, args, env}) |> session_result!()
+  end
+
+  def castle!(%__MODULE__{} = deployment, args, env) do
     deployment |> castle(args, env) |> ok!("castle", args)
   end
 
@@ -974,4 +1085,7 @@ defmodule Forecastle.Deployment do
     #{output}
     """
   end
+
+  defp session_result!({:ok, value}), do: value
+  defp session_result!({:error, message}), do: raise(message)
 end

@@ -68,32 +68,36 @@ defmodule Forecastle.DownstreamUpgradeTest do
     # The upgrade test itself starts here, and everything from this line down is
     # shipped API.
     deployment = Deployment.deploy!("tar:#{shipped}", Path.join(scratch, "deploy"))
-    on_exit(fn -> Deployment.stop(deployment) end)
+    session = Deployment.start_peer!(deployment)
 
-    Deployment.start!(deployment)
+    on_exit(fn ->
+      # The public value contains the session controller, not the peer
+      # controller. Losing it must still take the owned release with it.
+      os_pid = Deployment.os_pid(session)
+      Process.exit(session.server, :kill)
+      Deployment.await_exit!(os_pid)
+    end)
 
     booted = %{
-      counter: Deployment.rpc!(deployment, "IO.puts(inspect(Sample.Counter.info()))"),
-      os_pid: Deployment.os_pid(deployment),
-      version: Deployment.version(deployment)
+      counter: Deployment.call!(session, Sample.Counter, :info, []),
+      os_pid: Deployment.os_pid(session),
+      version: Deployment.version(session)
     }
 
-    "3" =
-      Deployment.rpc!(
-        deployment,
-        "IO.puts(Enum.map(1..3, fn _ -> Sample.Counter.bump() end) |> List.last())"
-      )
+    1 = Deployment.call!(session, Sample.Counter, :bump, [])
+    2 = Deployment.call!(session, Sample.Counter, :bump, [])
+    3 = Deployment.call!(session, Sample.Counter, :bump, [])
 
-    Deployment.stage!(deployment, Path.join(next, "sample-#{@to}.tar.gz"))
-    Deployment.castle!(deployment, ["unpack", @to])
-    Deployment.castle!(deployment, ["install", @to])
-    Deployment.castle!(deployment, ["commit"])
+    Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
+    Deployment.castle!(session, ["unpack", @to])
+    Deployment.install!(session, @to)
+    Deployment.castle!(session, ["commit"])
 
     upgraded = %{
-      counter: Deployment.rpc!(deployment, "IO.puts(inspect(Sample.Counter.info()))"),
-      os_pid: Deployment.os_pid(deployment),
-      releases: Deployment.castle!(deployment, ["releases"]),
-      version: Deployment.version(deployment)
+      counter: Deployment.call!(session, Sample.Counter, :info, []),
+      os_pid: Deployment.os_pid(session),
+      releases: Deployment.castle!(session, ["releases"]),
+      version: Deployment.version(session)
     }
 
     {:ok,
@@ -107,11 +111,11 @@ defmodule Forecastle.DownstreamUpgradeTest do
   describe "upgrading the artefact that shipped" do
     test "started on the version in the tarball", %{booted: booted} do
       assert booted.version == @from
-      assert booted.counter == ~s({"#{@from}", 0})
+      assert booted.counter == {@from, 0}
     end
 
     test "moved to the next version", %{upgraded: upgraded} do
-      assert upgraded.counter =~ ~s("#{@to}")
+      assert elem(upgraded.counter, 0) == @to
       assert upgraded.releases =~ ~r/#{@to}\s+permanent/
       assert upgraded.version == @to
     end
@@ -120,14 +124,14 @@ defmodule Forecastle.DownstreamUpgradeTest do
       # The question a project actually asks of a hot upgrade, and the one no
       # task could ask on its behalf: three calls happened before the install and
       # the count is still three after it.
-      assert upgraded.counter == ~s({"#{@to}", 3})
+      assert upgraded.counter == {@to, 3}
     end
 
     test "never restarted the VM", %{booted: booted, upgraded: upgraded} do
       # `auto` judged this transition hot, which is what `upgrade_from:`
       # generates under. A relup that had degraded to `restart_emulator` would
-      # show up here as a different operating system process - and would have
-      # needed `install_supervised!/3` to get this far at all.
+      # show up here as a different operating system process. The session would
+      # carry that restart too; this assertion requires the edge to stay hot.
       assert upgraded.os_pid == booted.os_pid
     end
   end

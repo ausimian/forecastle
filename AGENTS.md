@@ -2956,7 +2956,15 @@ to hardcode what "the upgrade worked" means, and only the project knows: a
 counter for one, an open socket or an in-flight job for another. Nothing in
 either module asserts that anything worked, and nothing new may.
 
-Three decisions in it are worth not relitigating:
+The functional harness now runs the release under an opaque OTP `:peer` session.
+The peer uses a loopback TCP control connection and still reaches the release
+through its stock Mix launcher and own ERTS. Tests make structured MFA calls;
+they do not receive a peer pid or node name. A `restart_emulator` transition
+replaces the peer incarnation behind the same session. Keep one raw
+launcher/daemon e2e path for the supervision boundary, but do not move functional
+upgrade assertions back onto launcher `rpc` strings.
+
+Decisions in it worth not relitigating:
 
 - **A deployment is a copy, never the resolved baseline.** `tar:` and `ref:`
   resolve into `_build/castle/baselines`, whose entries are immutable and read by
@@ -3040,17 +3048,23 @@ Three decisions in it are worth not relitigating:
   there is no way to reach it from here that does not amount to a port-and-pid
   abstraction inside a test harness. A release that is *slow* rather than stuck
   is `:boot_timeout`'s business, which is why that one is the project's to set.
-- **There is no one call that installs both kinds of transition.** A hot upgrade
-  never leaves its operating system process, so `install_supervised/3` would
-  wait for an exit that is not coming; a restart transition reboots and nothing
-  in the release starts it again, so `castle!/3` alone would hang. Which one a
-  transition is comes from the relup, and the caller knows because the caller
-  asked for it. `install_supervised/3` watches the install task *while* it
-  waits for the process, because `bin/castle install` cannot be answered until
-  the release has been started again — which is that function's own next line —
-  so an install that has already exited has exited about a failure and is
-  holding the only account of it. Waiting on the process alone spent the whole
-  timeout and then reported that a process was still running.
+- **One session installs both kinds of transition.** `install!/2` starts
+  `bin/castle install` under a deadline. A hot transition leaves the current
+  peer and operating-system process in place. A restart transition closes the
+  peer connection; matching Castle and OTP restart markers identify the
+  expected reboot, the session waits for the old process to exit and starts a
+  new peer incarnation through the stock launcher. The session value remains
+  stable, and no caller may retain a raw incarnation handle.
+- **Peer arguments are handed to the release through a private vm.args copy.**
+  Forecastle's first-start hook boots a preboot VM before the release itself.
+  Passing `-user peer` in an inherited ERL flag lets that VM consume the only
+  control connection, and leaving it in an ERL flag contaminates Castle's nested
+  configuration peer. The session copies the selected incarnation's own
+  `vm.args`, appends OTP's exact peer arguments, and `priv/peer.sh` points the
+  stock launcher at it with `RELEASE_VM_ARGS`. The preboot invocation does not
+  use that launcher variable. The copy lives in an owner-only directory and is
+  removed as soon as the peer connects; a provisional restart copies the target
+  version's args, while an ordinary rollback copies the permanent version's.
 - **Relup generation is not part of the harness.** `mix castle.relup` and
   `upgrade_from:` are already public, so a project has both without this, and
   `test/support` keeps `make_relup!/3` because what it wraps is the *fixture* —
@@ -3122,7 +3136,8 @@ them `deploy` becoming `deploy.root`.
 | `lib/forecastle/appup/dep.ex` | The appups a project supplies for applications it does not own: the `rel/appups` directory, reading a name against the versions the release carries, and placing the result into the assembled release |
 | `lib/forecastle/build.ex` | Reading one build of an application and diffing two of them: the library-directory refusals, the `ebin` discovery, the `.app` resource, and the module fingerprints. Shared by the check and the generator |
 | `lib/forecastle/relup.ex` | Generating a relup: resolving baselines, classifying each transition, the three strategies, the announcement and the atomic publication. Shared by the task and the assembly step |
-| `lib/forecastle/deployment.ex` | A release tree on disk, and everything an upgrade test does to one: laying a baseline spec out, starting it, `bin/castle`, `rpc`, the environment scrub, and standing in for the supervisor a restart transition needs |
+| `lib/forecastle/deployment.ex` | A release tree on disk and the public upgrade-test API: laying a baseline out, starting an opaque peer session, structured calls, `bin/castle`, environment scrub and restart handling |
+| `lib/forecastle/deployment/session.ex` | The private session controller: loopback `:peer` ownership, bounded calls and lifecycle waits, and incarnation replacement across emulator restarts |
 | `lib/forecastle/upgrade_case.ex` | `Forecastle.UpgradeCase` — the case template a project uses, the scratch directory it deploys into, and where the whole recipe is written down |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
 | `lib/mix/tasks/castle.appup.ex` | `mix castle.appup` — the read-only coverage check. Non-zero when a module that moved is mentioned nowhere |
@@ -3130,6 +3145,7 @@ them `deploy` becoming `deploy.root`.
 | `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — the command line over `Forecastle.Relup`: argument handling, `--target`, `--outdir`, `--dry-run` and the strategy switches |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
+| `priv/peer.sh` | Adapter from OTP `:peer`'s emulator arguments to the stock Mix launcher |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it, and which ships no appup of its own when `SAMPLE_DEP_APPUP=none` |
@@ -3195,7 +3211,7 @@ directory to start from a clean slate.
 | `test/forecastle/appup_source_test.exs` | The line between an appup that states a term and one that computes it, against real files in a scratch directory, and what a merge does to the file it merges into |
 | `test/forecastle/appup_gen_test.exs` | `mix castle.appup.gen` as a command, against two assembled releases: the three writing cases, everything it refuses, what it writes for a dependency, and `mix castle.appup` run over the output |
 | `test/forecastle/dep_appup_test.exs` | `rel/appups` through real assemblies: the same transition built with a project-supplied appup and without, everything the assembly step refuses, and the merge of two sources for one application |
-| `test/forecastle/deployment_test.exs` | The shipped harness without a running system: laying a baseline out, the modes it preserves, the destinations it refuses, what it leaves the cache holding, and the environment scrub |
+| `test/forecastle/deployment_test.exs` | The shipped harness without a running system: laying a baseline out, the modes it preserves, the destinations it refuses, the environment scrub and peer launcher adapter |
 | `test/forecastle/upgrade_case_test.exs` | `use Forecastle.UpgradeCase` on its own, which is how a project takes it and which every other suite here pairs with `Forecastle.ReleaseCase`: the alias, the timeout, and the scratch directory it names |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
@@ -3208,13 +3224,13 @@ configures distribution without one.
 `restart_upgrade_test.exs` is the hot suite's opposite where it counts —
 `refute provisional.os_pid == booted.os_pid` against the hot suite's
 `assert installed.os_pid == booted.os_pid` — and it has one thing no other suite
-does: **it is the supervisor.** Nothing in the release restarts it after
-`init:reboot()`, deliberately, so `Forecastle.Deployment.install_supervised/3`
-runs `bin/castle install` in a task, waits for the old *operating system process*
-to go, and starts the release again. Waiting on the process rather than on the
-node matters: a node that has stopped answering rpc is not necessarily one that
-has exited, and starting the replacement while the old beam still holds the
-distribution port is a name clash rather than a boot.
+does: it proves that a single opaque session survives the emulator restart.
+The session runs `bin/castle install`, waits for the old *operating system
+process* to go and starts a new peer incarnation. Waiting on the process rather
+than only on the control connection matters: starting the replacement while the
+old beam still holds the distribution port is a name clash rather than a boot.
+The suite retains one separate raw launcher/daemon start for the external
+supervision and heart integration boundary.
 
 **It also runs the whole transition on a hostile environment**, and that is not
 incidental colour: `HEART_COMMAND`, `HEART_NO_KILL=FALSE` and an 11-second

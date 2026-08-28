@@ -961,24 +961,25 @@ defmodule MyApp.UpgradeTest do
 
   setup_all %{scratch: scratch} do
     deployment = Deployment.deploy!(@shipped, Path.join(scratch, "deploy"))
-    on_exit(fn -> Deployment.stop(deployment) end)
+    session = Deployment.start_peer!(deployment)
+    on_exit(fn -> Deployment.stop(session) end)
 
-    Deployment.start!(deployment)
-    Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.bump())")
+    1 = Deployment.call!(session, MyApp.Counter, :bump, [])
+    :ok = Deployment.call!(session, MyApp.Settings, :put, [:upgrade_probe, :present])
 
-    Deployment.stage!(deployment, @next)
-    Deployment.castle!(deployment, ["unpack", "1.1.0"])
-    Deployment.castle!(deployment, ["install", "1.1.0"])
-    Deployment.castle!(deployment, ["commit"])
+    Deployment.stage!(session, @next)
+    Deployment.castle!(session, ["unpack", "1.1.0"])
+    Deployment.install!(session, "1.1.0")
+    Deployment.castle!(session, ["commit"])
 
-    {:ok, deployment: deployment}
+    {:ok, session: session}
   end
 
-  test "moved to 1.1.0 and took the count with it", %{deployment: deployment} do
-    assert Deployment.rpc!(deployment, "IO.puts(inspect(MyApp.Counter.info()))") ==
-             ~s({"1.1.0", 1})
+  test "moved to 1.1.0 and took the count with it", %{session: session} do
+    assert Deployment.call!(session, MyApp.Counter, :info, []) == {"1.1.0", 1}
+    assert Deployment.call!(session, MyApp.Settings, :get, [:upgrade_probe]) == :present
 
-    assert Deployment.version(deployment) == "1.1.0"
+    assert Deployment.version(session) == "1.1.0"
   end
 end
 ```
@@ -1041,27 +1042,18 @@ immutable cache under `_build/castle/baselines`, and a system started in the
 cache would leave every later resolution of that spec holding a booted,
 half-upgraded release with nothing to say so.
 
-### The two transitions are installed differently
+### One session covers both transition kinds
 
-The example above is a hot upgrade. A transition that restarts the emulator needs
-`Deployment.install_supervised!/3` in place of the `install` above, because
-nothing inside the release starts it again after the reboot: `bin/start` is
-inert, `HEART_COMMAND` is unset, and your supervisor owns the restart — so a test
-of one has to *be* the supervisor.
+`start_peer!/2` still boots the release through its stock Mix launcher and its
+own ERTS. The returned session is opaque: it exposes structured MFA calls, not a
+peer pid or node name. `install!/2` keeps the current incarnation for a hot
+upgrade and replaces it behind the same session when the transition restarts the
+emulator.
 
-There is no call that covers both. A hot upgrade never leaves its operating
-system process, so waiting for that process to exit would be waiting for
-something that is not coming. Which of the two a transition is comes from the
-relup, and `auto` decides it at generation time; `mix castle.relup --hot` fails
-rather than degrading, which puts the failure on the build instead of on an
-assertion much further down.
-
-`install_supervised!/3` raises the way `castle!/3` does, and what it is usually
-raising about is on the far side of the reboot: `bin/castle install` polls for
-the version it installed *after* the release has come back, so a provisional
-release that rolled back on the way up is reported there and nowhere earlier.
-`Deployment.install_supervised/3` returns `{output, status}` for a test that
-wants to assert on the status itself.
+Pass scenario environment as `start_peer!(deployment, env: [...])`. Those are
+real variables in the child operating-system process, so runtime configuration,
+ports and NIFs see them, and every incarnation after a restart receives the same
+values. Every call, boot, install, shutdown and process-exit wait is bounded.
 
 ### What it does for you, and what it does not
 
@@ -1078,10 +1070,8 @@ that node, and the next start would come up beside one that still answers to the
 release's name — with the readiness rpc as likely to reach the old system as the
 new one.
 
-`Deployment.start!/2` gives the launcher a deadline and `:boot_timeout` gives the
-release one, and **both of them fail the test rather than stopping anything**:
-nothing in Elixir can reach the operating system process behind `System.cmd/3`,
-so a launcher that hung is still hung when the failure is reported. A release
+`start_peer!/2` gives the stock launcher a deadline and owns the process it
+starts, so a failed setup or teardown does not leave a daemon behind. A release
 that is merely *slow* is what `:boot_timeout` is for — the default of 20 seconds
 describes a release that does nothing on the way up, and an application that runs
 migrations or waits on a dependency should say so:
@@ -1113,7 +1103,7 @@ and `config/runtime.exs` is the one file a project routinely shares between the
 two. `Deployment.scrubbed_env/1` is the same list, for the `mix release` that
 builds the versions being tested.
 
-Deployments are not stopped for you: a running release outlives the test that
-started it, so `on_exit(fn -> Deployment.stop(deployment) end)` belongs beside
-every `start!/2`. And nothing decides whether the upgrade worked. That is the
+Sessions are not stopped for you, so
+`on_exit(fn -> Deployment.stop(session) end)` belongs beside every
+`start_peer!/2`. And nothing decides whether the upgrade worked. That is the
 whole point.

@@ -708,6 +708,33 @@ defmodule Forecastle.DeploymentTest do
       assert Enum.find_index(env, &(&1 == {"ERL_AFLAGS", nil})) <
                Enum.find_index(env, &(&1 == {"ERL_AFLAGS", "-env PROBE set"}))
     end
+
+    test "the peer adapter removes inherited controls and keeps scenario variables" do
+      root = Path.join(@root, "peer-adapter")
+      launcher = Path.join(root, "launcher")
+      File.mkdir_p!(root)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      File.write!(
+        launcher,
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" \"${MIX_ENV-<unset>}\" \"$SCENARIO\" \"$RELEASE_VM_ARGS\"\n"
+      )
+
+      File.chmod!(launcher, 0o755)
+
+      adapter = Path.join(:code.priv_dir(:forecastle), "peer.sh")
+      vm_args = Path.join(root, "vm.args")
+
+      assert {output, 0} =
+               System.cmd(
+                 "sh",
+                 [adapter, launcher, "MIX_ENV,RELEASE_VM_ARGS", vm_args],
+                 env: [{"MIX_ENV", "test"}, {"SCENARIO", "present"}]
+               )
+
+      assert String.split(output, "\n", trim: true) ==
+               ["start", "<unset>", "present", vm_args]
+    end
   end
 
   describe "reaching a project that depends on Forecastle" do

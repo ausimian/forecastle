@@ -1,5 +1,10 @@
 ### Added
 
+- Upgrade tests can now run a release as an OTP `:peer` owned by an opaque
+  `Forecastle.Deployment` session. The release still boots through its stock Mix
+  launcher and own ERTS, while tests use structured MFA calls and keep one
+  session across both hot upgrades and emulator restarts. Session teardown also
+  stops the release it owns.
 - `bin/castle`, a release management CLI, is now installed alongside the
   standard launcher. It provides `releases`, `upgradable`, `unpack`, `install`,
   `commit` and `remove`, and delegates to the running system through the standard
@@ -867,9 +872,9 @@
 - An upgrade test harness, so a project can test that its own release survives
   the upgrade rather than only that it builds. `Forecastle.UpgradeCase` is an
   `ExUnit.CaseTemplate` and `Forecastle.Deployment` drives a release from
-  outside: it lays a baseline out in a directory of its own, starts it under the
-  stock Mix launcher, runs `bin/castle` and `rpc` against it, and stands in for
-  the external supervisor a transition that restarts the emulator needs. Both
+  outside: it lays a baseline out in a directory of its own, starts it as an
+  owned OTP `:peer` through the stock Mix launcher, makes structured calls and
+  runs `bin/castle` against it. Both
   ship as ordinary library code, so `mix test` runs an upgrade test like any
   other test — and because Castle takes Forecastle as `runtime: false`, they are
   there at build and test time and never enter a release.
@@ -884,24 +889,25 @@
       deployment =
         Deployment.deploy!("tar:artifacts/myapp-1.0.0.tar.gz", Path.join(scratch, "deploy"))
 
-      on_exit(fn -> Deployment.stop(deployment) end)
+      session = Deployment.start_peer!(deployment)
+      on_exit(fn -> Deployment.stop(session) end)
 
-      Deployment.start!(deployment)
-      Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.bump())")
+      1 = Deployment.call!(session, MyApp.Counter, :bump, [])
+      :ok = Deployment.call!(session, MyApp.Settings, :put, [:upgrade_probe, :present])
 
-      Deployment.stage!(deployment, "_build/prod/myapp-1.1.0.tar.gz")
-      Deployment.castle!(deployment, ["unpack", "1.1.0"])
-      Deployment.castle!(deployment, ["install", "1.1.0"])
-      Deployment.castle!(deployment, ["commit"])
+      Deployment.stage!(session, "_build/prod/myapp-1.1.0.tar.gz")
+      Deployment.castle!(session, ["unpack", "1.1.0"])
+      Deployment.install!(session, "1.1.0")
+      Deployment.castle!(session, ["commit"])
 
-      {:ok, deployment: deployment}
+      {:ok, session: session}
     end
 
-    test "moved to 1.1.0 and took the count with it", %{deployment: deployment} do
-      assert Deployment.rpc!(deployment, "IO.puts(inspect(MyApp.Counter.info()))") ==
-               ~s({"1.1.0", 1})
+    test "moved to 1.1.0 and took the count with it", %{session: session} do
+      assert Deployment.call!(session, MyApp.Counter, :info, []) == {"1.1.0", 1}
+      assert Deployment.call!(session, MyApp.Settings, :get, [:upgrade_probe]) == :present
 
-      assert Deployment.version(deployment) == "1.1.0"
+      assert Deployment.version(session) == "1.1.0"
     end
   end
   ```
@@ -940,24 +946,13 @@
   A release is given 20 seconds to answer after it has been started, which
   describes one that does nothing on the way up; an application that runs
   migrations or waits on a dependency says how long it wants with
-  `boot_timeout:`. What the deadlines do is fail the test: nothing in Elixir can
-  reach the operating system process behind `System.cmd/3`, so a launcher that
-  hung is still hung when the failure is reported, and the harness says so
-  rather than leaving the impression it tidied up.
+  `boot_timeout:`. Peer ownership gives startup, calls, installs, shutdown and
+  process-exit waits explicit bounds, and stopping the session stops its release.
 
-  Both kinds of transition are covered. A hot upgrade installs through
-  `Deployment.castle!/3`; one that restarts the emulator installs through
-  `Deployment.install_supervised!/3`, which waits for the old operating system
-  process to go and starts the release again — because `bin/start` is inert,
-  `HEART_COMMAND` is unset, and the supervisor outside the release owns the
-  restart. There is deliberately no single call for both: a hot upgrade never
-  leaves its process, so waiting for that process to exit would be waiting for
-  something that is not coming. It raises the way `castle!/3` does, and what it
-  is usually raising about is on the far side of the reboot — `bin/castle
-  install` polls for the version it installed *after* the release has come back,
-  so a provisional release that rolled back on the way up is reported there and
-  nowhere earlier. `Deployment.install_supervised/3` returns `{output, status}`
-  for a test that wants to assert on the status itself.
+  Both kinds of transition use `Deployment.install!/2`. A hot upgrade keeps the
+  current peer incarnation. A restart transition waits for the old operating
+  system process to go and starts the stock launcher again behind the same
+  opaque session, so callers retain neither a stale peer pid nor a node name.
 
   Every command a deployment runs is given an environment with the variables that
   would otherwise leak into it unset: the emulator flag variables

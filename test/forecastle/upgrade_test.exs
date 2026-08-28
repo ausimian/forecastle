@@ -52,70 +52,84 @@ defmodule Forecastle.UpgradeTest do
     # the tarball we are about to hand to release_handler contains it.
     ^next = assemble!(into: "next", vsn: @to)
 
-    Deployment.stage!(deploy, Path.join(next, "sample-#{@to}.tar.gz"))
+    session =
+      Deployment.start_peer!(deploy,
+        env: [
+          {"SAMPLE_GREETING", "hello-from-runtime"},
+          {"FORECASTLE_SCENARIO", "present"}
+        ]
+      )
+
+    Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
 
     on_exit(fn ->
-      Deployment.stop(deploy)
+      Deployment.stop(session)
       File.rm(relup)
     end)
 
-    Deployment.start!(deploy, [{"SAMPLE_GREETING", "hello-from-runtime"}])
-
     booted = %{
-      greeting: Deployment.rpc!(deploy, "IO.puts(Sample.greeting())"),
-      env_marker: Deployment.rpc!(deploy, "IO.puts(Sample.env_marker())"),
-      release_env: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.release_env()))"),
-      counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-      unmentioned: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Unmentioned.info()))"),
-      os_pid: Deployment.os_pid(deploy),
-      releases: Deployment.castle!(deploy, ["releases"]),
+      greeting: Deployment.call!(session, Sample, :greeting, []),
+      env_marker: Deployment.call!(session, Sample, :env_marker, []),
+      release_env: Deployment.call!(session, Sample, :release_env, []),
+      counter: Deployment.call!(session, Sample.Counter, :info, []),
+      unmentioned: Deployment.call!(session, Sample.Unmentioned, :info, []),
+      os_pid: Deployment.os_pid(session),
+      releases: Deployment.castle!(session, ["releases"]),
       releases_file?: File.exists?(Path.join(deploy.root, "releases/RELEASES")),
-      dep_lib: Deployment.rpc!(deploy, "IO.puts(:code.lib_dir(:sample_dep))")
+      dep_lib: session |> Deployment.call!(:code, :lib_dir, [:sample_dep]) |> to_string(),
+      scenario: Deployment.call!(session, System, :get_env, ["FORECASTLE_SCENARIO"]),
+      mix_env: Deployment.call!(session, System, :get_env, ["MIX_ENV"]),
+      erl_zflags: Deployment.call!(session, System, :get_env, ["ERL_ZFLAGS"]),
+      peer_args: Deployment.call!(session, System, :get_env, ["FORECASTLE_PEER_ARGS"]),
+      bounded_call: Deployment.call(session, Process, :sleep, [100], 20),
+      root_dir: session |> Deployment.call!(:code, :root_dir, []) |> to_string()
     }
 
-    "3" =
-      Deployment.rpc!(
-        deploy,
-        "IO.puts(Enum.map(1..3, fn _ -> Sample.Counter.bump() end) |> List.last())"
-      )
+    1 = Deployment.call!(session, Sample.Counter, :bump, [])
+    2 = Deployment.call!(session, Sample.Counter, :bump, [])
+    3 = Deployment.call!(session, Sample.Counter, :bump, [])
 
     unpacked = %{
-      output: Deployment.castle!(deploy, ["unpack", @to]),
-      releases: Deployment.castle!(deploy, ["releases"]),
+      output: Deployment.castle!(session, ["unpack", @to]),
+      releases: Deployment.castle!(session, ["releases"]),
       releases_file?: File.exists?(Path.join(deploy.root, "releases/RELEASES"))
     }
 
-    installed = %{output: Deployment.castle!(deploy, ["install", @to])}
+    installed = %{output: Deployment.install!(session, @to)}
 
     installed =
       Map.merge(installed, %{
-        counter: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Counter.info()))"),
-        unmentioned: Deployment.rpc!(deploy, "IO.puts(inspect(Sample.Unmentioned.info()))"),
+        counter: Deployment.call!(session, Sample.Counter, :info, []),
+        unmentioned: Deployment.call!(session, Sample.Unmentioned, :info, []),
         # Where the code path would find that module *now*, which is not where
         # the process is running from. "New code sits on disk, reachable,
         # unused" is the whole of §1.1, and this is the half of it an assertion
         # about the running process cannot show on its own.
         unmentioned_object:
-          Deployment.rpc!(deploy, "IO.puts(elem(:code.get_object_code(Sample.Unmentioned), 2))"),
-        os_pid: Deployment.os_pid(deploy),
-        greeting: Deployment.rpc!(deploy, "IO.puts(Sample.greeting())"),
-        releases: Deployment.castle!(deploy, ["releases"]),
-        dep_lib: Deployment.rpc!(deploy, "IO.puts(:code.lib_dir(:sample_dep))")
+          session
+          |> Deployment.call!(:code, :get_object_code, [Sample.Unmentioned])
+          |> elem(2)
+          |> to_string(),
+        os_pid: Deployment.os_pid(session),
+        greeting: Deployment.call!(session, Sample, :greeting, []),
+        releases: Deployment.castle!(session, ["releases"]),
+        dep_lib: session |> Deployment.call!(:code, :lib_dir, [:sample_dep]) |> to_string()
       })
 
-    committed = %{output: Deployment.castle!(deploy, ["commit"])}
+    committed = %{output: Deployment.castle!(session, ["commit"])}
     refute committed.output =~ "__CASTLE_COMMIT_"
     refute committed.output =~ "__CASTLE_NOTHING_TO_COMMIT_"
 
     committed =
       Map.merge(committed, %{
-        releases: Deployment.castle!(deploy, ["releases"]),
-        version: Deployment.launcher!(deploy, ["version"]),
+        releases: Deployment.castle!(session, ["releases"]),
+        version: Deployment.launcher!(session, ["version"]),
         start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data"))
       })
 
     {:ok,
      deploy: deploy,
+     session: session,
      booted: booted,
      unpacked: unpacked,
      installed: installed,
@@ -160,22 +174,33 @@ defmodule Forecastle.UpgradeTest do
       # the configuration before the launcher had assigned them, and had to apply
       # the launcher's own defaults itself. Now the launcher exports them before
       # the VM it configures even starts, and these pin the values it sees.
-      assert booted.release_env =~ ~s(release_node: "sample")
-      assert booted.release_env =~ "release_cookie_set: true"
-      assert booted.release_env =~ ~s(release_mode: "embedded")
-      assert booted.release_env =~ ~r/release_tmp: "[^"]+\/tmp"/
-      assert booted.release_env =~ ~r/release_vm_args: "[^"]+\/vm\.args"/
+      assert booted.release_env[:release_node] == "sample"
+      assert booted.release_env[:release_cookie_set]
+      assert booted.release_env[:release_mode] == "embedded"
+      assert booted.release_env[:release_tmp] =~ "/tmp"
+      assert booted.release_env[:release_vm_args] =~ "/vm.args"
     end
 
     test "starts the version that was built", %{booted: booted} do
-      assert booted.counter == ~s({"#{@from}", 0})
+      assert booted.counter == {@from, 0}
 
       # The other half of the pair, so that the stale-code test below is a
       # comparison between two versions of this module rather than an assertion
       # that it once said something. Both answers are the from-version at boot:
       # the state the process was initialised with, and the code serving the
       # call.
-      assert booted.unmentioned == ~s({"#{@from}", "#{@from}"})
+      assert booted.unmentioned == {@from, @from}
+    end
+
+    test "uses the release's own ERTS and carries only scenario environment",
+         %{deploy: deploy, booted: booted} do
+      assert Path.expand(booted.root_dir) == deploy.root
+      assert booted.scenario == "present"
+      assert booted.mix_env == nil
+      assert booted.erl_zflags == nil
+      assert booted.peer_args == nil
+      assert {:error, message} = booted.bounded_call
+      assert message =~ "did not answer within 20ms"
     end
   end
 
@@ -242,11 +267,11 @@ defmodule Forecastle.UpgradeTest do
     end
 
     test "loads the new code", %{installed: installed} do
-      assert installed.counter =~ ~s("#{@to}")
+      assert elem(installed.counter, 0) == @to
     end
 
     test "preserves the state of the running process", %{installed: installed} do
-      assert installed.counter == ~s({"#{@to}", 3})
+      assert installed.counter == {@to, 3}
     end
 
     test "leaves a changed module the appup does not mention running the old code",
@@ -267,10 +292,10 @@ defmodule Forecastle.UpgradeTest do
       assert installed.output =~ "Now running #{@to} (previously #{@from})."
 
       # And yet one of the two processes moved and the other did not.
-      assert booted.counter =~ ~s("#{@from}")
-      assert booted.unmentioned == ~s({"#{@from}", "#{@from}"})
+      assert elem(booted.counter, 0) == @from
+      assert booted.unmentioned == {@from, @from}
 
-      assert installed.counter =~ ~s("#{@to}")
+      assert elem(installed.counter, 0) == @to
 
       # Both halves of the answer, because they say different things and only
       # the second is the §1.1 claim. The state's tag being unmoved says
@@ -280,7 +305,7 @@ defmodule Forecastle.UpgradeTest do
       # the version that was loaded before, serving calls" means. A version that
       # loaded the new code without a `code_change` would satisfy the first and
       # fail the second.
-      assert installed.unmentioned == ~s({"#{@from}", "#{@from}"}),
+      assert installed.unmentioned == {@from, @from},
              "the unmentioned module was upgraded, so this fixture no longer demonstrates " <>
                "the incomplete-appup failure - check that appup.exs still names only " <>
                "Sample.Counter"

@@ -45,24 +45,25 @@ defmodule Forecastle.UpgradeCase do
 
         setup_all %{scratch: scratch} do
           deployment = Deployment.deploy!(@shipped, Path.join(scratch, "deploy"))
-          on_exit(fn -> Deployment.stop(deployment) end)
+          session = Deployment.start_peer!(deployment)
+          on_exit(fn -> Deployment.stop(session) end)
 
-          Deployment.start!(deployment)
-          Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.bump())")
+          1 = Deployment.call!(session, MyApp.Counter, :bump, [])
+          :ok = Deployment.call!(session, MyApp.Settings, :put, [:upgrade_probe, :present])
 
-          Deployment.stage!(deployment, @next)
-          Deployment.castle!(deployment, ["unpack", "1.1.0"])
-          Deployment.castle!(deployment, ["install", "1.1.0"])
-          Deployment.castle!(deployment, ["commit"])
+          Deployment.stage!(session, @next)
+          Deployment.castle!(session, ["unpack", "1.1.0"])
+          Deployment.install!(session, "1.1.0")
+          Deployment.castle!(session, ["commit"])
 
-          {:ok, deployment: deployment}
+          {:ok, session: session}
         end
 
-        test "moved to 1.1.0 and took the count with it", %{deployment: deployment} do
-          assert Deployment.rpc!(deployment, "IO.puts(inspect(MyApp.Counter.info()))") ==
-                   ~s({"1.1.0", 1})
+        test "moved to 1.1.0 and took the count with it", %{session: session} do
+          assert Deployment.call!(session, MyApp.Counter, :info, []) == {"1.1.0", 1}
+          assert Deployment.call!(session, MyApp.Settings, :get, [:upgrade_probe]) == :present
 
-          assert Deployment.version(deployment) == "1.1.0"
+          assert Deployment.version(session) == "1.1.0"
         end
       end
 
@@ -97,22 +98,17 @@ defmodule Forecastle.UpgradeCase do
   the *release*, which moves whether or not any particular module did - which is
   why the example asserts both, and why they are different questions.
 
-  ## The two transitions are installed differently
+  ## One session covers both transition kinds
 
-  The example above is a hot upgrade. A transition that restarts the emulator
-  needs `Forecastle.Deployment.install_supervised!/3` in place of the `install`
-  above, because nothing inside the release starts it again after the reboot -
-  `bin/start` is inert and the external supervisor owns the restart, so a test of
-  one has to *be* the supervisor. There is no call that covers both: a hot
-  upgrade never leaves its operating system process, so waiting for that process
-  to exit would be waiting for something that is not coming.
+  `start_peer!/2` boots through the stock Mix launcher and returns an opaque
+  logical session. `install!/2` keeps that session for a hot upgrade and replaces
+  its peer incarnation when the transition restarts the emulator. Tests keep the
+  same value either way; peer pids and node names are deliberately not exposed.
 
-  It raises the way `castle!/3` does, and the failure it is raising about is
-  usually on the far side of the reboot: `bin/castle install` polls for the
-  version it installed *after* the release has come back, so a provisional
-  release that rolled back on the way up is reported there and nowhere earlier.
-  `Forecastle.Deployment.install_supervised/3` returns `{output, status}` for a
-  test that wants to assert on the status itself.
+  Scenario variables belong in `start_peer!(deployment, env: [...])`. They are
+  real child-process environment, so runtime configuration, ports and NIFs see
+  them, and the same values reach every incarnation after a restart. Structured
+  `call!/5` returns the term itself instead of parsing launcher output.
 
   Which of the two a transition is comes from the relup, and `auto` decides it at
   generation time. A project that wants to be sure gets to say so:
@@ -150,10 +146,9 @@ defmodule Forecastle.UpgradeCase do
   that is still running rather than deleting underneath it, which is the same
   question asked in the one place that knows the release's name.
 
-  Deployments are not stopped for you. A running release outlives the test that
-  started it, so `on_exit(fn -> Deployment.stop(deployment) end)` belongs beside
-  every `start!/2` - and `stop/1` tolerates a system that is not running, which
-  is what makes it safe in a teardown after a setup that died half way.
+  Sessions are not stopped for you. Put
+  `on_exit(fn -> Deployment.stop(session) end)` beside every `start_peer!/2`.
+  Stopping the session stops the owned release as well.
 
   ## Not async
 
