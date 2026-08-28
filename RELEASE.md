@@ -15,9 +15,11 @@
   killed with its owned release, and install/restart calls can retain an
   environment override for later incarnations. A launcher or env-hook refusal is
   reported from the adapter immediately instead of being mislabelled after the
-  full boot deadline. `bin/castle` receives a polling deadline five seconds
-  inside the session's install deadline, so the outer timeout does not abandon a
-  still-polling operating-system process. Peer arguments are quoted for erlexec's
+  full boot deadline. `bin/castle` receives a nominal confirmation budget five
+  seconds shorter than the session deadline. Its clock starts only after the
+  unbounded install RPC returns, so the outer watchdog can still fire first; the
+  session retains ownership of the command and normal teardown waits for it.
+  Peer arguments are quoted for erlexec's
   args-file grammar, and invalid peer handoff files are refused before provisional
   restart evidence is consumed. The loopback control connection has no separate
   authentication layer and assumes a single-tenant test host; it is not a

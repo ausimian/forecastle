@@ -3064,14 +3064,19 @@ Decisions in it worth not relitigating:
   passed to the install command is retained by the replacement and later
   incarnations; this is how a test makes a target's runtime providers see a
   different scenario from the initial boot. Launcher and Castle commands have a
-  separate command deadline. The session derives `CASTLE_INSTALL_TIMEOUT` five
-  seconds inside its own install deadline, and refuses an explicit inner timeout
-  which could outlive the outer one; a shorter override still has to cover the
-  deployment's actual reboot and boot. If any operation nevertheless keeps the session
-  from serving its stop request, teardown kills the controller after its budget;
-  the controller-loss property then halts the release it owns, and a bounded
-  stock-launcher stop is the fallback. Normal teardown also waits for the owned
-  operating-system pid to disappear and reports `:timeout` if it does not. A deployment-level teardown is registered
+  separate command deadline. The session derives a nominal
+  `CASTLE_INSTALL_TIMEOUT` five seconds shorter than its own install deadline,
+  but the clocks start at different moments: the shell begins confirmation only
+  after its unbounded install RPC returns. A slow install can therefore make the
+  outer watchdog pre-empt the shell; the session retains the task and normal
+  teardown waits for it. An explicit inner timeout must fit the nominal budget,
+  and a shorter override still has to cover the deployment's actual reboot and
+  boot. If any operation nevertheless keeps the session from serving its stop
+  request, teardown kills the controller after its budget; the controller-loss
+  property then halts the release it owns, and a bounded stock-launcher stop
+  carrying the session's effective environment is the fallback. Normal teardown
+  also waits for the owned operating-system pid to disappear and reports
+  `:timeout` if it does not. A deployment-level teardown is registered
   **before** `start_peer!/2` as well: a failed start returns no session value, so
   no session-only callback can cover that path.
 

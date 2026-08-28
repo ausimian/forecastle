@@ -768,6 +768,59 @@ defmodule Forecastle.DeploymentTest do
       refute Process.alive?(server)
     end
 
+    test "abnormal teardown stops with the session's effective environment" do
+      root = Path.join(@root, "fallback-session-env")
+      capture = Path.join(root, "stopped-node")
+      File.rm_rf!(root)
+      File.mkdir_p!(Path.join(root, "bin"))
+      on_exit(fn -> File.rm_rf(root) end)
+
+      stub!(
+        root,
+        "my_app",
+        ~s|printf '%s\n' "$RELEASE_NODE" > "$CAPTURE"\n|
+      )
+
+      env = [{"RELEASE_NODE", "scenario@host"}, {"CAPTURE", capture}]
+      {:ok, env_store} = Agent.start(fn -> env end)
+      server = spawn(fn -> receive do: (_message -> Process.sleep(:infinity)) end)
+
+      session = %Session{
+        server: server,
+        stop_timeout: 10,
+        deployment: Deployment.new(root, "my_app"),
+        env_store: env_store
+      }
+
+      assert Session.stop(session) == :killed
+      assert File.read!(capture) == "scenario@host\n"
+    end
+
+    test "a dead controller still triggers the environment-aware fallback" do
+      root = Path.join(@root, "dead-session-fallback")
+      capture = Path.join(root, "stopped-node")
+      File.rm_rf!(root)
+      File.mkdir_p!(Path.join(root, "bin"))
+      on_exit(fn -> File.rm_rf(root) end)
+      stub!(root, "my_app", ~s|printf '%s\n' "$RELEASE_NODE" > "$CAPTURE"\n|)
+
+      env = [{"RELEASE_NODE", "dead@host"}, {"CAPTURE", capture}]
+      {:ok, env_store} = Agent.start(fn -> env end)
+      server = spawn(fn -> :ok end)
+      monitor = Process.monitor(server)
+      assert_receive {:DOWN, ^monitor, :process, ^server, :normal}
+
+      session = %Session{
+        server: server,
+        stop_timeout: 10,
+        deployment: Deployment.new(root, "my_app"),
+        env_store: env_store
+      }
+
+      assert Session.stop(session) == :ok
+      assert File.read!(capture) == "dead@host\n"
+    end
+
     test "surfaces a release process that remains after normal teardown" do
       state = %{
         deployment: Deployment.new(Path.join(@root, "missing-release"), "my_app"),
@@ -799,7 +852,7 @@ defmodule Forecastle.DeploymentTest do
       assert Session.launcher_status(path) == {:ok, 7}
     end
 
-    test "keeps bin/castle's polling deadline inside the session deadline" do
+    test "gives bin/castle a shorter nominal confirmation budget" do
       root = Path.join(@root, "bounded-session-install")
       File.rm_rf!(root)
       File.mkdir_p!(Path.join(root, "bin"))
@@ -809,6 +862,7 @@ defmodule Forecastle.DeploymentTest do
       state = %{
         deployment: Deployment.new(root, "my_app"),
         env: [],
+        env_store: start_supervised!({Agent, fn -> [] end}),
         down: nil,
         install: nil,
         install_timeout: 10_000,
@@ -816,9 +870,14 @@ defmodule Forecastle.DeploymentTest do
       }
 
       assert {:noreply, started} =
-               Session.handle_call({:install, "1.0.1", []}, {self(), make_ref()}, state)
+               Session.handle_call(
+                 {:install, "1.0.1", [{"RELEASE_NODE", "next@host"}]},
+                 {self(), make_ref()},
+                 state
+               )
 
       assert {:ok, {"5\n", 0}} = Task.yield(started.install.task, 1_000)
+      assert Agent.get(started.env_store, & &1) == [{"RELEASE_NODE", "next@host"}]
       Process.cancel_timer(started.install.timer)
     end
 
@@ -826,6 +885,7 @@ defmodule Forecastle.DeploymentTest do
       state = %{
         deployment: Deployment.new(@root, "my_app"),
         env: [],
+        env_store: start_supervised!({Agent, fn -> [] end}),
         down: nil,
         install: nil,
         install_timeout: 10_000,
@@ -840,6 +900,66 @@ defmodule Forecastle.DeploymentTest do
                )
 
       assert message =~ "no greater than 5"
+    end
+
+    test "an outer install timeout retains the still-running command" do
+      root = Path.join(@root, "retained-session-install")
+      File.rm_rf!(root)
+      File.mkdir_p!(Path.join(root, "bin"))
+      on_exit(fn -> File.rm_rf(root) end)
+      stub!(root, "castle", "sleep 2\n")
+      reply_ref = make_ref()
+
+      state = %{
+        deployment: Deployment.new(root, "my_app"),
+        env: [],
+        env_store: start_supervised!({Agent, fn -> [] end}),
+        down: nil,
+        install: nil,
+        install_timeout: 10_000,
+        os_pid: "unused"
+      }
+
+      assert {:noreply, started} =
+               Session.handle_call({:install, "1.0.1", []}, {self(), reply_ref}, state)
+
+      Process.cancel_timer(started.install.timer)
+
+      assert {:noreply, timed_out} =
+               Session.handle_info({:install_timeout, started.install.task.ref}, started)
+
+      assert_receive {^reply_ref, {:error, message}}
+      assert message =~ "did not finish within 10000ms"
+      assert timed_out.install.task == started.install.task
+      assert timed_out.install.from == nil
+      assert Process.alive?(timed_out.install.task.pid)
+      Task.shutdown(timed_out.install.task, :brutal_kill)
+    end
+
+    test "a peer exit after install timeout does not reply to the caller twice" do
+      task = Task.async(fn -> Process.sleep(:infinity) end)
+      peer = self()
+
+      state = %{
+        deployment: Deployment.new(@root, "my_app"),
+        install: %{
+          from: nil,
+          task: task,
+          timer: nil,
+          vsn: "1.0.1",
+          env: [],
+          old_os_pid: nil
+        },
+        peer: peer,
+        os_pid: nil,
+        last_os_pid: nil,
+        down: nil
+      }
+
+      assert {:noreply, failed} = Session.handle_info({:EXIT, peer, :boom}, state)
+      assert failed.install.from == nil
+      assert failed.down =~ "no matching restart evidence"
+      Task.shutdown(task, :brutal_kill)
     end
 
     test "bounds launcher commands without making the session owner wait forever" do

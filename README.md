@@ -1064,11 +1064,15 @@ values. Pass an environment as the third argument to `install!/3` when the targe
 incarnation must see different values; the override is retained by later
 restarts. Every call, launcher command, boot, install, shutdown and process-exit
 wait is bounded. The session sets `CASTLE_INSTALL_TIMEOUT` five seconds inside
-its own install deadline unless the caller supplies a smaller valid value; an
-override must also allow the deployment enough time to reboot and cold boot.
-Normal stop returns `:timeout` if the owned operating-system process does not
-exit. A session controller that exceeds its shutdown budget is killed, and the
-deployment launcher is asked to stop as a bounded fallback. Register the
+its nominal install budget unless the caller supplies a smaller valid value.
+The clocks do not start together: `bin/castle` starts its confirmation clock
+after its unbounded install RPC returns, so a slow install can make the outer
+session watchdog pre-empt it. The session retains ownership of that command and
+normal teardown waits for it. An override must also allow the deployment enough
+time to reboot and cold boot. Normal stop returns `:timeout` if the owned
+operating-system process does not exit. A session controller that exceeds its
+shutdown budget is killed, and the deployment launcher is asked to stop with
+the session's effective environment as a bounded fallback. Register the
 deployment-level teardown before `start_peer!/2`, as in the recipe above, because
 a failed start returns no session value and the callback must still exist.
 

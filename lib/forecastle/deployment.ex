@@ -494,10 +494,13 @@ defmodule Forecastle.Deployment do
   so that deadline covers both synchronous launcher/preboot work and cold boot.
   `:call_timeout`, `:command_timeout`, `:install_timeout`, `:shutdown_timeout`
   and `:exit_timeout` override the other bounded waits in milliseconds. The
-  session gives `bin/castle` a polling deadline five seconds shorter than its own
-  install deadline. An explicit `CASTLE_INSTALL_TIMEOUT` must fit inside that
-  outer budget, and must still be long enough for the deployment's actual reboot
-  and cold boot.
+  session gives `bin/castle` a nominal confirmation budget five seconds shorter
+  than its own install deadline. The two clocks start at different times:
+  `bin/castle` starts its clock only after the unbounded install RPC returns, so
+  a slow install can make the outer session watchdog fire first. The command
+  remains owned in that case and normal teardown waits for it. An explicit
+  `CASTLE_INSTALL_TIMEOUT` must fit the nominal budget and still be long enough
+  for the deployment's actual reboot and cold boot.
 
   The returned value deliberately exposes neither the peer controller nor the
   node name. A `restart_emulator` install replaces that peer behind the same

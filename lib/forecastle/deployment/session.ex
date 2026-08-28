@@ -6,12 +6,13 @@ defmodule Forecastle.Deployment.Session do
   alias Forecastle.Deployment
 
   @enforce_keys [:server, :stop_timeout, :deployment]
-  defstruct [:server, :stop_timeout, :deployment]
+  defstruct [:server, :stop_timeout, :deployment, :env_store]
 
   @opaque t :: %__MODULE__{
             server: pid(),
             stop_timeout: timeout(),
-            deployment: Deployment.t()
+            deployment: Deployment.t(),
+            env_store: pid()
           }
 
   @call_timeout 5_000
@@ -20,31 +21,60 @@ defmodule Forecastle.Deployment.Session do
   @install_timeout 300_000
   @install_slack 5_000
   @shutdown_timeout 10_000
+  @fallback_timeout 10_000
   @exit_timeout 30_000
   @exit_interval 100
   @boot_interval 50
 
   def start(%Deployment{} = deployment, opts) do
-    with {:ok, server} <- GenServer.start(__MODULE__, {deployment, opts}) do
-      shutdown_timeout = Keyword.get(opts, :shutdown_timeout, @shutdown_timeout)
-      exit_timeout = Keyword.get(opts, :exit_timeout, @exit_timeout)
-      install_timeout = Keyword.get(opts, :install_timeout, @install_timeout)
+    with {:ok, env_store} <- Agent.start(fn -> Keyword.get(opts, :env, []) end) do
+      opts = Keyword.put(opts, :env_store, env_store)
 
-      {:ok,
-       %__MODULE__{
-         server: server,
-         stop_timeout: install_timeout + shutdown_timeout + exit_timeout + 1_000,
-         deployment: deployment
-       }}
+      case GenServer.start(__MODULE__, {deployment, opts}) do
+        {:ok, server} ->
+          shutdown_timeout = Keyword.get(opts, :shutdown_timeout, @shutdown_timeout)
+          exit_timeout = Keyword.get(opts, :exit_timeout, @exit_timeout)
+          install_timeout = Keyword.get(opts, :install_timeout, @install_timeout)
+
+          {:ok,
+           %__MODULE__{
+             server: server,
+             stop_timeout:
+               install_timeout + max(shutdown_timeout, @fallback_timeout) + exit_timeout + 1_000,
+             deployment: deployment,
+             env_store: env_store
+           }}
+
+        {:error, reason} ->
+          stop_env_store(env_store)
+          {:error, reason}
+      end
     end
   end
 
-  def stop(%__MODULE__{server: server, stop_timeout: timeout, deployment: deployment}) do
-    if Process.alive?(server), do: GenServer.call(server, :stop, timeout), else: :ok
+  def stop(%__MODULE__{} = session) do
+    stop_server(session)
+  after
+    stop_env_store(session.env_store)
+  end
+
+  defp stop_server(%__MODULE__{server: server, stop_timeout: timeout} = session) do
+    if Process.alive?(server) do
+      GenServer.call(server, :stop, timeout)
+    else
+      fallback_session_stop(session)
+      :ok
+    end
   catch
-    :exit, {:timeout, _call} -> kill_server(server, deployment)
-    :exit, {:noproc, _call} -> :ok
-    :exit, _reason -> kill_server(server, deployment)
+    :exit, {:timeout, _call} ->
+      kill_server(session)
+
+    :exit, {:noproc, _call} ->
+      fallback_session_stop(session)
+      :ok
+
+    :exit, _reason ->
+      kill_server(session)
   end
 
   def call(%__MODULE__{server: server}, module, function, args, timeout) do
@@ -89,6 +119,7 @@ defmodule Forecastle.Deployment.Session do
       install_timeout: Keyword.get(opts, :install_timeout, @install_timeout),
       shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @shutdown_timeout),
       exit_timeout: Keyword.get(opts, :exit_timeout, @exit_timeout),
+      env_store: Keyword.fetch!(opts, :env_store),
       peer: nil,
       os_pid: nil,
       last_os_pid: nil,
@@ -141,6 +172,8 @@ defmodule Forecastle.Deployment.Session do
   def handle_call({:install, vsn, env}, from, state) when is_binary(vsn) and is_list(env) do
     case install_command_env(state, env) do
       {:ok, command_env} ->
+        remember_env(state, state.env ++ env)
+
         task =
           Task.async(fn ->
             Deployment.castle(state.deployment, ["install", vsn], command_env)
@@ -181,6 +214,7 @@ defmodule Forecastle.Deployment.Session do
     old_peer = state.peer
     old_pid = state.os_pid || state.last_os_pid
     state = %{state | env: state.env ++ env}
+    remember_env(state, state.env)
     stop_peer(old_peer)
 
     with :ok <- await_exit(old_pid, state.exit_timeout),
@@ -286,6 +320,7 @@ defmodule Forecastle.Deployment.Session do
   @impl true
   def terminate(_reason, state) do
     unless state.cleaned, do: cleanup(state, :kill)
+    stop_env_store(state.env_store)
     :ok
   end
 
@@ -524,7 +559,7 @@ defmodule Forecastle.Deployment.Session do
     kind, reason -> {:error, Exception.format(kind, reason, __STACKTRACE__)}
   end
 
-  defp kill_server(server, deployment) do
+  defp kill_server(%__MODULE__{server: server} = session) do
     if Process.alive?(server) do
       monitor = Process.monitor(server)
       Process.exit(server, :kill)
@@ -537,7 +572,33 @@ defmodule Forecastle.Deployment.Session do
     else
       :ok
     end
-    |> tap(fn _result -> fallback_stop(deployment, []) end)
+    |> tap(fn _result -> fallback_session_stop(session) end)
+  end
+
+  defp fallback_session_stop(session) do
+    fallback_stop(session.deployment, fallback_env(session.env_store))
+  end
+
+  defp fallback_env(nil), do: []
+
+  defp fallback_env(env_store) do
+    Agent.get(env_store, & &1, 1_000)
+  catch
+    :exit, _reason -> []
+  end
+
+  defp remember_env(state, env) do
+    Agent.update(state.env_store, fn _current -> env end)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp stop_env_store(nil), do: :ok
+
+  defp stop_env_store(env_store) do
+    if Process.alive?(env_store), do: Agent.stop(env_store, :normal, 1_000), else: :ok
+  catch
+    :exit, _reason -> :ok
   end
 
   defp fallback_stop(deployment, env) do
@@ -575,7 +636,7 @@ defmodule Forecastle.Deployment.Session do
     install = state.install
     diagnosis = install_diagnosis(install)
     cancel_timer(install)
-    GenServer.reply(install.from, {:error, message <> diagnosis})
+    if install.from, do: GenServer.reply(install.from, {:error, message <> diagnosis})
 
     {:noreply,
      %{
