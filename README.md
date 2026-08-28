@@ -1053,7 +1053,11 @@ emulator.
 Pass scenario environment as `start_peer!(deployment, env: [...])`. Those are
 real variables in the child operating-system process, so runtime configuration,
 ports and NIFs see them, and every incarnation after a restart receives the same
-values. Every call, boot, install, shutdown and process-exit wait is bounded.
+values. Pass an environment as the third argument to `install!/3` when the target
+incarnation must see different values; the override is retained by later
+restarts. Every call, launcher command, boot, install, shutdown and process-exit
+wait is bounded. A session controller that exceeds its shutdown budget is killed,
+which also halts the release it owns.
 
 ### What it does for you, and what it does not
 

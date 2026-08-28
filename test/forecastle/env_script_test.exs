@@ -867,7 +867,57 @@ defmodule Forecastle.EnvScriptTest do
         ])
 
       refute run.status == 0
-      assert run.stderr =~ "supplies -user, which cannot be combined with OTP peer control"
+
+      assert run.stderr =~
+               "effective emulator arguments supply -user, which cannot be combined with OTP peer control"
+
+      refute File.exists?(Path.join(work, "vm.args"))
+    end
+
+    test "detects -user after erlexec unescapes a nested args file", %{root: root} do
+      work = peer_work(root)
+      nested = Path.join(root, "nested.vm.args")
+      selected = Path.join(root, "selected.vm.args")
+      File.write!(nested, "-us\\er nested_user\n")
+      File.write!(selected, "-args_file #{nested}\n")
+
+      run =
+        start(root, [
+          {"FORECASTLE_PEER_WORK", work},
+          {"RELEASE_VM_ARGS", selected}
+        ])
+
+      refute run.status == 0
+      assert run.stderr =~ "effective emulator arguments supply -user"
+      refute File.exists?(Path.join(work, "vm.args"))
+    end
+
+    test "detects -user supplied through an emulator flag variable", %{root: root} do
+      work = peer_work(root)
+
+      run =
+        start(root, [
+          {"FORECASTLE_PEER_WORK", work},
+          {"ERL_FLAGS", "-user flag_user"}
+        ])
+
+      refute run.status == 0
+      assert run.stderr =~ "effective emulator arguments supply -user"
+      refute File.exists?(Path.join(work, "vm.args"))
+    end
+
+    test "names a missing effective args file before trying to combine it", %{root: root} do
+      work = peer_work(root)
+      missing = Path.join(root, "missing.vm.args")
+
+      run =
+        start(root, [
+          {"FORECASTLE_PEER_WORK", work},
+          {"RELEASE_VM_ARGS", missing}
+        ])
+
+      refute run.status == 0
+      assert run.stderr =~ "effective RELEASE_VM_ARGS does not exist: #{missing}"
       refute File.exists?(Path.join(work, "vm.args"))
     end
   end

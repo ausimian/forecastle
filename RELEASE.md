@@ -5,8 +5,14 @@
   launcher and own ERTS, while tests use structured MFA calls and keep one
   session across both hot upgrades and emulator restarts. Session teardown also
   stops the release it owns. Peer startup retains a 180-second launcher/preboot
-  allowance and adds the deployment's `:boot_timeout`, so the first-start
-  preboot VM does not consume an application's cold-boot budget.
+  allowance and adds the deployment's `:boot_timeout` to form the total boot
+  deadline, so first-start preboot work does not replace the application's
+  configured allowance. Launcher and
+  Castle commands are bounded, a controller that exceeds its shutdown budget is
+  killed with its owned release, and install/restart calls can retain an
+  environment override for later incarnations. The old direct-deployment
+  `install_supervised/3` and `install_supervised!/3` helpers are deprecated in
+  favour of the session API.
 - `bin/castle`, a release management CLI, is now installed alongside the
   standard launcher. It provides `releases`, `upgradable`, `unpack`, `install`,
   `commit` and `remove`, and delegates to the running system through the standard

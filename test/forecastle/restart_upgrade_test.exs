@@ -145,6 +145,17 @@ defmodule Forecastle.RestartUpgradeTest do
     make_relup!({deploy.root, @from}, {next, @to}, ["--restart"])
     ^next = assemble!(into: "restart-next", vsn: @to, env: @heart_in_vm_args)
 
+    # Registered before either raw start: any failure while reading its pid,
+    # inspecting heart or waiting for it to exit still has a teardown that can
+    # reach the deployment, and the fixture relup is removed on every path.
+    on_exit(fn ->
+      try do
+        Deployment.stop(deploy)
+      after
+        File.rm(relup)
+      end
+    end)
+
     # Keep one raw daemon start outside the functional path. This is the direct
     # launcher/supervisor integration test; the upgrade below is peer-owned.
     hostile_start =
@@ -157,24 +168,14 @@ defmodule Forecastle.RestartUpgradeTest do
     Deployment.stop(deploy)
     Deployment.await_exit!(raw_pid)
 
-    quiet_start = Deployment.start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
-    quiet_heart_env = Deployment.rpc!(deploy, @heart_report)
-    raw_pid = Deployment.os_pid(deploy)
-    Deployment.stop(deploy)
-    Deployment.await_exit!(raw_pid)
-
     session =
       Deployment.start_peer!(deploy,
-        env: @restart_env ++ @hostile_heart ++ @tabbed_heart
+        env:
+          [{"SAMPLE_GREETING", @first_greeting}] ++
+            @hostile_heart ++ @tabbed_heart
       )
 
-    on_exit(fn ->
-      try do
-        Deployment.stop(session)
-      after
-        File.rm(relup)
-      end
-    end)
+    on_exit(fn -> Deployment.stop(session) end)
 
     Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
 
@@ -192,6 +193,7 @@ defmodule Forecastle.RestartUpgradeTest do
       erl_aflags: Deployment.call!(session, System, :get_env, ["ERL_AFLAGS"]),
       elixir_erl_options: Deployment.call!(session, System, :get_env, ["ELIXIR_ERL_OPTIONS"]),
       start_output: hostile_start,
+      greeting: Deployment.call!(session, Sample, :greeting, []),
       counter: Deployment.call!(session, Sample.Counter, :info, []),
       releases: Deployment.castle!(session, ["releases"]),
       start_erl: File.read!(Path.join(deploy.root, "releases/start_erl.data"))
@@ -202,7 +204,7 @@ defmodule Forecastle.RestartUpgradeTest do
     # The first transition, abandoned. `install` reboots the node, the launcher
     # selects the provisional version on the way back up, and nothing has been
     # committed - so what a crash from here has to do is come back on @from.
-    provisional_output = Deployment.install!(session, @to)
+    provisional_output = Deployment.install!(session, @to, @restart_env)
 
     provisional = %{
       output: provisional_output,
@@ -250,24 +252,43 @@ defmodule Forecastle.RestartUpgradeTest do
     Deployment.restart_peer!(session)
 
     restarted = %{
-      start_output: quiet_start,
-      heart_env: quiet_heart_env,
       counter: Deployment.call!(session, Sample.Counter, :info, []),
       releases: Deployment.castle!(session, ["releases"])
     }
 
+    # Measure an ordinary clean start of the release that was actually committed,
+    # rather than reusing the pre-upgrade @from observation. The session is done
+    # before the raw launcher starts so there is only one incarnation at a time.
+    restarted_pid = Deployment.os_pid(session)
+    Deployment.stop(session)
+    Deployment.await_exit!(restarted_pid)
+
+    quiet_start = Deployment.start!(deploy, [{"SAMPLE_GREETING", @restart_greeting}])
+    quiet_heart_env = Deployment.rpc!(deploy, @heart_report)
+    quiet_pid = Deployment.os_pid(deploy)
+    Deployment.stop(deploy)
+    Deployment.await_exit!(quiet_pid)
+
+    restarted =
+      Map.merge(restarted, %{start_output: quiet_start, heart_env: quiet_heart_env})
+
     # Internal lifecycle assertion, after every setup operation that can fail:
     # losing the controller without an orderly public stop still takes the owned
-    # release with it. The tolerant on_exit above remains safe on every earlier
-    # failure path and after this successful one.
-    owned_pid = Deployment.os_pid(session)
-    Process.exit(session.server, :kill)
+    # release with it. The deployment-level on_exit above remains safe before
+    # this second session exists, during its boot, and after this successful path.
+    controller_session = Deployment.start_peer!(deploy, env: @restart_env)
+    owned_pid = Deployment.os_pid(controller_session)
+    Process.exit(controller_session.server, :kill)
     Deployment.await_exit!(owned_pid)
-    controller_loss = %{server_down?: not Process.alive?(session.server), os_pid: owned_pid}
+
+    controller_loss = %{
+      server_down?: not Process.alive?(controller_session.server),
+      os_pid: owned_pid
+    }
 
     {:ok,
      deploy: deploy,
-     session: session,
+     session: controller_session,
      booted: booted,
      provisional: provisional,
      rolled_back: rolled_back,
@@ -443,7 +464,9 @@ defmodule Forecastle.RestartUpgradeTest do
       # second, and answers with it - so materialising did not freeze the
       # configuration, which is what the header Mix wrote is preserved for.
       assert booted.counter == {@from, 0}
+      assert booted.greeting == @first_greeting
       assert provisional.greeting == @restart_greeting
+      refute provisional.greeting == booted.greeting
     end
 
     test "leaves the new version current and the old one permanent",

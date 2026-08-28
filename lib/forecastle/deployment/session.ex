@@ -12,6 +12,7 @@ defmodule Forecastle.Deployment.Session do
 
   @call_timeout 5_000
   @launcher_timeout 180_000
+  @command_timeout 30_000
   @install_timeout 300_000
   @shutdown_timeout 10_000
   @exit_timeout 30_000
@@ -27,9 +28,9 @@ defmodule Forecastle.Deployment.Session do
   def stop(%__MODULE__{server: server, stop_timeout: timeout}) do
     if Process.alive?(server), do: GenServer.stop(server, :normal, timeout), else: :ok
   catch
-    :exit, {:timeout, _call} -> :timeout
+    :exit, {:timeout, _call} -> kill_server(server)
     :exit, {:noproc, _call} -> :ok
-    :exit, _reason -> :timeout
+    :exit, _reason -> kill_server(server)
   end
 
   def call(%__MODULE__{server: server}, module, function, args, timeout) do
@@ -48,15 +49,15 @@ defmodule Forecastle.Deployment.Session do
        "deployment session stopped during #{operation_name(operation)}: #{inspect(reason)}"}
   end
 
-  def install(%__MODULE__{server: server}, vsn) do
-    GenServer.call(server, {:install, vsn}, :infinity)
+  def install(%__MODULE__{server: server}, vsn, env) do
+    GenServer.call(server, {:install, vsn, env}, :infinity)
   catch
     :exit, reason ->
       {:error, "deployment session stopped while installing #{vsn}: #{inspect(reason)}"}
   end
 
-  def restart(%__MODULE__{server: server}) do
-    GenServer.call(server, :restart, :infinity)
+  def restart(%__MODULE__{server: server}, env) do
+    GenServer.call(server, {:restart, env}, :infinity)
   catch
     :exit, reason -> {:error, "deployment session stopped while restarting: #{inspect(reason)}"}
   end
@@ -70,6 +71,7 @@ defmodule Forecastle.Deployment.Session do
       env: Keyword.get(opts, :env, []),
       call_timeout: Keyword.get(opts, :call_timeout, @call_timeout),
       launcher_timeout: Keyword.get(opts, :launcher_timeout, @launcher_timeout),
+      command_timeout: Keyword.get(opts, :command_timeout, @command_timeout),
       install_timeout: Keyword.get(opts, :install_timeout, @install_timeout),
       shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @shutdown_timeout),
       exit_timeout: Keyword.get(opts, :exit_timeout, @exit_timeout),
@@ -100,23 +102,28 @@ defmodule Forecastle.Deployment.Session do
   end
 
   def handle_call({:operation, operation}, _from, state) do
-    {:reply, run_operation(state, operation), state}
+    {:reply, operation_result(state, operation), state}
   end
 
-  def handle_call({:install, vsn}, _from, %{down: reason} = state) when not is_nil(reason) do
+  def handle_call({:install, vsn, _env}, _from, %{down: reason} = state)
+      when not is_nil(reason) do
     {:reply,
      {:error,
       "cannot install #{vsn} in #{state.deployment.root}: " <>
         "the session is unusable after #{inspect(reason)}"}, state}
   end
 
-  def handle_call({:install, _vsn}, _from, %{install: install} = state)
+  def handle_call({:install, _vsn, _env}, _from, %{install: install} = state)
       when not is_nil(install) do
     {:reply, {:error, "another install is already running in #{state.deployment.root}"}, state}
   end
 
-  def handle_call({:install, vsn}, from, state) when is_binary(vsn) do
-    task = Task.async(fn -> Deployment.castle(state.deployment, ["install", vsn], state.env) end)
+  def handle_call({:install, vsn, env}, from, state) when is_binary(vsn) and is_list(env) do
+    task =
+      Task.async(fn ->
+        Deployment.castle(state.deployment, ["install", vsn], state.env ++ env)
+      end)
+
     timer = Process.send_after(self(), {:install_timeout, task.ref}, state.install_timeout)
 
     install = %{
@@ -124,27 +131,30 @@ defmodule Forecastle.Deployment.Session do
       task: task,
       timer: timer,
       vsn: vsn,
+      env: env,
       old_os_pid: state.os_pid
     }
 
     {:noreply, %{state | install: install}}
   end
 
-  def handle_call(:restart, _from, %{install: install} = state) when not is_nil(install) do
+  def handle_call({:restart, _env}, _from, %{install: install} = state)
+      when not is_nil(install) do
     {:reply, {:error, "cannot restart #{state.deployment.root} while an install is running"},
      state}
   end
 
-  def handle_call(:restart, _from, %{down: :install_timeout} = state) do
+  def handle_call({:restart, _env}, _from, %{down: :install_timeout} = state) do
     {:reply,
      {:error,
       "cannot restart #{state.deployment.root}: the session is unusable after an install timeout"},
      state}
   end
 
-  def handle_call(:restart, _from, state) do
+  def handle_call({:restart, env}, _from, state) when is_list(env) do
     old_peer = state.peer
     old_pid = state.os_pid || state.last_os_pid
+    state = %{state | env: state.env ++ env}
     stop_peer(old_peer)
 
     with :ok <- await_exit(old_pid, state.exit_timeout),
@@ -163,11 +173,11 @@ defmodule Forecastle.Deployment.Session do
     Process.demonitor(ref, [:flush])
     cancel_timer(install)
 
-    reply =
+    {reply, state} =
       if status == 0 do
-        {:ok, output}
+        {{:ok, output}, %{state | env: state.env ++ install.env}}
       else
-        {:error, "bin/castle install #{install.vsn} exited with #{status}\n\n#{output}"}
+        {{:error, "bin/castle install #{install.vsn} exited with #{status}\n\n#{output}"}, state}
       end
 
     GenServer.reply(install.from, reply)
@@ -210,8 +220,15 @@ defmodule Forecastle.Deployment.Session do
       :ok ->
         with :ok <- await_exit(install.old_os_pid, state.exit_timeout),
              {:ok, restarted} <-
-               start_peer(%{state | peer: nil, os_pid: nil, last_os_pid: nil, down: nil}) do
-          {:noreply, %{restarted | install: install}}
+               start_peer(%{
+                 state
+                 | env: state.env ++ install.env,
+                   peer: nil,
+                   os_pid: nil,
+                   last_os_pid: nil,
+                   down: nil
+               }) do
+          {:noreply, %{restarted | install: %{install | env: []}}}
         else
           {:error, message} -> fail_install(state, message)
         end
@@ -255,6 +272,13 @@ defmodule Forecastle.Deployment.Session do
         |> Enum.map(&to_charlist/1)
       end,
       env: Enum.map(env, fn {name, value} -> {to_charlist(name), to_charlist(value)} end),
+      # OTP's peer user process reports `started` through
+      # `init:notify_when_started/1`. That notification is emitted only after
+      # init has finished the boot script, including application startup, so
+      # this one synchronous wait necessarily covers both the launcher/preboot
+      # work and the application's cold boot. The two allowances are added; a
+      # separate readiness poll after this would be asking an already-settled
+      # init process the same question again.
       wait_boot: state.launcher_timeout + deployment.boot_timeout,
       shutdown: {:halt, state.shutdown_timeout},
       peer_down: :stop
@@ -333,23 +357,62 @@ defmodule Forecastle.Deployment.Session do
   defp run_operation(state, :os_pid), do: {:ok, state.os_pid}
 
   defp run_operation(state, {:castle, args, env}) do
-    case Deployment.castle(state.deployment, args, state.env ++ env) do
-      {output, 0} ->
+    case command(fn -> Deployment.castle(state.deployment, args, state.env ++ env) end, state) do
+      {:ok, {output, 0}} ->
         {:ok, String.trim(output)}
 
-      {output, status} ->
+      {:ok, {output, status}} ->
         {:error, "castle #{Enum.join(args, " ")} exited with #{status}\n\n#{output}"}
+
+      {:error, message} ->
+        {:error, "castle #{Enum.join(args, " ")} #{message}"}
     end
   end
 
   defp run_operation(state, {:launcher, args, env}) do
-    case Deployment.launcher(state.deployment, args, state.env ++ env) do
-      {output, 0} ->
+    case command(fn -> Deployment.launcher(state.deployment, args, state.env ++ env) end, state) do
+      {:ok, {output, 0}} ->
         {:ok, String.trim(output)}
 
-      {output, status} ->
+      {:ok, {output, status}} ->
         {:error,
          "#{state.deployment.name} #{Enum.join(args, " ")} exited with #{status}\n\n#{output}"}
+
+      {:error, message} ->
+        {:error, "#{state.deployment.name} #{Enum.join(args, " ")} #{message}"}
+    end
+  end
+
+  defp command(run, state) do
+    task = Task.async(run)
+
+    case Task.yield(task, state.command_timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> {:ok, result}
+      {:exit, reason} -> {:error, "could not be run: #{inspect(reason)}"}
+      nil -> {:error, "did not finish within #{state.command_timeout}ms"}
+    end
+  end
+
+  defp operation_result(state, operation) do
+    run_operation(state, operation)
+  rescue
+    error -> {:error, Exception.message(error)}
+  catch
+    kind, reason -> {:error, Exception.format(kind, reason, __STACKTRACE__)}
+  end
+
+  defp kill_server(server) do
+    if Process.alive?(server) do
+      monitor = Process.monitor(server)
+      Process.exit(server, :kill)
+
+      receive do
+        {:DOWN, ^monitor, :process, ^server, _reason} -> :killed
+      after
+        1_000 -> :killed
+      end
+    else
+      :ok
     end
   end
 
@@ -471,6 +534,6 @@ defmodule Forecastle.Deployment.Session do
     work
   end
 
-  defp operation_name({name, _args}), do: name
+  defp operation_name(operation) when is_tuple(operation), do: elem(operation, 0)
   defp operation_name(operation), do: operation
 end

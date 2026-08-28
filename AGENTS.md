@@ -3048,13 +3048,26 @@ Decisions in it worth not relitigating:
   there is no way to reach it from here that does not amount to a port-and-pid
   abstraction inside a test harness. A release that is *slow* rather than stuck
   is `:boot_timeout`'s business, which is why that one is the project's to set.
-- **One session installs both kinds of transition.** `install!/2` starts
+- **One session installs both kinds of transition.** `install!/3` starts
   `bin/castle install` under a deadline. A hot transition leaves the current
   peer and operating-system process in place. A restart transition closes the
   peer connection; matching Castle and OTP restart markers identify the
   expected reboot, the session waits for the old process to exit and starts a
   new peer incarnation through the stock launcher. The session value remains
-  stable, and no caller may retain a raw incarnation handle.
+  stable, and no caller may retain a raw incarnation handle. An environment
+  passed to the install command is retained by the replacement and later
+  incarnations; this is how a test makes a target's runtime providers see a
+  different scenario from the initial boot. Launcher and Castle commands have a
+  separate command deadline. If any operation nevertheless keeps the session
+  from serving its stop request, teardown kills the controller after its budget;
+  the controller-loss property then halts the release it owns.
+
+  OTP's own boot acknowledgement is already the application-readiness wait:
+  `peer.erl` calls `init:notify_when_started/1` and sends `started` only when init
+  reports it. `wait_boot` therefore includes application startup, not merely the
+  control socket connecting. The launcher allowance and the deployment's
+  application allowance are added because the synchronous first-start path also
+  runs the preboot VM before the emulator can reach that acknowledgement.
 - **Peer arguments are handed to the release through a private vm.args copy.**
   Forecastle's first-start hook boots a preboot VM before the release itself.
   Passing `-user peer` in an inherited ERL flag lets that VM consume the only
@@ -3067,7 +3080,11 @@ Decisions in it worth not relitigating:
   args itself; the session never guesses the version. The hook accepts only an
   owner-only work directory and regular owner-only argument file, refuses an
   existing output name and an application-supplied `-user`, and creates the
-  combined file with noclobber under a private umask. Peer arguments precede the
+  combined file with noclobber under a private umask. `-user` is asked of the
+  same `-emu_args_exit` vector used for heart, before its first `-extra`, rather
+  than looked for in one file: flag variables, escapes and nested args files all
+  reach erlexec and therefore all reach the answer. An unmeasurable vector is a
+  refusal on the peer path. Peer arguments precede the
   application's args so a trailing `-extra` cannot swallow them, while the
   original `RELEASE_VM_ARGS` value is restored inside the VM before the temporary
   directory is removed as soon as the peer connects.

@@ -52,13 +52,16 @@ defmodule Forecastle.UpgradeTest do
     # the tarball we are about to hand to release_handler contains it.
     ^next = assemble!(into: "next", vsn: @to)
 
-    session =
-      Deployment.start_peer!(deploy,
-        env: [
-          {"SAMPLE_GREETING", "hello-from-runtime"},
-          {"FORECASTLE_SCENARIO", "present"}
-        ]
-      )
+    {boot_elapsed, session} =
+      :timer.tc(fn ->
+        Deployment.start_peer!(deploy,
+          env: [
+            {"SAMPLE_GREETING", "hello-from-runtime"},
+            {"SAMPLE_BOOT_DELAY_MS", "200"},
+            {"FORECASTLE_SCENARIO", "present"}
+          ]
+        )
+      end)
 
     on_exit(fn ->
       Deployment.stop(session)
@@ -69,6 +72,7 @@ defmodule Forecastle.UpgradeTest do
 
     booted = %{
       greeting: Deployment.call!(session, Sample, :greeting, []),
+      boot_elapsed: boot_elapsed,
       env_marker: Deployment.call!(session, Sample, :env_marker, []),
       release_env: Deployment.call!(session, Sample, :release_env, []),
       counter: Deployment.call!(session, Sample.Counter, :info, []),
@@ -190,6 +194,15 @@ defmodule Forecastle.UpgradeTest do
       # the state the process was initialised with, and the code serving the
       # call.
       assert booted.unmentioned == {@from, @from}
+    end
+
+    test "does not report the peer started before application startup finishes",
+         %{booted: booted} do
+      # OTP's peer user process reports `started` through
+      # init:notify_when_started/1. The fixture deliberately spends 200ms inside
+      # Application.start/2; returning sooner would mean wait_boot covered only
+      # the control connection rather than the release boot.
+      assert booted.boot_elapsed >= 200_000
     end
 
     test "uses the release's own ERTS and carries only scenario environment",

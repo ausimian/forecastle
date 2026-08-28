@@ -60,7 +60,8 @@ defmodule Forecastle.Deployment do
 
   Anything a caller passes is applied after the scrub, so a test that wants one
   of these set says so and gets it. For a peer session, `:env` is real
-  child-process environment and is reused for every incarnation.
+  child-process environment and is reused for every incarnation until an
+  `install!/3` or `restart_peer!/2` environment overrides it for later ones.
   """
 
   # `flunk/1` only. A deployment that never answers is a test failure and wants
@@ -182,8 +183,9 @@ defmodule Forecastle.Deployment do
       of `scrubbed_env/1` and underneath anything a call passes for itself.
     * `:boot_timeout` - the application's cold-boot allowance in milliseconds.
       Raw daemon starts use it after `daemon` returns. Peer sessions add it to a
-      separate launcher allowance covering the adapter and first-start preboot
-      VM. Defaults to 20 seconds, which describes a release that does nothing on
+      180-second launcher allowance to form the total deadline covering the
+      adapter, first-start preboot VM and cold boot. Defaults to 20 seconds,
+      which describes a release that does nothing on
       the way up: an application that runs migrations, warms a cache or waits on
       a dependency takes longer, and its project is the only thing that knows
       how much longer.
@@ -482,10 +484,12 @@ defmodule Forecastle.Deployment do
   `:env` supplies scenario environment variables after the normal deployment
   scrub. They are real variables in the child operating-system process, so they
   are visible to runtime configuration, ports and NIFs. `:launcher_timeout` is
-  the allowance for the adapter, env hook and first-start preboot VM and defaults
-  to 180 seconds; the deployment's `:boot_timeout` is added to it.
-  `:call_timeout`, `:install_timeout`, `:shutdown_timeout` and `:exit_timeout`
-  override the other bounded waits in milliseconds.
+  the launcher's allowance and defaults to 180 seconds; the deployment's
+  `:boot_timeout` is added to form the peer's total boot deadline. OTP reports a
+  peer started through `init:notify_when_started/1`, after application startup,
+  so that deadline covers both synchronous launcher/preboot work and cold boot.
+  `:call_timeout`, `:command_timeout`, `:install_timeout`, `:shutdown_timeout`
+  and `:exit_timeout` override the other bounded waits in milliseconds.
 
   The returned value deliberately exposes neither the peer controller nor the
   node name. A `restart_emulator` install replaces that peer behind the same
@@ -530,24 +534,31 @@ defmodule Forecastle.Deployment do
   `restart_emulator` transition closes the control connection, matching Castle
   and OTP restart markers distinguish the expected reboot from a crash; the
   session waits for the old process to exit, starts the stock launcher again as
-  a new peer incarnation, and remains usable by the caller.
+  a new peer incarnation, and remains usable by the caller. `env` is applied to
+  the install command and retained for that replacement and later incarnations;
+  it is how a test changes runtime configuration between the initial boot and a
+  restart transition.
   """
-  @spec install(session(), binary()) :: {:ok, binary()} | {:error, binary()}
-  def install(%Session{} = session, vsn) when is_binary(vsn), do: Session.install(session, vsn)
+  @spec install(session(), binary(), env()) :: {:ok, binary()} | {:error, binary()}
+  def install(%Session{} = session, vsn, env \\ []) when is_binary(vsn) and is_list(env),
+    do: Session.install(session, vsn, env)
 
-  @doc "`install/2`, returning the command output or raising on failure."
-  @spec install!(session(), binary()) :: binary()
-  def install!(%Session{} = session, vsn), do: session |> install(vsn) |> session_result!()
+  @doc "`install/3`, returning the command output or raising on failure."
+  @spec install!(session(), binary(), env()) :: binary()
+  def install!(%Session{} = session, vsn, env \\ []),
+    do: session |> install(vsn, env) |> session_result!()
 
   @doc """
   Stops and cold-starts the release behind an existing session.
 
   This models an external supervisor restart without exposing a peer handle. It
   is useful for asserting rollback before commit and for checking what an
-  ordinary start selects afterwards.
+  ordinary start selects afterwards. `env` is merged over the session's current
+  environment and retained for this and later incarnations.
   """
-  @spec restart_peer!(session()) :: :restarted
-  def restart_peer!(%Session{} = session), do: session |> Session.restart() |> session_result!()
+  @spec restart_peer!(session(), env()) :: :restarted
+  def restart_peer!(%Session{} = session, env \\ []),
+    do: session |> Session.restart(env) |> session_result!()
 
   @doc """
   The release version an ordinary start of this deployment would boot.
@@ -684,10 +695,13 @@ defmodule Forecastle.Deployment do
   whole module timeout and then finish with an `on_exit callback` error, which
   says nothing about the boot.
 
-  Answers `:timeout` in that case, which is neither a stop nor a failure to find
-  anything to stop, and should not be mistaken for either.
+  A peer session has a stronger ownership guarantee: if its controller does not
+  stop inside the shutdown budget, it is killed so its linked peer controller
+  halts the release. That case returns `:killed` rather than leaving a deployment
+  behind in the scratch tree.
   """
-  @spec stop(t() | session(), env()) :: {binary(), non_neg_integer()} | :timeout | :ok
+  @spec stop(t() | session(), env()) ::
+          {binary(), non_neg_integer()} | :timeout | :ok | :killed
   def stop(deployment_or_session, env \\ [])
   def stop(%Session{} = session, _env), do: Session.stop(session)
 
@@ -901,23 +915,17 @@ defmodule Forecastle.Deployment do
   Installs `vsn` through `bin/castle` while acting as the release's supervisor,
   returning `{output, status}`.
 
-  **This is the call for a transition that restarts the emulator, and the reason
-  there is no single one that covers both kinds.** Such a transition applies the
-  relup and then reboots, and nothing inside the release starts it again - that
-  is the design rather than a gap: `bin/start` is inert, `HEART_COMMAND` is
-  unset, and systemd, Docker or runit owns the restart. So a test of one has to
-  be the supervisor. `bin/castle install` is run in a task, because it keeps
-  asking the system what it is running until the version it installed answers;
-  this waits for the old *operating system process* to go, starts the release
-  again, and then collects what the install made of it.
+  Deprecated legacy helper for a deployment started outside a peer session.
+  `start_peer!/2` with `install!/3` now owns both hot and restart transitions
+  behind one stable session and should be used by new tests. This function is
+  retained for source compatibility with existing restart-only suites; it waits
+  for the old operating-system process, starts the release again, and therefore
+  must not be used for a hot transition.
 
-  A hot upgrade never leaves that process, so this would wait for an exit that is
-  not coming. Use `castle/3` or `castle!/3` with `["install", vsn]` for one.
-
-  For a test that wants the failure rather than the tuple, `install_supervised!/3`
-  raises on a non-zero status the way every other bang here does.
+  `install_supervised!/3` raises on a non-zero status.
   """
   @spec install_supervised(t(), binary(), env()) :: {binary(), non_neg_integer()}
+  @deprecated "Use start_peer!/2 and install!/3"
   def install_supervised(%__MODULE__{} = deployment, vsn, env \\ []) do
     pid = os_pid(deployment, env)
 
@@ -930,16 +938,14 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  `install_supervised/3`, raising on a non-zero exit.
+  Deprecated bang counterpart of `install_supervised/3`.
 
-  The install can fail on either side of the reboot, and the far side is the
-  one a bang name is doing work for: `bin/castle install` polls for the version
-  it installed *after* the release has come back, so an upgrade that rolled back
-  on the way up is reported here and nowhere earlier. Returning the tuple under
-  a bang name left that for a caller to notice, and a test written the way the
-  documentation suggests - substituting this for `castle!/3` - would not have.
+  Retained for compatibility with existing restart-only suites; new tests use
+  `start_peer!/2` and `install!/3`. It raises when the legacy helper reports a
+  non-zero result, including a rollback reported after the release came back.
   """
   @spec install_supervised!(t(), binary(), env()) :: binary()
+  @deprecated "Use start_peer!/2 and install!/3"
   def install_supervised!(%__MODULE__{} = deployment, vsn, env \\ []) do
     deployment |> install_supervised(vsn, env) |> ok!("castle", ["install", vsn])
   end

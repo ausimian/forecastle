@@ -335,10 +335,9 @@ defmodule Forecastle.DeploymentTest do
     end
 
     test "raises on it under the bang, which is the whole of the difference", ctx do
-      # Returning the tuple under a bang name is what let a test written the way
-      # the documentation suggests - `install_supervised!/3` in place of
-      # `castle!/3` - carry on to `commit` and assert against a system the
-      # install had already given up on.
+      # The deprecated compatibility helper still has to honour its bang: a
+      # restart-only suite that has not migrated must not carry on to `commit`
+      # after the install reported that the new version did not come back.
       deployment =
         stubbed!(ctx.tree, transient_pid(), ~s|sleep 2\necho "1.1.0 is not running."\nexit 4\n|)
 
@@ -739,13 +738,49 @@ defmodule Forecastle.DeploymentTest do
   end
 
   describe "a peer session's bounded teardown" do
-    test "reports a controller that did not stop within its own budget" do
+    test "kills a controller that did not stop within its own budget" do
       server = spawn(fn -> receive do: (_message -> Process.sleep(:infinity)) end)
       session = %Session{server: server, stop_timeout: 10}
-      on_exit(fn -> Process.exit(server, :kill) end)
 
-      assert Session.stop(session) == :timeout
-      assert Process.alive?(server)
+      assert Session.stop(session) == :killed
+      refute Process.alive?(server)
+    end
+
+    test "bounds launcher commands without making the session owner wait forever" do
+      root = Path.join(@root, "bounded-session-command")
+      File.rm_rf!(root)
+      File.mkdir_p!(Path.join(root, "bin"))
+      on_exit(fn -> File.rm_rf(root) end)
+      stub!(root, "my_app", "sleep 1\n")
+
+      state = %{
+        deployment: Deployment.new(root, "my_app"),
+        env: [],
+        down: nil,
+        command_timeout: 10
+      }
+
+      assert {:reply, {:error, message}, ^state} =
+               Session.handle_call({:operation, {:launcher, ["version"], []}}, self(), state)
+
+      assert message =~ "did not finish within 10ms"
+    end
+
+    test "returns a staging error instead of raising in the session owner" do
+      state = %{
+        deployment: Deployment.new(@root, "my_app"),
+        env: [],
+        down: nil
+      }
+
+      assert {:reply, {:error, message}, ^state} =
+               Session.handle_call(
+                 {:operation, {:stage, Path.join(@root, "missing.tar.gz")}},
+                 self(),
+                 state
+               )
+
+      assert message =~ "could not copy from"
     end
   end
 

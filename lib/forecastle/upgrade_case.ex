@@ -107,8 +107,10 @@ defmodule Forecastle.UpgradeCase do
 
   Scenario variables belong in `start_peer!(deployment, env: [...])`. They are
   real child-process environment, so runtime configuration, ports and NIFs see
-  them, and the same values reach every incarnation after a restart. Structured
-  `call!/5` returns the term itself instead of parsing launcher output.
+  them, and the same values reach every incarnation after a restart. An
+  `install!/3` environment overrides them for the install command and is retained
+  by the replacement and later incarnations. Structured `call!/5` returns the
+  term itself instead of parsing launcher output.
 
   Which of the two a transition is comes from the relup, and `auto` decides it at
   generation time. A project that wants to be sure gets to say so:

@@ -10,6 +10,10 @@ defmodule Sample.Application do
   # of the appup has to be somewhere the upgrade *would* have reached it.
   @impl true
   def start(_type, _args) do
+    if delay = System.get_env("SAMPLE_BOOT_DELAY_MS") do
+      Process.sleep(String.to_integer(delay))
+    end
+
     Supervisor.start_link([Sample.Counter, Sample.Unmentioned],
       strategy: :one_for_one,
       name: Sample.Supervisor
