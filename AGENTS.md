@@ -3064,7 +3064,9 @@ Decisions in it worth not relitigating:
   passed to the install command is retained by the replacement and later
   incarnations; this is how a test makes a target's runtime providers see a
   different scenario from the initial boot. Launcher and Castle commands have a
-  separate command deadline. The session derives a nominal
+  separate command deadline. The session's call deadline is also a ceiling on
+  caller-supplied MFA timeouts, so no structured call can make teardown
+  unbounded. The session derives a nominal
   `CASTLE_INSTALL_TIMEOUT` five seconds shorter than its own install deadline,
   but the clocks start at different moments: the shell begins confirmation only
   after its unbounded install RPC returns. A slow install can therefore make the
@@ -3081,9 +3083,12 @@ Decisions in it worth not relitigating:
   the same path. A brutal controller kill reports `:killed` only when the
   fallback confirms success; otherwise it returns an error rather than hiding a
   live release. The private store holding the session environment and stop owner
-  survives controller death and failed stops so another teardown can retry, and
-  is released only after a confirmed stop. An abandoned session therefore keeps
-  that store until the VM exits; this is why a deployment-level teardown is
+  survives controller death and failed stops so another teardown can retry. A
+  confirmed stop clears its environment and pid but leaves a stopped tombstone,
+  so an unreachable store cannot be mistaken for successful teardown. Non-`:ok`
+  results are printed because `on_exit` discards callback return values. An
+  abandoned session therefore keeps its private state until the VM exits; this
+  is why a deployment-level teardown is
   registered **before** `start_peer!/2` as well: a failed start returns no
   session value, so no session-only callback can cover that path.
 
@@ -3110,9 +3115,11 @@ Decisions in it worth not relitigating:
   the explicit `RELEASE_VM_ARGS`, or the `vm.args` under the `REL_VSN_DIR` the
   stock launcher actually selected when that variable is absent, and points that
   invocation at the result. A provisional re-exec therefore selects the target's
-  args itself; the session never guesses the version. The hook accepts only an
-  owner-only work directory and regular owner-only argument file, refuses an
-  existing output name and an application-supplied `-user`, and creates the
+  args itself; the session never guesses the version. The session creates the
+  argument file exclusively, narrows it before writing through the creating
+  handle, and refuses an existing name. The hook accepts only an owner-only work
+  directory and regular owner-only argument file, refuses an existing output
+  name and an application-supplied `-user`, and creates the
   combined file with noclobber under a private umask. `-user` is asked of the
   same `-emu_args_exit` vector used for heart, before its first `-extra`, rather
   than looked for in one file: flag variables, escapes and nested args files all

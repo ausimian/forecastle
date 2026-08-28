@@ -289,7 +289,7 @@ defmodule Forecastle.RestartUpgradeTest do
       os_pid: owned_pid,
       first_stop: first_stop,
       second_stop: second_stop,
-      env_store_down?: not Process.alive?(controller_session.env_store)
+      env_store_state: Agent.get(controller_session.env_store, & &1)
     }
 
     {:ok,
@@ -566,7 +566,13 @@ defmodule Forecastle.RestartUpgradeTest do
       refute status == 0
       assert controller_loss.first_stop == :ok
       assert controller_loss.second_stop == :ok
-      assert controller_loss.env_store_down?
+
+      assert controller_loss.env_store_state == %{
+               env: [],
+               os_pid: nil,
+               stop_owner: nil,
+               stop_status: :stopped
+             }
     end
   end
 end

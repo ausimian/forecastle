@@ -8,15 +8,18 @@
   a timeout if that process remains. Successful stops are idempotent, while a
   controller kill reports an error if its environment-aware launcher fallback
   cannot confirm the release stopped. Failed stops retain the private session
-  state for a retry and confirmed stops release it; a never-stopped session keeps
-  it until the VM exits, so the
+  state for a retry; confirmed stops erase its environment and pid and retain
+  only a stopped tombstone. Non-`:ok` teardown results are also printed because
+  `on_exit` discards callback return values. A never-stopped session keeps its
+  private state until the VM exits, so the
   documented recipe also registers a deployment-level fallback before startup.
   Peer startup retains a 180-second launcher/preboot
   allowance and adds the deployment's `:boot_timeout` to form the total boot
   deadline, so first-start preboot work does not replace the application's
-  configured allowance. Launcher and
-  Castle commands are bounded, a controller that exceeds its shutdown budget is
-  killed with its owned release, and install/restart calls can retain an
+  configured allowance. Launcher and Castle commands are bounded, and
+  `:call_timeout` caps even a caller-supplied MFA timeout. A controller that
+  exceeds its shutdown budget is killed with its owned release, and
+  install/restart calls can retain an
   environment override for later incarnations. A launcher or env-hook refusal is
   reported from the adapter immediately instead of being mislabelled after the
   full boot deadline. `bin/castle` receives a nominal confirmation budget five

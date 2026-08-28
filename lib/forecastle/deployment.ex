@@ -494,6 +494,8 @@ defmodule Forecastle.Deployment do
   so that deadline covers both synchronous launcher/preboot work and cold boot.
   `:call_timeout`, `:command_timeout`, `:install_timeout`, `:shutdown_timeout`
   and `:exit_timeout` override the other bounded waits in milliseconds. The
+  call timeout is also the ceiling for the fifth argument to `call/5`; a call
+  may ask for a shorter wait, but cannot make session teardown unbounded. The
   session gives `bin/castle` a nominal confirmation budget five seconds shorter
   than its own install deadline. The two clocks start at different times:
   `bin/castle` starts its clock only after the unbounded install RPC returns, so
@@ -538,8 +540,9 @@ defmodule Forecastle.Deployment do
   Calls an MFA in the running release over the peer control connection.
 
   Returns `{:ok, term}` or `{:error, message}`. The five-second default is a
-  bound on one structured call rather than on a test; pass the fifth argument
-  when the operation deliberately takes longer.
+  bound on one structured call rather than on a test. The fifth argument may
+  shorten that bound; set `:call_timeout` when starting the session if its calls
+  deliberately need a higher ceiling.
   """
   @spec call(session(), module(), atom(), [term()], timeout()) ::
           {:ok, term()} | {:error, binary()}
@@ -731,8 +734,11 @@ defmodule Forecastle.Deployment do
   abnormal case returns `:killed` only when the fallback succeeds, and
   `{:error, message}` when it cannot confirm the stop. Failed stops retain the
   session's private environment state so a later teardown can retry; a confirmed
-  stop releases it. A session that is never stopped retains that state until the
-  VM exits, which is another reason the teardown is mandatory. Retain the
+  stop erases it and leaves only a small stopped tombstone for idempotence. A
+  session that is never stopped retains that state until the VM exits, which is
+  another reason the teardown is mandatory. A non-`:ok` session result is also
+  written to standard error because an `on_exit` callback discards its return
+  value. Retain the
   pre-start deployment-level teardown shown in `Forecastle.UpgradeCase` so it
   can ask again after a failed setup has unwound.
   """

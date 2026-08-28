@@ -1063,7 +1063,9 @@ ports and NIFs see them, and every incarnation after a restart receives the same
 values. Pass an environment as the third argument to `install!/3` when the target
 incarnation must see different values; the override is retained by later
 restarts. Every call, launcher command, boot, install, shutdown and process-exit
-wait is bounded. The session sets `CASTLE_INSTALL_TIMEOUT` five seconds inside
+wait is bounded. `:call_timeout` is the ceiling for individual MFA calls as well
+as their default; a fifth argument to `call/5` may shorten it but cannot make
+teardown unbounded. The session sets `CASTLE_INSTALL_TIMEOUT` five seconds inside
 its nominal install budget unless the caller supplies a smaller valid value.
 The clocks do not start together: `bin/castle` starts its confirmation clock
 after its unbounded install RPC returns, so a slow install can make the outer
@@ -1075,10 +1077,13 @@ shutdown budget is killed, and the deployment launcher is asked to stop with
 the session's effective environment as a bounded fallback. A successful stop is
 idempotent; a failed fallback returns `{:error, message}` instead of claiming the
 release stopped and retains the session's private environment state for a retry.
-A confirmed stop releases that state. A session that is never stopped retains it
-until the test VM exits, so register the deployment-level teardown before
-`start_peer!/2`, as in the recipe above, because a failed start returns no
-session value and the callback must still exist.
+A confirmed stop erases the environment and pid, leaving only a small stopped
+tombstone for idempotence. A non-`:ok` result is printed to standard error
+because `on_exit` discards callback return values. A session that is never
+stopped retains its private state until the test VM exits, so register the
+deployment-level teardown before `start_peer!/2`, as in the recipe above,
+because a failed start returns no session value and the callback must still
+exist.
 
 ### What it does for you, and what it does not
 

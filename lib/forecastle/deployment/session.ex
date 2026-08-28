@@ -53,11 +53,18 @@ defmodule Forecastle.Deployment.Session do
   end
 
   def stop(%__MODULE__{} = session) do
-    case claim_stop(session.env_store) do
-      :claimed -> finish_stop(session)
-      :stopped -> :ok
-      {:waiting, owner} -> await_stop(session, owner)
-    end
+    {_env, os_pid} = fallback_details(session.env_store)
+
+    result =
+      case claim_stop(session.env_store) do
+        :claimed -> finish_stop(session)
+        :stopped -> :ok
+        :unavailable -> finish_stop(session)
+        {:waiting, owner} -> await_stop(session, owner)
+      end
+
+    report_stop_result(session, result, os_pid)
+    result
   catch
     kind, reason ->
       release_stop(session.env_store)
@@ -69,7 +76,6 @@ defmodule Forecastle.Deployment.Session do
 
     if result in [:ok, :killed] do
       complete_stop(session.env_store)
-      stop_env_store(session.env_store)
     else
       release_stop(session.env_store)
     end
@@ -86,6 +92,7 @@ defmodule Forecastle.Deployment.Session do
     case stop_status(session.env_store) do
       :stopped -> :ok
       :active -> stop(session)
+      :unavailable -> finish_stop(session)
       {:stopping, current_owner} -> await_stop_owner(session, owner, current_owner, deadline)
     end
   end
@@ -118,12 +125,14 @@ defmodule Forecastle.Deployment.Session do
   def stop_timeout(deployment, opts) do
     call_timeout = Keyword.get(opts, :call_timeout, @call_timeout)
     launcher_timeout = Keyword.get(opts, :launcher_timeout, @launcher_timeout)
+    command_timeout = Keyword.get(opts, :command_timeout, @command_timeout)
     install_timeout = Keyword.get(opts, :install_timeout, @install_timeout)
     shutdown_timeout = Keyword.get(opts, :shutdown_timeout, @shutdown_timeout)
     exit_timeout = Keyword.get(opts, :exit_timeout, @exit_timeout)
 
     worst_case_start =
-      exit_timeout + launcher_timeout + deployment.boot_timeout + call_timeout + shutdown_timeout
+      exit_timeout + launcher_timeout + deployment.boot_timeout + call_timeout + command_timeout +
+        shutdown_timeout
 
     worst_case_cleanup = install_timeout + @fallback_timeout + exit_timeout
     worst_case_start + worst_case_cleanup + @stop_slack
@@ -205,6 +214,7 @@ defmodule Forecastle.Deployment.Session do
 
   @impl true
   def handle_call({:call, module, function, args, timeout}, _from, state) do
+    timeout = bounded_call_timeout(timeout, state.call_timeout)
     {:reply, peer_call(state, module, function, args, timeout), state}
   end
 
@@ -406,8 +416,7 @@ defmodule Forecastle.Deployment.Session do
       connection: {{127, 0, 0, 1}, 0},
       exec: {to_charlist(shell), [to_charlist(adapter)]},
       post_process_args: fn [_adapter | args] ->
-        File.write!(peer_args, encode_peer_args(args))
-        File.chmod!(peer_args, 0o600)
+        write_private(peer_args, encode_peer_args(args))
 
         [adapter, launcher, Enum.join(unset, ","), work]
         |> Enum.map(&to_charlist/1)
@@ -662,7 +671,7 @@ defmodule Forecastle.Deployment.Session do
         {:stopped, store}
     end)
   catch
-    :exit, _reason -> :stopped
+    :exit, _reason -> :unavailable
   end
 
   defp reclaim_stop(nil, _owner), do: :claimed
@@ -684,14 +693,20 @@ defmodule Forecastle.Deployment.Session do
         {:stopped, store}
     end)
   catch
-    :exit, _reason -> :stopped
+    :exit, _reason -> :unavailable
   end
 
   defp release_stop(nil), do: :ok
 
   defp release_stop(env_store) do
-    Agent.update(env_store, fn store ->
-      %{store | stop_status: :active, stop_owner: nil}
+    owner = self()
+
+    Agent.update(env_store, fn
+      %{stop_status: :stopping, stop_owner: ^owner} = store ->
+        %{store | stop_status: :active, stop_owner: nil}
+
+      store ->
+        store
     end)
   catch
     :exit, _reason -> :ok
@@ -715,7 +730,7 @@ defmodule Forecastle.Deployment.Session do
       %{stop_status: status} -> status
     end)
   catch
-    :exit, _reason -> :stopped
+    :exit, _reason -> :unavailable
   end
 
   defp fallback_session_stop(session) do
@@ -771,7 +786,11 @@ defmodule Forecastle.Deployment.Session do
   defp run_fallback_stop(deployment, env, os_pid, exit_timeout) do
     case Deployment.stop(deployment, env) do
       {_output, 0} ->
-        :ok
+        confirm_fallback_exit(
+          os_pid,
+          exit_timeout,
+          "fallback #{deployment.name} stop exited successfully"
+        )
 
       {output, status} ->
         prefix =
@@ -802,6 +821,22 @@ defmodule Forecastle.Deployment.Session do
   defp new_store(env) do
     %{env: env, os_pid: nil, stop_status: :active, stop_owner: nil}
   end
+
+  defp report_stop_result(_session, :ok, _os_pid), do: :ok
+
+  defp report_stop_result(session, result, os_pid) do
+    IO.puts(
+      :stderr,
+      "warning: deployment session teardown for #{session.deployment.root} returned " <>
+        "#{inspect(result)} (last operating-system pid: #{inspect(os_pid)})"
+    )
+  end
+
+  defp bounded_call_timeout(:infinity, ceiling), do: ceiling
+
+  defp bounded_call_timeout(timeout, ceiling)
+       when is_integer(timeout) and timeout >= 0,
+       do: min(timeout, ceiling)
 
   defp expected_reboot(deployment, vsn) do
     pending = Path.join(deployment.root, "releases/castle-restart-pending")
@@ -936,21 +971,7 @@ defmodule Forecastle.Deployment.Session do
 
   defp cleanup(state, install_mode) do
     install_result = finish_install(state.install, state.install_timeout, install_mode)
-
-    stop_result =
-      if state.peer do
-        stop_peer(state.peer)
-        :ok
-      else
-        fallback_stop(
-          state.deployment,
-          state.env,
-          state.os_pid || state.last_os_pid,
-          state.exit_timeout
-        )
-      end
-
-    exit_result = await_exit(state.os_pid || state.last_os_pid, state.exit_timeout)
+    {stop_result, exit_result} = stop_and_confirm(state)
 
     result =
       cond do
@@ -960,6 +981,37 @@ defmodule Forecastle.Deployment.Session do
       end
 
     {result, %{state | install: nil, peer: nil, os_pid: nil, cleaned: true}}
+  end
+
+  defp stop_and_confirm(%{peer: nil} = state) do
+    os_pid = state.os_pid || state.last_os_pid
+
+    result =
+      fallback_stop(
+        state.deployment,
+        state.env,
+        os_pid,
+        state.exit_timeout
+      )
+
+    exit_result = if result == :ok, do: :ok, else: await_exit(os_pid, state.exit_timeout)
+    {result, exit_result}
+  end
+
+  defp stop_and_confirm(state) do
+    os_pid = state.os_pid || state.last_os_pid
+    stop_peer(state.peer)
+
+    case await_exit(os_pid, state.exit_timeout) do
+      :ok ->
+        {:ok, :ok}
+
+      {:error, _why} = exit_result ->
+        case fallback_stop(state.deployment, state.env, os_pid, state.exit_timeout) do
+          :ok -> {:ok, :ok}
+          {:error, _message} = stop_result -> {stop_result, exit_result}
+        end
+    end
   end
 
   defp finish_install(nil, _timeout, _mode), do: :ok
@@ -999,6 +1051,13 @@ defmodule Forecastle.Deployment.Session do
     end
 
     work
+  end
+
+  defp write_private(path, content) do
+    File.open!(path, [:write, :exclusive], fn file ->
+      File.chmod!(path, 0o600)
+      IO.binwrite(file, content)
+    end)
   end
 
   defp operation_name(operation) when is_tuple(operation), do: elem(operation, 0)

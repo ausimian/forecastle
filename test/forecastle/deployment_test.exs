@@ -15,6 +15,8 @@ defmodule Forecastle.DeploymentTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureIO
+
   alias Forecastle.Deployment
   alias Forecastle.Deployment.Session
   alias Forecastle.Fixture
@@ -786,10 +788,28 @@ defmodule Forecastle.DeploymentTest do
       assert Session.stop_timeout(deployment,
                call_timeout: 13_000,
                launcher_timeout: 11_000,
+               command_timeout: 19_000,
                install_timeout: 17_000,
                shutdown_timeout: 3_000,
                exit_timeout: 5_000
-             ) == 76_000
+             ) == 95_000
+    end
+
+    test "caps a caller-supplied infinite MFA wait at the session call budget" do
+      peer = spawn(fn -> receive do: (_message -> Process.sleep(:infinity)) end)
+
+      state = %{
+        peer: peer,
+        call_timeout: 10,
+        down: nil,
+        deployment: Deployment.new(@root, "my_app")
+      }
+
+      assert {:reply, {:error, message}, ^state} =
+               Session.handle_call({:call, Process, :sleep, [60_000], :infinity}, self(), state)
+
+      assert message =~ "did not answer within 10ms"
+      Process.exit(peer, :kill)
     end
 
     test "kills a controller that did not stop within its own budget" do
@@ -821,19 +841,62 @@ defmodule Forecastle.DeploymentTest do
       )
 
       env = [{"RELEASE_NODE", "scenario@host"}, {"CAPTURE", capture}]
-      {:ok, env_store} = Agent.start(fn -> session_store(env) end)
+      {:ok, env_store} = Agent.start(fn -> session_store(env, exited_pid()) end)
+      on_exit(fn -> if Process.alive?(env_store), do: Agent.stop(env_store) end)
       server = spawn(fn -> receive do: (_message -> Process.sleep(:infinity)) end)
 
       session = %Session{
         server: server,
         stop_timeout: 10,
         deployment: Deployment.new(root, "my_app"),
-        env_store: env_store
+        env_store: env_store,
+        exit_timeout: 100
       }
 
-      assert Session.stop(session) == :killed
+      parent = self()
+
+      warning =
+        capture_io(:stderr, fn -> send(parent, {:stop_result, Session.stop(session)}) end)
+
+      assert_receive {:stop_result, :killed}
+      assert warning =~ "deployment session teardown"
+      assert warning =~ ":killed"
       assert Session.stop(session) == :ok
       assert File.read!(capture) == "scenario@host\n"
+
+      assert Agent.get(env_store, & &1) ==
+               Map.put(session_store([]), :stop_status, :stopped)
+    end
+
+    test "a successful fallback launcher cannot hide a process that remains alive" do
+      root = Path.join(@root, "fallback-session-live-pid")
+      File.rm_rf!(root)
+      File.mkdir_p!(Path.join(root, "bin"))
+      on_exit(fn -> File.rm_rf(root) end)
+      stub!(root, "my_app", "exit 0\n")
+
+      {:ok, env_store} = Agent.start(fn -> session_store([], System.pid()) end)
+      on_exit(fn -> if Process.alive?(env_store), do: Agent.stop(env_store) end)
+      server = spawn(fn -> receive do: (_message -> Process.sleep(:infinity)) end)
+
+      session = %Session{
+        server: server,
+        stop_timeout: 10,
+        deployment: Deployment.new(root, "my_app"),
+        env_store: env_store,
+        exit_timeout: 0
+      }
+
+      parent = self()
+
+      warning =
+        capture_io(:stderr, fn -> send(parent, {:stop_result, Session.stop(session)}) end)
+
+      assert_receive {:stop_result, {:error, message}}
+      assert message =~ "session controller was killed"
+      assert message =~ "process #{System.pid()} was still running"
+      assert warning =~ message
+      assert Agent.get(env_store, & &1).stop_status == :active
     end
 
     test "a dead controller still triggers the environment-aware fallback" do
@@ -845,7 +908,8 @@ defmodule Forecastle.DeploymentTest do
       stub!(root, "my_app", ~s|printf '%s\n' "$RELEASE_NODE" > "$CAPTURE"\n|)
 
       env = [{"RELEASE_NODE", "dead@host"}, {"CAPTURE", capture}]
-      {:ok, env_store} = Agent.start(fn -> session_store(env) end)
+      {:ok, env_store} = Agent.start(fn -> session_store(env, exited_pid()) end)
+      on_exit(fn -> if Process.alive?(env_store), do: Agent.stop(env_store) end)
       server = spawn(fn -> :ok end)
       monitor = Process.monitor(server)
       assert_receive {:DOWN, ^monitor, :process, ^server, :normal}
@@ -854,11 +918,37 @@ defmodule Forecastle.DeploymentTest do
         server: server,
         stop_timeout: 10,
         deployment: Deployment.new(root, "my_app"),
-        env_store: env_store
+        env_store: env_store,
+        exit_timeout: 100
       }
 
       assert Session.stop(session) == :ok
       assert File.read!(capture) == "dead@host\n"
+    end
+
+    test "an unreachable environment store is not mistaken for completed teardown" do
+      {:ok, env_store} = Agent.start(fn -> session_store([]) end)
+      Agent.stop(env_store)
+      server = spawn(fn -> :ok end)
+      monitor = Process.monitor(server)
+      assert_receive {:DOWN, ^monitor, :process, ^server, :normal}
+
+      session = %Session{
+        server: server,
+        stop_timeout: 10,
+        deployment: Deployment.new(@root, "my_app"),
+        env_store: env_store,
+        exit_timeout: 0
+      }
+
+      parent = self()
+
+      warning =
+        capture_io(:stderr, fn -> send(parent, {:stop_result, Session.stop(session)}) end)
+
+      assert_receive {:stop_result, {:error, message}}
+      assert message =~ "fallback launcher does not exist"
+      assert warning =~ message
     end
 
     test "a killed stop claimant can be replaced by the next teardown" do
@@ -877,6 +967,7 @@ defmodule Forecastle.DeploymentTest do
         end)
 
       {:ok, env_store} = Agent.start(fn -> session_store([]) end)
+      on_exit(fn -> if Process.alive?(env_store), do: Agent.stop(env_store) end)
 
       session = %Session{
         server: server,
@@ -892,7 +983,8 @@ defmodule Forecastle.DeploymentTest do
       assert_receive {:DOWN, ^claimant_monitor, :process, ^claimant, :killed}
 
       assert Session.stop(session) == :ok
-      refute Process.alive?(env_store)
+      assert Process.alive?(env_store)
+      assert Agent.get(env_store, & &1).stop_status == :stopped
     end
 
     test "surfaces a release process that remains after normal teardown" do
@@ -1171,8 +1263,15 @@ defmodule Forecastle.DeploymentTest do
     File.chmod!(path, 0o755)
   end
 
-  defp session_store(env) do
-    %{env: env, os_pid: nil, stop_status: :active, stop_owner: nil}
+  defp session_store(env, os_pid \\ nil) do
+    %{env: env, os_pid: os_pid, stop_status: :active, stop_owner: nil}
+  end
+
+  defp exited_pid do
+    {out, 0} = System.cmd("sh", ["-c", "sleep 0.05 >/dev/null 2>&1 & echo $!"])
+    pid = String.trim(out)
+    Deployment.await_exit!(pid, 1_000)
+    pid
   end
 
   # An operating system process that is alive now and gone in about a second,
