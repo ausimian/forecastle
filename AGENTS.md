@@ -2941,6 +2941,175 @@ reads the appup out of the build `--to` names, and a project-supplied one is onl
 ever in an assembled release — so checking one means pointing `--to` at a `rel:`
 or `tar:` baseline. The generated file's own header says so.
 
+## The upgrade harness
+
+`Forecastle.Deployment` and `Forecastle.UpgradeCase` are what a downstream
+project points at its own release. They started as `test/support/deployment.ex`
+and the private setup of the two e2e suites; they are in `lib` now, which is the
+whole of the change — `package/0` ships `lib`, Castle takes Forecastle as
+`runtime: false`, and a build-time dependency is compiled and on the code path
+wherever the consuming project's own tests run. Nothing enters a release.
+
+**It is a case template rather than a `mix castle.upgrade.test`, and that is
+settled** — `design/upgrade-tooling.md` D6 in ausimian/castle. A task would have
+to hardcode what "the upgrade worked" means, and only the project knows: a
+counter for one, an open socket or an in-flight job for another. Nothing in
+either module asserts that anything worked, and nothing new may.
+
+Three decisions in it are worth not relitigating:
+
+- **A deployment is a copy, never the resolved baseline.** `tar:` and `ref:`
+  resolve into `_build/castle/baselines`, whose entries are immutable and read by
+  every later resolution of the same spec. Starting a release writes
+  `releases/RELEASES` into the tree, unpacking one puts another release beside it
+  and installing rewrites `start_erl.data` — so a deployment run in place would
+  leave the cache holding a booted, half-upgraded release with nothing to say so.
+  `deploy!/3` refuses a destination that overlaps the release for the same
+  reason it copies: it empties the destination first, and an overlapping one is
+  `File.rm_rf!/1` on what is about to be copied.
+- **The preflight is about the shape of the spec, and it is not decoration.**
+  The release root is three directories above the `.rel`, `Forecastle.Baseline`
+  deliberately reads no filesystem for a `rel:` spec, and `Path.expand/2`
+  climbing past the top of an absolute path stops at `/` rather than failing —
+  so `rel:/tmp/missing` resolved to a root of `/`, and the next two lines were
+  `File.rm_rf!/1` on the destination and a recursive copy of the whole
+  filesystem into it. So the `.rel` has to be a file and it has to sit under
+  `releases/<vsn>/`, both asked before anything is deleted. For the same reason
+  containment is compared on path *segments*: a textual prefix test reads
+  `<root>-next` as being inside `<root>`, and misses a root of `/` entirely,
+  since `/` with a separator appended is `//`.
+
+  **And on the *physical* paths**, which was argued the other way first and was
+  wrong. `Path.expand/2` is lexical, so two names for one directory come out as
+  different segment lists and read as no overlap — and this repository already
+  knew that shape: *the build runs where the project is*, above, records that
+  subtracting one path from another "gets it wrong wherever a symlink stands
+  between the two, which on macOS is `/tmp` every time". Measured here rather
+  than argued: with `alias -> real`, the lexical check answers "no overlap" and
+  `File.rm_rf!/1` on `alias/release` deletes `real/release`. The decline rested
+  on there being no portable realpath short of `File.cd/1`; `pwd -P` under
+  `System.cmd/3`'s `:cd` is one, and it moves nothing outside the child.
+- **Nothing clears the scratch directory, and `deploy!/3` refuses a destination
+  that is still running.** Clearing a stable path is the obvious thing and it
+  comes back as a *passing* test: a run interrupted before its `on_exit` leaves
+  a daemon in that tree, a recursive delete does not stop it, and the next
+  deployment comes up beside a node that still answers to the release's name —
+  with `await_boot!/1` as likely to reach the old system as the new. So
+  `Forecastle.UpgradeCase` names the directory and does nothing else to it, and
+  the liveness question is asked in `deploy!/3`, which is the one place that
+  knows the release's name. Refused rather than stopped: something is running
+  there that this run did not start.
+
+  **It catches a running deployment, not one that is still starting**, and that
+  boundary is chosen rather than overlooked. A release answers the probe or it
+  does not, and a previous run interrupted in the seconds between `daemon`
+  spawning the VM and that VM accepting distribution answers "no" exactly as an
+  absent one does. Telling the two apart takes waiting and asking again, which
+  taxes every ordinary deployment — the common case is a destination holding a
+  release that really is stopped, and the probe already costs it a VM start — to
+  cover a few seconds of an already abnormal one. Filesystem proxies for "a beam
+  is running here" were considered and are worse: a stale `run_erl` pipe or a
+  `pgrep -f` matching the test runner's own command line refuses deployments for
+  ever, which is a bigger failure than the one being closed. The probe goes through `cmd/4`, so it runs
+  from the directory the deployment runs its commands in and with the
+  environment it carries — a release started elsewhere may have been given a
+  *relative* `RELEASE_VM_ARGS`, which `Forecastle.UpgradeTest` covers on
+  purpose, and a probe made from the wrong directory cannot resolve it and reads
+  as "nothing running".
+- **The release's name comes out of the `.rel` term, not off its filename.**
+  *An unpacked release holds two `.rel` files* above is the reason: the
+  compatibility copy is called `<name>-<vsn>.rel`, `Forecastle.Baseline`
+  de-duplicates the two on their consulted term, and `Path.wildcard/1` sorts the
+  copy first — so the basename names a launcher, `bin/my_app-1.0.0`, that does
+  not exist, and every command the deployment makes fails on it. The term says
+  what the release is called and the filename only sometimes does.
+- **`await_boot!/2` bounds each probe and not merely the number of them.**
+  `bin/<name> rpc` is `elixir --rpc-eval`, which reaches `:erpc.call/4` — the
+  arity with no timeout argument, so `:infinity`. A node that has come up far
+  enough to accept a distribution connection and then wedged answers nothing for
+  ever, and distribution is up long before the application is, so a project
+  whose own `start/2` blocks gets there ordinarily. Unbounded, the retry loop
+  never runs a second time and `:boot_timeout` is never consulted again: the
+  suite stops instead of failing, which is the hang `start!/2` puts a deadline
+  on, arrived at from underneath it. The wait is a wall-clock deadline rather
+  than an attempt count for the same reason the probe comes before the check —
+  arithmetic on an interval answered a deadline shorter than one without asking.
+- **The deadlines fail the test and stop nothing**, which is stated in
+  `start!/2` rather than left to be discovered. Closing the port behind
+  `System.cmd/3` does not terminate the program on the other end of it, and
+  there is no way to reach it from here that does not amount to a port-and-pid
+  abstraction inside a test harness. A release that is *slow* rather than stuck
+  is `:boot_timeout`'s business, which is why that one is the project's to set.
+- **There is no one call that installs both kinds of transition.** A hot upgrade
+  never leaves its operating system process, so `install_supervised/3` would
+  wait for an exit that is not coming; a restart transition reboots and nothing
+  in the release starts it again, so `castle!/3` alone would hang. Which one a
+  transition is comes from the relup, and the caller knows because the caller
+  asked for it. `install_supervised/3` watches the install task *while* it
+  waits for the process, because `bin/castle install` cannot be answered until
+  the release has been started again — which is that function's own next line —
+  so an install that has already exited has exited about a failure and is
+  holding the only account of it. Waiting on the process alone spent the whole
+  timeout and then reported that a process was still running.
+- **Relup generation is not part of the harness.** `mix castle.relup` and
+  `upgrade_from:` are already public, so a project has both without this, and
+  `test/support` keeps `make_relup!/3` because what it wraps is the *fixture* —
+  `SAMPLE_VSN`, a build root per version, the workspace the relup is left in.
+
+The environment scrub has one home now, `Forecastle.Deployment.scrubbed_env/1`,
+and `Forecastle.Fixture` reads it from there. Two copies of that list is how the
+two drift, and what drifting costs is a `-heart` reaching a release the fragment
+then adds another to — a hang, printing nothing.
+
+**`MIX_ENV` is in that list, and its being there is a deliberate change from
+what these suites used to do.** `Forecastle.Fixture` set `MIX_ENV=prod` on every
+command, launcher invocations included, because one function served both the
+builds and the runs; a deployment taking the variable from the caller instead
+inherited `test`, measured on the generated launcher. Neither is what a deployed
+release sees, which is nothing at all — there is no Mix. Nothing Mix or
+Forecastle writes reads the variable, so what it changes is whatever the
+*project's* `config/runtime.exs` makes of it, and that file is the one place a
+project routinely shares between a Mix run and a release. So it is unset rather
+than restored to `prod`, and the e2e suites run without it.
+
+**The `RELEASE_*` half of that list is a rule rather than a list**, and
+`Forecastle.DownstreamUpgradeTest` enforces it by reading the defaults out of
+the launcher Mix generated: every `RELEASE_*` the launcher spells
+`${NAME:-default}` has to be scrubbed. It began as the obvious four and was
+missing five — `RELEASE_MODE`, `RELEASE_DISTRIBUTION`, `RELEASE_BOOT_SCRIPT`,
+`RELEASE_BOOT_SCRIPT_CLEAN` and `RELEASE_PROG` — each of which changes what the
+release *is* rather than what it prints, and none of which announces itself. A
+hand-maintained list is exactly how that happens; measuring it against the
+artefact is what makes a variable a later Elixir adds a failure rather than a
+hole.
+
+`ERL_OTP<major>_FLAGS` is derived from the *environment* rather than from
+`:erlang.system_info/1`, and that is the same lesson once more. A `tar:`
+baseline is the artefact that shipped, so the release under test may bundle an
+ERTS from a different OTP than the VM running the tests — and the `erlexec`
+inside it reads its own major's variable. Asking this VM what it is scrubs the
+wrong name for exactly the cross-ERTS deployment the harness exists to make
+testable.
+
+**The fixture takes Forecastle `runtime: false`, which is how Castle declares
+it**, and that matters beyond tidiness: the fixture is what stands in for a
+consumer in the end-to-end suites, and it used to take Forecastle as an ordinary
+runtime dependency — so `lib/forecastle-<vsn>` was in every release those suites
+assembled and the `.rel` listed it permanent, while the README said a
+`runtime: false` dependency never enters one. Every e2e path was exercising a
+shape the documentation says does not happen, and the reachability check was
+satisfied by its own setup. `Forecastle.DownstreamUpgradeTest` now asserts both
+halves: the beams in the dependency build, and nothing of Forecastle in the
+release that was deployed.
+
+`Forecastle.DownstreamUpgradeTest` is the check on the acceptance criterion
+rather than a restatement of it: everything it does below the build is shipped
+API, and one of its cases asserts that both modules really are compiled into the
+fixture's dependency build, which is a genuine consumer's. The hot and restart
+suites are the other half — they were rewritten onto the harness rather than left
+duplicating it, and the diff of their test bodies is nine lines, every one of
+them `deploy` becoming `deploy.root`.
+
 ## Layout
 
 | Path | Purpose |
@@ -2953,6 +3122,8 @@ or `tar:` baseline. The generated file's own header says so.
 | `lib/forecastle/appup/dep.ex` | The appups a project supplies for applications it does not own: the `rel/appups` directory, reading a name against the versions the release carries, and placing the result into the assembled release |
 | `lib/forecastle/build.ex` | Reading one build of an application and diffing two of them: the library-directory refusals, the `ebin` discovery, the `.app` resource, and the module fingerprints. Shared by the check and the generator |
 | `lib/forecastle/relup.ex` | Generating a relup: resolving baselines, classifying each transition, the three strategies, the announcement and the atomic publication. Shared by the task and the assembly step |
+| `lib/forecastle/deployment.ex` | A release tree on disk, and everything an upgrade test does to one: laying a baseline spec out, starting it, `bin/castle`, `rpc`, the environment scrub, and standing in for the supervisor a restart transition needs |
+| `lib/forecastle/upgrade_case.ex` | `Forecastle.UpgradeCase` — the case template a project uses, the scratch directory it deploys into, and where the whole recipe is written down |
 | `lib/mix/tasks/compile/appup.ex` | `:appup` compiler — evaluates the file named by the `:appup` project key and writes `<app>.appup` into `ebin` |
 | `lib/mix/tasks/castle.appup.ex` | `mix castle.appup` — the read-only coverage check. Non-zero when a module that moved is mentioned nowhere |
 | `lib/mix/tasks/castle.appup.gen.ex` | `mix castle.appup.gen` — drafts the entry for a transition and writes or merges it into the appup source |
@@ -2962,7 +3133,7 @@ or `tar:` baseline. The generated file's own header says so.
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it, and which ships no appup of its own when `SAMPLE_DEP_APPUP=none` |
-| `test/support` | The workspace the fixture is built in, the case template for tests that build it, and the helpers that drive one once it is built |
+| `test/support` | The workspace the fixture is built in, the case template for tests that assemble it, and `mix castle.relup` between two of them. Everything here knows the sample by name, which is why none of it is in `lib` |
 
 ## Working on this project
 
@@ -3024,8 +3195,11 @@ directory to start from a clean slate.
 | `test/forecastle/appup_source_test.exs` | The line between an appup that states a term and one that computes it, against real files in a scratch directory, and what a merge does to the file it merges into |
 | `test/forecastle/appup_gen_test.exs` | `mix castle.appup.gen` as a command, against two assembled releases: the three writing cases, everything it refuses, what it writes for a dependency, and `mix castle.appup` run over the output |
 | `test/forecastle/dep_appup_test.exs` | `rel/appups` through real assemblies: the same transition built with a project-supplied appup and without, everything the assembly step refuses, and the merge of two sources for one application |
+| `test/forecastle/deployment_test.exs` | The shipped harness without a running system: laying a baseline out, the modes it preserves, the destinations it refuses, what it leaves the cache holding, and the environment scrub |
+| `test/forecastle/upgrade_case_test.exs` | `use Forecastle.UpgradeCase` on its own, which is how a project takes it and which every other suite here pairs with `Forecastle.ReleaseCase`: the alias, the timeout, and the scratch directory it names |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
+| `test/forecastle/downstream_upgrade_test.exs` | The upgrade test a project outside this repository writes, written that way: `upgrade_from:`, a `tar:` deployment and nothing but shipped API below the build. Tagged `:e2e` |
 
 The `:e2e` suite is excluded by default and included by `mix precommit`. Run it
 on its own with `mix test --include e2e`. It needs no epmd daemon: the fixture
@@ -3035,7 +3209,7 @@ configures distribution without one.
 `refute provisional.os_pid == booted.os_pid` against the hot suite's
 `assert installed.os_pid == booted.os_pid` — and it has one thing no other suite
 does: **it is the supervisor.** Nothing in the release restarts it after
-`init:reboot()`, deliberately, so `Forecastle.Deployment.install_supervised!/3`
+`init:reboot()`, deliberately, so `Forecastle.Deployment.install_supervised/3`
 runs `bin/castle install` in a task, waits for the old *operating system process*
 to go, and starts the release again. Waiting on the process rather than on the
 node matters: a node that has stopped answering rpc is not necessarily one that

@@ -864,6 +864,117 @@
   recursed, and a `mix.exs` naming a `ref:` baseline should leave the option out
   when `CASTLE_BASELINE` is set in the environment.
 
+- An upgrade test harness, so a project can test that its own release survives
+  the upgrade rather than only that it builds. `Forecastle.UpgradeCase` is an
+  `ExUnit.CaseTemplate` and `Forecastle.Deployment` drives a release from
+  outside: it lays a baseline out in a directory of its own, starts it under the
+  stock Mix launcher, runs `bin/castle` and `rpc` against it, and stands in for
+  the external supervisor a transition that restarts the emulator needs. Both
+  ship as ordinary library code, so `mix test` runs an upgrade test like any
+  other test — and because Castle takes Forecastle as `runtime: false`, they are
+  there at build and test time and never enter a release.
+
+  ```elixir
+  defmodule MyApp.UpgradeTest do
+    use Forecastle.UpgradeCase
+
+    @moduletag :upgrade
+
+    setup_all %{scratch: scratch} do
+      deployment =
+        Deployment.deploy!("tar:artifacts/myapp-1.0.0.tar.gz", Path.join(scratch, "deploy"))
+
+      on_exit(fn -> Deployment.stop(deployment) end)
+
+      Deployment.start!(deployment)
+      Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.bump())")
+
+      Deployment.stage!(deployment, "_build/prod/myapp-1.1.0.tar.gz")
+      Deployment.castle!(deployment, ["unpack", "1.1.0"])
+      Deployment.castle!(deployment, ["install", "1.1.0"])
+      Deployment.castle!(deployment, ["commit"])
+
+      {:ok, deployment: deployment}
+    end
+
+    test "moved to 1.1.0 and took the count with it", %{deployment: deployment} do
+      assert Deployment.rpc!(deployment, "IO.puts(inspect(MyApp.Counter.info()))") ==
+               ~s({"1.1.0", 1})
+
+      assert Deployment.version(deployment) == "1.1.0"
+    end
+  end
+  ```
+
+  **Nothing in it decides whether the upgrade worked**, and that is why it is a
+  case template rather than a task. What "worked" means is the project's to say —
+  a counter that kept counting for one, a socket still open or a job still in
+  flight for another — and a task would have had to hardcode one answer. As a
+  case template it composes with tags, with CI and with the project's own
+  assertions.
+
+  What it does have to say about writing them is that a count which survived is
+  not evidence that anything moved: an appup that does not mention a module
+  leaves that module's old code serving calls, and unchanged code preserves a
+  count perfectly. So the assertion above reads a version the module carries as
+  a compile-time literal — a fact about the code executing the call — alongside
+  `Deployment.version/1`, which is the fact about the release, and they are
+  different questions. `Forecastle.UpgradeCase` documents the shape of such a
+  module.
+
+  The release under test is named with the same baseline grammar as
+  `upgrade_from:` and `mix castle.relup`, so it can be the artefact that actually
+  shipped (`tar:`), a release already on disk (`rel:`), or a git ref built in a
+  worktree (`ref:`). `tar:` is the one to prefer here for the same reason relup
+  generation prefers it: `release_handler` selects a relup entry by from-version
+  string and never checks it against the code that is running, so an upgrade
+  tested from a baseline rebuilt today is an upgrade tested from a release nobody
+  ever deployed. A deployment is a copy rather than the resolved baseline — a
+  system started in the cache under `_build/castle/baselines` would leave every
+  later resolution of that spec holding a booted, half-upgraded release — and
+  deploying **refuses a destination whose release is still running** rather than
+  emptying the directory underneath it, since a run interrupted before its
+  teardown leaves a node that a recursive delete does not stop and that still
+  answers to the release's name.
+
+  A release is given 20 seconds to answer after it has been started, which
+  describes one that does nothing on the way up; an application that runs
+  migrations or waits on a dependency says how long it wants with
+  `boot_timeout:`. What the deadlines do is fail the test: nothing in Elixir can
+  reach the operating system process behind `System.cmd/3`, so a launcher that
+  hung is still hung when the failure is reported, and the harness says so
+  rather than leaving the impression it tidied up.
+
+  Both kinds of transition are covered. A hot upgrade installs through
+  `Deployment.castle!/3`; one that restarts the emulator installs through
+  `Deployment.install_supervised!/3`, which waits for the old operating system
+  process to go and starts the release again — because `bin/start` is inert,
+  `HEART_COMMAND` is unset, and the supervisor outside the release owns the
+  restart. There is deliberately no single call for both: a hot upgrade never
+  leaves its process, so waiting for that process to exit would be waiting for
+  something that is not coming. It raises the way `castle!/3` does, and what it
+  is usually raising about is on the far side of the reboot — `bin/castle
+  install` polls for the version it installed *after* the release has come back,
+  so a provisional release that rolled back on the way up is reported there and
+  nowhere earlier. `Deployment.install_supervised/3` returns `{output, status}`
+  for a test that wants to assert on the status itself.
+
+  Every command a deployment runs is given an environment with the variables that
+  would otherwise leak into it unset: the emulator flag variables
+  (`ELIXIR_ERL_OPTIONS`, `ERL_AFLAGS`, `ERL_FLAGS`, `ERL_ZFLAGS`,
+  `ERL_OTP<major>_FLAGS`) and **every variable the generated launcher takes as a
+  default** — `RELEASE_VM_ARGS`, `RELEASE_BOOT_SCRIPT`, `RELEASE_SYS_CONFIG`,
+  `RELEASE_MODE`, `RELEASE_DISTRIBUTION`, `RELEASE_NODE` and the rest, each of
+  which redirects the release at something other than its own rather than merely
+  adding to it. `MIX_ENV` because a deployed release is started with no Mix at all,
+  while one started from a test run inherits `test` — and `config/runtime.exs`
+  is the one file a project routinely shares between the two. A `-heart` in a
+  developer's shell or a CI image would otherwise reach
+  every release the tests start, and a release that already supplies one is then
+  given two, which hangs the boot having printed nothing.
+  `Deployment.scrubbed_env/1` exposes the same list for the `mix release` that
+  builds the versions being tested.
+
 ### Changed
 
 - **Breaking:** `mix forecastle.relup` is now `mix castle.relup`. The task is
