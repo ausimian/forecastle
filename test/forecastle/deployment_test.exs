@@ -16,6 +16,7 @@ defmodule Forecastle.DeploymentTest do
   use ExUnit.Case, async: false
 
   alias Forecastle.Deployment
+  alias Forecastle.Deployment.Session
   alias Forecastle.Fixture
 
   @moduletag :slow
@@ -717,23 +718,34 @@ defmodule Forecastle.DeploymentTest do
 
       File.write!(
         launcher,
-        "#!/bin/sh\nprintf '%s\\n' \"$1\" \"${MIX_ENV-<unset>}\" \"$SCENARIO\" \"$RELEASE_VM_ARGS\"\n"
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" \"${MIX_ENV-<unset>}\" \"$SCENARIO\" \"$FORECASTLE_PEER_WORK\"\n"
       )
 
       File.chmod!(launcher, 0o755)
 
       adapter = Path.join(:code.priv_dir(:forecastle), "peer.sh")
-      vm_args = Path.join(root, "vm.args")
+      peer_work = Path.join(root, "peer-work")
 
       assert {output, 0} =
                System.cmd(
                  "sh",
-                 [adapter, launcher, "MIX_ENV,RELEASE_VM_ARGS", vm_args],
+                 [adapter, launcher, "MIX_ENV,FORECASTLE_PEER_WORK", peer_work],
                  env: [{"MIX_ENV", "test"}, {"SCENARIO", "present"}]
                )
 
       assert String.split(output, "\n", trim: true) ==
-               ["start", "<unset>", "present", vm_args]
+               ["start", "<unset>", "present", peer_work]
+    end
+  end
+
+  describe "a peer session's bounded teardown" do
+    test "reports a controller that did not stop within its own budget" do
+      server = spawn(fn -> receive do: (_message -> Process.sleep(:infinity)) end)
+      session = %Session{server: server, stop_timeout: 10}
+      on_exit(fn -> Process.exit(server, :kill) end)
+
+      assert Session.stop(session) == :timeout
+      assert Process.alive?(server)
     end
   end
 

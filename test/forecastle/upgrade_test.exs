@@ -60,12 +60,12 @@ defmodule Forecastle.UpgradeTest do
         ]
       )
 
-    Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
-
     on_exit(fn ->
       Deployment.stop(session)
       File.rm(relup)
     end)
+
+    Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
 
     booted = %{
       greeting: Deployment.call!(session, Sample, :greeting, []),

@@ -18,4 +18,5 @@ config :sample,
   release_cookie_set: System.fetch_env!("RELEASE_COOKIE") != "",
   release_tmp: System.fetch_env!("RELEASE_TMP"),
   release_mode: System.fetch_env!("RELEASE_MODE"),
-  release_vm_args: System.fetch_env!("RELEASE_VM_ARGS")
+  release_vm_args: System.fetch_env!("RELEASE_VM_ARGS"),
+  release_sys_config: System.fetch_env!("RELEASE_SYS_CONFIG")

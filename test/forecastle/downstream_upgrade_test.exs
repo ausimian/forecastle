@@ -70,13 +70,7 @@ defmodule Forecastle.DownstreamUpgradeTest do
     deployment = Deployment.deploy!("tar:#{shipped}", Path.join(scratch, "deploy"))
     session = Deployment.start_peer!(deployment)
 
-    on_exit(fn ->
-      # The public value contains the session controller, not the peer
-      # controller. Losing it must still take the owned release with it.
-      os_pid = Deployment.os_pid(session)
-      Process.exit(session.server, :kill)
-      Deployment.await_exit!(os_pid)
-    end)
+    on_exit(fn -> Deployment.stop(session) end)
 
     booted = %{
       counter: Deployment.call!(session, Sample.Counter, :info, []),

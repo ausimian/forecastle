@@ -3059,12 +3059,12 @@ Decisions in it worth not relitigating:
   Forecastle's first-start hook boots a preboot VM before the release itself.
   Passing `-user peer` in an inherited ERL flag lets that VM consume the only
   control connection, and leaving it in an ERL flag contaminates Castle's nested
-  configuration peer. The session copies the selected incarnation's own
-  `vm.args`, appends OTP's exact peer arguments, and `priv/peer.sh` points the
-  stock launcher at it with `RELEASE_VM_ARGS`. The preboot invocation does not
-  use that launcher variable. The copy lives in an owner-only directory and is
-  removed as soon as the peer connects; a provisional restart copies the target
-  version's args, while an ordinary rollback copies the permanent version's.
+  configuration peer. The session supplies OTP's exact peer arguments in an
+  owner-only working directory. After preboot, the env hook combines them with
+  the `vm.args` under the `REL_VSN_DIR` the stock launcher actually selected and
+  points that invocation at the result. A provisional re-exec therefore selects
+  the target's args itself; the session never guesses the version. The working
+  directory is removed as soon as the peer connects.
 - **Relup generation is not part of the harness.** `mix castle.relup` and
   `upgrade_from:` are already public, so a project has both without this, and
   `test/support` keeps `make_relup!/3` because what it wraps is the *fixture* —

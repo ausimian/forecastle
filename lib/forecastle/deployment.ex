@@ -161,7 +161,8 @@ defmodule Forecastle.Deployment do
                RELEASE_ROOT RELEASE_NAME RELEASE_PROG RELEASE_MODE
                RELEASE_DISTRIBUTION RELEASE_BOOT_SCRIPT
                RELEASE_BOOT_SCRIPT_CLEAN RELEASE_SYS_CONFIG
-               RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP)
+               RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP
+               FORECASTLE_PEER_WORK)
 
   @doc """
   Names a release tree that is already laid out where it is wanted.

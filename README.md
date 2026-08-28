@@ -1070,11 +1070,12 @@ that node, and the next start would come up beside one that still answers to the
 release's name — with the readiness rpc as likely to reach the old system as the
 new one.
 
-`start_peer!/2` gives the stock launcher a deadline and owns the process it
-starts, so a failed setup or teardown does not leave a daemon behind. A release
-that is merely *slow* is what `:boot_timeout` is for — the default of 20 seconds
-describes a release that does nothing on the way up, and an application that runs
-migrations or waits on a dependency should say so:
+`start_peer!/2` gives the stock launcher a deadline and, once it returns, its
+session owns the release process. Register the `on_exit` callback immediately,
+before staging or making any other call that can raise. A release that is merely
+*slow* is what `:boot_timeout` is for — the default of 20 seconds describes a
+release that does nothing on the way up, and an application that runs migrations
+or waits on a dependency should say so:
 
 ```elixir
 Deployment.deploy!(@shipped, Path.join(scratch, "deploy"), boot_timeout: 90_000)

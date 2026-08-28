@@ -6,7 +6,14 @@ defmodule Sample do
 
   @doc "The release variables that were visible while runtime.exs was evaluated."
   def release_env do
-    for key <- [:release_node, :release_cookie_set, :release_tmp, :release_mode, :release_vm_args],
+    for key <- [
+          :release_node,
+          :release_cookie_set,
+          :release_tmp,
+          :release_mode,
+          :release_vm_args,
+          :release_sys_config
+        ],
         into: %{},
         do: {key, Application.get_env(:sample, key)}
   end

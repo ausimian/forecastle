@@ -122,6 +122,14 @@ defmodule Forecastle.RestartUpgradeTest do
   # unremarkable variable does not manufacture a second flag.
   @tabbed_heart [{"ERL_AFLAGS", "-env\tCASTLE_TAB_PROBE\ttabbed"}]
 
+  @heart_report """
+  IO.puts(inspect({
+    System.get_env("HEART_COMMAND"),
+    System.get_env("HEART_NO_KILL"),
+    System.get_env("HEART_BEAT_TIMEOUT")
+  }))
+  """
+
   setup_all do
     workspace = Fixture.workspace()
     relup = Path.join(workspace, "relup")
@@ -150,6 +158,7 @@ defmodule Forecastle.RestartUpgradeTest do
     Deployment.await_exit!(raw_pid)
 
     quiet_start = Deployment.start!(deploy, [{"SAMPLE_GREETING", @first_greeting}])
+    quiet_heart_env = Deployment.rpc!(deploy, @heart_report)
     raw_pid = Deployment.os_pid(deploy)
     Deployment.stop(deploy)
     Deployment.await_exit!(raw_pid)
@@ -159,12 +168,16 @@ defmodule Forecastle.RestartUpgradeTest do
         env: @restart_env ++ @hostile_heart ++ @tabbed_heart
       )
 
-    Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
-
     on_exit(fn ->
-      Deployment.stop(session)
+      # Internal lifecycle assertion: losing the session controller, without an
+      # orderly public stop, still takes the owned peer process with it.
+      os_pid = Deployment.os_pid(session)
+      Process.exit(session.server, :kill)
+      Deployment.await_exit!(os_pid)
       File.rm(relup)
     end)
+
+    Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
 
     booted = %{
       os_pid: Deployment.os_pid(session),
@@ -194,7 +207,6 @@ defmodule Forecastle.RestartUpgradeTest do
 
     provisional = %{
       output: provisional_output,
-      status: 0,
       os_pid: Deployment.os_pid(session),
       counter: Deployment.call!(session, Sample.Counter, :info, []),
       greeting: Deployment.call!(session, Sample, :greeting, []),
@@ -221,7 +233,7 @@ defmodule Forecastle.RestartUpgradeTest do
     }
 
     # And again, from the release that came back, this time through to a commit.
-    installed = %{output: Deployment.install!(session, @to), status: 0}
+    installed = %{output: Deployment.install!(session, @to)}
 
     committed = %{output: Deployment.castle!(session, ["commit"])}
     refute committed.output =~ "__CASTLE_COMMIT_"
@@ -240,7 +252,7 @@ defmodule Forecastle.RestartUpgradeTest do
 
     restarted = %{
       start_output: quiet_start,
-      heart_env: booted.heart_env,
+      heart_env: quiet_heart_env,
       counter: Deployment.call!(session, Sample.Counter, :info, []),
       releases: Deployment.castle!(session, ["releases"])
     }
@@ -313,7 +325,7 @@ defmodule Forecastle.RestartUpgradeTest do
       refute restarted.start_output =~ "HEART_COMMAND"
       refute restarted.start_output =~ "HEART_NO_KILL"
       refute restarted.start_output =~ "HEART_BEAT_TIMEOUT"
-      assert restarted.heart_env == [nil, "TRUE", "65535"]
+      assert restarted.heart_env == ~s({nil, "TRUE", "65535"})
     end
 
     test "was given exactly one -heart, having inherited an escaped one from vm.args",
@@ -362,7 +374,7 @@ defmodule Forecastle.RestartUpgradeTest do
       # reply - release_handler answers as soon as it has accepted the upgrade,
       # and the reboot takes distribution down with it - so it asks the system
       # what it is running until the version it installed answers.
-      assert provisional.status == 0, provisional.output
+      assert provisional.output =~ "Installed #{@to} (previously #{@from})."
     end
 
     test "restarts the VM", %{booted: booted, provisional: provisional} do
@@ -402,6 +414,9 @@ defmodule Forecastle.RestartUpgradeTest do
       # and boot script under @to's name; only an exec recomputes them.
       assert provisional.release_env[:release_vm_args] ==
                "#{deploy.root}/releases/#{@to}/vm.args"
+
+      assert provisional.release_env[:release_sys_config] =~
+               "#{deploy.root}/releases/#{@to}/sys"
     end
 
     test "runs the project's own env.sh across the re-exec", %{provisional: provisional} do
@@ -474,7 +489,7 @@ defmodule Forecastle.RestartUpgradeTest do
 
   describe "committing a restart transition" do
     test "installs again from the release that rolled back", %{installed: installed} do
-      assert installed.status == 0, installed.output
+      assert installed.output =~ "Installed #{@to} (previously #{@from})."
     end
 
     test "reports what was committed", %{committed: committed} do
