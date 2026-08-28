@@ -752,6 +752,31 @@ defmodule Forecastle.DeploymentTest do
       assert File.read!(Path.join(work, "launcher.status")) == "7\n"
       assert Path.wildcard(Path.join(work, "launcher.status.*")) == []
     end
+
+    test "failed peer startup reclaims with the session environment" do
+      root = Path.join(@root, "failed-peer-reclaim")
+      capture = Path.join(root, "stopped-node")
+      File.rm_rf!(root)
+      File.mkdir_p!(Path.join(root, "bin"))
+      on_exit(fn -> File.rm_rf(root) end)
+
+      stub!(
+        root,
+        "my_app",
+        ~s|if [ "$1" = start ]; then exit 7; fi\nprintf '%s\n' "$RELEASE_NODE" > "$CAPTURE"\n|
+      )
+
+      deployment = Deployment.new(root, "my_app", boot_timeout: 10)
+
+      assert_raise RuntimeError, ~r/cannot start deployment session/, fn ->
+        Deployment.start_peer!(deployment,
+          launcher_timeout: 100,
+          env: [{"RELEASE_NODE", "failed@host"}, {"CAPTURE", capture}]
+        )
+      end
+
+      assert File.read!(capture) == "failed@host\n"
+    end
   end
 
   describe "a peer session's bounded teardown" do
@@ -761,10 +786,13 @@ defmodule Forecastle.DeploymentTest do
       session = %Session{
         server: server,
         stop_timeout: 10,
-        deployment: Deployment.new(@root, "my_app")
+        deployment: Deployment.new(@root, "my_app"),
+        stop_state: :atomics.new(1, [])
       }
 
-      assert Session.stop(session) == :killed
+      assert {:error, message} = Session.stop(session)
+      assert message =~ "session controller was killed"
+      assert message =~ "fallback launcher does not exist"
       refute Process.alive?(server)
     end
 
@@ -778,7 +806,7 @@ defmodule Forecastle.DeploymentTest do
       stub!(
         root,
         "my_app",
-        ~s|printf '%s\n' "$RELEASE_NODE" > "$CAPTURE"\n|
+        ~s|printf '%s\n' "$RELEASE_NODE" >> "$CAPTURE"\n|
       )
 
       env = [{"RELEASE_NODE", "scenario@host"}, {"CAPTURE", capture}]
@@ -789,10 +817,12 @@ defmodule Forecastle.DeploymentTest do
         server: server,
         stop_timeout: 10,
         deployment: Deployment.new(root, "my_app"),
-        env_store: env_store
+        env_store: env_store,
+        stop_state: :atomics.new(1, [])
       }
 
       assert Session.stop(session) == :killed
+      assert Session.stop(session) == :ok
       assert File.read!(capture) == "scenario@host\n"
     end
 
@@ -814,7 +844,8 @@ defmodule Forecastle.DeploymentTest do
         server: server,
         stop_timeout: 10,
         deployment: Deployment.new(root, "my_app"),
-        env_store: env_store
+        env_store: env_store,
+        stop_state: :atomics.new(1, [])
       }
 
       assert Session.stop(session) == :ok

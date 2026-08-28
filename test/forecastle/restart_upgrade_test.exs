@@ -260,7 +260,8 @@ defmodule Forecastle.RestartUpgradeTest do
     # rather than reusing the pre-upgrade @from observation. The session is done
     # before the raw launcher starts so there is only one incarnation at a time.
     restarted_pid = Deployment.os_pid(session)
-    Deployment.stop(session)
+    assert Deployment.stop(session) == :ok
+    assert Deployment.stop(session) == :ok
     Deployment.await_exit!(restarted_pid, 50)
 
     quiet_start = Deployment.start!(deploy, [{"SAMPLE_GREETING", @restart_greeting}])

@@ -409,7 +409,8 @@ defmodule Forecastle.UpgradeTest do
     end
 
     test "left no peer, and no working directory, behind", %{deploy: deploy} do
-      assert Path.wildcard(Path.join(deploy.root, "releases/*/castle-*")) == []
+      assert Path.wildcard(Path.join(deploy.root, "tmp/forecastle-peer-*")) == []
+      assert Path.wildcard(Path.join(deploy.root, "releases/castle-*")) == []
     end
 
     test "configures the version it installed", %{installed: installed} do

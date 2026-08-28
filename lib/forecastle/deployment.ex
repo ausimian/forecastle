@@ -520,7 +520,12 @@ defmodule Forecastle.Deployment do
         # again after the test process has unwound.
         try do
           launcher = Path.join(deployment.root, "bin/#{deployment.name}")
-          if File.regular?(launcher), do: stop(deployment), else: :ok
+
+          if File.regular?(launcher) do
+            stop(deployment, Keyword.get(opts, :env, []))
+          else
+            :ok
+          end
         rescue
           _error -> :ok
         end
@@ -719,15 +724,18 @@ defmodule Forecastle.Deployment do
 
   A normal peer-session stop asks its peer to halt and waits up to the configured
   process-exit budget for the release's operating-system pid to disappear,
-  returning `:timeout` if it does not. If a
-  wedged controller exceeds that combined budget, it is killed and the stock
-  launcher is asked to stop the deployment as a bounded fallback. That abnormal
-  case returns `:killed`; callers should retain the pre-start deployment-level
+  returning `:timeout` if it does not. A successful session stop is idempotent,
+  so a later teardown callback does not address a new incarnation at the same
+  path. If a wedged controller exceeds the combined budget, it is killed and the
+  stock launcher is asked to stop the deployment as a bounded fallback. That
+  abnormal case returns `:killed` only when the fallback succeeds, and
+  `{:error, message}` when it cannot confirm the stop; callers should retain the
+  pre-start deployment-level
   teardown shown in `Forecastle.UpgradeCase` so it can ask again after a failed
   setup has unwound.
   """
   @spec stop(t() | session(), env()) ::
-          {binary(), non_neg_integer()} | :timeout | :ok | :killed
+          {binary(), non_neg_integer()} | {:error, binary()} | :timeout | :ok | :killed
   def stop(deployment_or_session, env \\ [])
   def stop(%Session{} = session, _env), do: Session.stop(session)
 

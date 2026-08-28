@@ -5,7 +5,9 @@
   launcher and own ERTS, while tests use structured MFA calls and keep one
   session across both hot upgrades and emulator restarts. Normal session teardown
   stops the release it owns, waits for its operating-system process and reports
-  a timeout if that process remains; the
+  a timeout if that process remains. Successful stops are idempotent, while a
+  controller kill reports an error if its environment-aware launcher fallback
+  cannot confirm the release stopped; the
   documented recipe also registers a deployment-level fallback before startup.
   Peer startup retains a 180-second launcher/preboot
   allowance and adds the deployment's `:boot_timeout` to form the total boot

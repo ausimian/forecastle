@@ -3076,7 +3076,11 @@ Decisions in it worth not relitigating:
   property then halts the release it owns, and a bounded stock-launcher stop
   carrying the session's effective environment is the fallback. Normal teardown
   also waits for the owned operating-system pid to disappear and reports
-  `:timeout` if it does not. A deployment-level teardown is registered
+  `:timeout` if it does not. A successful stop is recorded outside the
+  controller and is idempotent, so a later callback cannot stop a new session at
+  the same path. A brutal controller kill reports `:killed` only when the
+  fallback confirms success; otherwise it returns an error rather than hiding a
+  live release. A deployment-level teardown is registered
   **before** `start_peer!/2` as well: a failed start returns no session value, so
   no session-only callback can cover that path.
 

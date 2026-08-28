@@ -1072,7 +1072,9 @@ normal teardown waits for it. An override must also allow the deployment enough
 time to reboot and cold boot. Normal stop returns `:timeout` if the owned
 operating-system process does not exit. A session controller that exceeds its
 shutdown budget is killed, and the deployment launcher is asked to stop with
-the session's effective environment as a bounded fallback. Register the
+the session's effective environment as a bounded fallback. A successful stop is
+idempotent; a failed fallback returns `{:error, message}` instead of claiming the
+release stopped. Register the
 deployment-level teardown before `start_peer!/2`, as in the recipe above, because
 a failed start returns no session value and the callback must still exist.
 
