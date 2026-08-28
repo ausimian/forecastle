@@ -68,6 +68,7 @@ defmodule Forecastle.DownstreamUpgradeTest do
     # The upgrade test itself starts here, and everything from this line down is
     # shipped API.
     deployment = Deployment.deploy!("tar:#{shipped}", Path.join(scratch, "deploy"))
+    on_exit(fn -> Deployment.stop(deployment) end)
     session = Deployment.start_peer!(deployment)
 
     on_exit(fn -> Deployment.stop(session) end)

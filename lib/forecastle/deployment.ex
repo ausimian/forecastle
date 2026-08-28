@@ -503,6 +503,17 @@ defmodule Forecastle.Deployment do
         session
 
       {:error, reason} ->
+        # There is no session value for the caller to stop when init fails. Ask
+        # the stock launcher as a best-effort fallback before surfacing the
+        # failure; the pre-start deployment teardown in the public recipe asks
+        # again after the test process has unwound.
+        try do
+          launcher = Path.join(deployment.root, "bin/#{deployment.name}")
+          if File.regular?(launcher), do: stop(deployment), else: :ok
+        rescue
+          _error -> :ok
+        end
+
         raise "cannot start deployment session for #{deployment.root}: #{inspect(reason)}"
     end
   end
@@ -695,10 +706,13 @@ defmodule Forecastle.Deployment do
   whole module timeout and then finish with an `on_exit callback` error, which
   says nothing about the boot.
 
-  A peer session has a stronger ownership guarantee: if its controller does not
-  stop inside the shutdown budget, it is killed so its linked peer controller
-  halts the release. That case returns `:killed` rather than leaving a deployment
-  behind in the scratch tree.
+  A normal peer-session stop asks its peer to halt and waits up to the configured
+  process-exit budget for the release's operating-system pid to disappear. If a
+  wedged controller exceeds that combined budget, it is killed and the stock
+  launcher is asked to stop the deployment as a bounded fallback. That abnormal
+  case returns `:killed`; callers should retain the pre-start deployment-level
+  teardown shown in `Forecastle.UpgradeCase` so it can ask again after a failed
+  setup has unwound.
   """
   @spec stop(t() | session(), env()) ::
           {binary(), non_neg_integer()} | :timeout | :ok | :killed

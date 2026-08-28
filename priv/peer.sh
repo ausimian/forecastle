@@ -28,4 +28,20 @@ IFS=$castle_peer_old_ifs
 
 FORECASTLE_PEER_WORK=$castle_peer_work
 export FORECASTLE_PEER_WORK
-exec "$castle_peer_launcher" start
+
+# Keep a tiny wrapper around the launcher until the peer has either connected or
+# failed. OTP closes its detached spawn port immediately, so without an explicit
+# status channel a launcher that refuses in env.sh is indistinguishable from one
+# still booting until wait_boot expires.
+set +e
+"$castle_peer_launcher" start
+castle_peer_status=$?
+set -e
+
+(
+  set -C
+  umask 077
+  printf '%s\n' "$castle_peer_status" > "$castle_peer_work/launcher.status"
+) 2>/dev/null || :
+
+exit "$castle_peer_status"

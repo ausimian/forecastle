@@ -961,6 +961,7 @@ defmodule MyApp.UpgradeTest do
 
   setup_all %{scratch: scratch} do
     deployment = Deployment.deploy!(@shipped, Path.join(scratch, "deploy"))
+    on_exit(fn -> Deployment.stop(deployment) end)
     session = Deployment.start_peer!(deployment)
     on_exit(fn -> Deployment.stop(session) end)
 
@@ -1057,7 +1058,9 @@ values. Pass an environment as the third argument to `install!/3` when the targe
 incarnation must see different values; the override is retained by later
 restarts. Every call, launcher command, boot, install, shutdown and process-exit
 wait is bounded. A session controller that exceeds its shutdown budget is killed,
-which also halts the release it owns.
+and the deployment launcher is asked to stop as a bounded fallback. Register the
+deployment-level teardown before `start_peer!/2`, as in the recipe above, because
+a failed start returns no session value and the callback must still exist.
 
 ### What it does for you, and what it does not
 

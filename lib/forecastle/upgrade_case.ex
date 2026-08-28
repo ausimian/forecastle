@@ -45,6 +45,7 @@ defmodule Forecastle.UpgradeCase do
 
         setup_all %{scratch: scratch} do
           deployment = Deployment.deploy!(@shipped, Path.join(scratch, "deploy"))
+          on_exit(fn -> Deployment.stop(deployment) end)
           session = Deployment.start_peer!(deployment)
           on_exit(fn -> Deployment.stop(session) end)
 

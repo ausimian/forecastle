@@ -14,9 +14,16 @@ defmodule Sample.Application do
       Process.sleep(String.to_integer(delay))
     end
 
-    Supervisor.start_link([Sample.Counter, Sample.Unmentioned],
-      strategy: :one_for_one,
-      name: Sample.Supervisor
-    )
+    started =
+      Supervisor.start_link([Sample.Counter, Sample.Unmentioned],
+        strategy: :one_for_one,
+        name: Sample.Supervisor
+      )
+
+    if marker = System.get_env("SAMPLE_BOOT_MARKER") do
+      File.write!(marker, "started\n")
+    end
+
+    started
   end
 end

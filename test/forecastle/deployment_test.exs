@@ -740,7 +740,12 @@ defmodule Forecastle.DeploymentTest do
   describe "a peer session's bounded teardown" do
     test "kills a controller that did not stop within its own budget" do
       server = spawn(fn -> receive do: (_message -> Process.sleep(:infinity)) end)
-      session = %Session{server: server, stop_timeout: 10}
+
+      session = %Session{
+        server: server,
+        stop_timeout: 10,
+        deployment: Deployment.new(@root, "my_app")
+      }
 
       assert Session.stop(session) == :killed
       refute Process.alive?(server)

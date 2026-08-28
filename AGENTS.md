@@ -3060,7 +3060,11 @@ Decisions in it worth not relitigating:
   different scenario from the initial boot. Launcher and Castle commands have a
   separate command deadline. If any operation nevertheless keeps the session
   from serving its stop request, teardown kills the controller after its budget;
-  the controller-loss property then halts the release it owns.
+  the controller-loss property then halts the release it owns, and a bounded
+  stock-launcher stop is the fallback. Normal teardown also waits for the owned
+  operating-system pid to disappear. A deployment-level teardown is registered
+  **before** `start_peer!/2` as well: a failed start returns no session value, so
+  no session-only callback can cover that path.
 
   OTP's own boot acknowledgement is already the application-readiness wait:
   `peer.erl` calls `init:notify_when_started/1` and sends `started` only when init
@@ -3068,6 +3072,14 @@ Decisions in it worth not relitigating:
   control socket connecting. The launcher allowance and the deployment's
   application allowance are added because the synchronous first-start path also
   runs the preboot VM before the emulator can reach that acknowledgement.
+
+  The adapter deliberately stays as a wrapper around the launcher rather than
+  execing it. OTP closes the detached spawn port immediately, so an env-hook
+  refusal is otherwise indistinguishable from a boot still in progress until the
+  whole deadline expires. The wrapper publishes the launcher's exit status in
+  the private peer work directory; the session uses asynchronous peer boot
+  notification and polls that status, reporting a fast refusal at once while
+  retaining the same bounded deadline for a genuine hang.
 - **Peer arguments are handed to the release through a private vm.args copy.**
   Forecastle's first-start hook boots a preboot VM before the release itself.
   Passing `-user peer` in an inherited ERL flag lets that VM consume the only

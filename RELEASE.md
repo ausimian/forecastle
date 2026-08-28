@@ -3,14 +3,18 @@
 - Upgrade tests can now run a release as an OTP `:peer` owned by an opaque
   `Forecastle.Deployment` session. The release still boots through its stock Mix
   launcher and own ERTS, while tests use structured MFA calls and keep one
-  session across both hot upgrades and emulator restarts. Session teardown also
-  stops the release it owns. Peer startup retains a 180-second launcher/preboot
+  session across both hot upgrades and emulator restarts. Normal session teardown
+  stops the release it owns and waits for its operating-system process; the
+  documented recipe also registers a deployment-level fallback before startup.
+  Peer startup retains a 180-second launcher/preboot
   allowance and adds the deployment's `:boot_timeout` to form the total boot
   deadline, so first-start preboot work does not replace the application's
   configured allowance. Launcher and
   Castle commands are bounded, a controller that exceeds its shutdown budget is
   killed with its owned release, and install/restart calls can retain an
-  environment override for later incarnations. The old direct-deployment
+  environment override for later incarnations. A launcher or env-hook refusal is
+  reported from the adapter immediately instead of being mislabelled after the
+  full boot deadline. The old direct-deployment
   `install_supervised/3` and `install_supervised!/3` helpers are deprecated in
   favour of the session API.
 - `bin/castle`, a release management CLI, is now installed alongside the
@@ -897,6 +901,7 @@
       deployment =
         Deployment.deploy!("tar:artifacts/myapp-1.0.0.tar.gz", Path.join(scratch, "deploy"))
 
+      on_exit(fn -> Deployment.stop(deployment) end)
       session = Deployment.start_peer!(deployment)
       on_exit(fn -> Deployment.stop(session) end)
 

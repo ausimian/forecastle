@@ -5,10 +5,14 @@ defmodule Forecastle.Deployment.Session do
 
   alias Forecastle.Deployment
 
-  @enforce_keys [:server, :stop_timeout]
-  defstruct [:server, :stop_timeout]
+  @enforce_keys [:server, :stop_timeout, :deployment]
+  defstruct [:server, :stop_timeout, :deployment]
 
-  @opaque t :: %__MODULE__{server: pid(), stop_timeout: timeout()}
+  @opaque t :: %__MODULE__{
+            server: pid(),
+            stop_timeout: timeout(),
+            deployment: Deployment.t()
+          }
 
   @call_timeout 5_000
   @launcher_timeout 180_000
@@ -17,20 +21,28 @@ defmodule Forecastle.Deployment.Session do
   @shutdown_timeout 10_000
   @exit_timeout 30_000
   @exit_interval 100
+  @boot_interval 50
 
   def start(%Deployment{} = deployment, opts) do
     with {:ok, server} <- GenServer.start(__MODULE__, {deployment, opts}) do
       shutdown_timeout = Keyword.get(opts, :shutdown_timeout, @shutdown_timeout)
-      {:ok, %__MODULE__{server: server, stop_timeout: shutdown_timeout + 1_000}}
+      exit_timeout = Keyword.get(opts, :exit_timeout, @exit_timeout)
+
+      {:ok,
+       %__MODULE__{
+         server: server,
+         stop_timeout: shutdown_timeout + exit_timeout + 1_000,
+         deployment: deployment
+       }}
     end
   end
 
-  def stop(%__MODULE__{server: server, stop_timeout: timeout}) do
+  def stop(%__MODULE__{server: server, stop_timeout: timeout, deployment: deployment}) do
     if Process.alive?(server), do: GenServer.stop(server, :normal, timeout), else: :ok
   catch
-    :exit, {:timeout, _call} -> kill_server(server)
+    :exit, {:timeout, _call} -> kill_server(server, deployment)
     :exit, {:noproc, _call} -> :ok
-    :exit, _reason -> kill_server(server)
+    :exit, _reason -> kill_server(server, deployment)
   end
 
   def call(%__MODULE__{server: server}, module, function, args, timeout) do
@@ -248,7 +260,14 @@ defmodule Forecastle.Deployment.Session do
   @impl true
   def terminate(_reason, state) do
     if state.install, do: Task.shutdown(state.install.task, :brutal_kill)
-    stop_peer(state.peer)
+
+    if state.peer do
+      stop_peer(state.peer)
+    else
+      fallback_stop(state.deployment, state.env)
+    end
+
+    await_exit(state.os_pid || state.last_os_pid, state.exit_timeout)
     :ok
   end
 
@@ -260,6 +279,7 @@ defmodule Forecastle.Deployment.Session do
     launcher = Path.join(deployment.root, "bin/#{deployment.name}")
     work = peer_work_dir(deployment)
     peer_args = Path.join(work, "peer.args")
+    boot_ref = make_ref()
 
     options = %{
       connection: {{127, 0, 0, 1}, 0},
@@ -279,7 +299,11 @@ defmodule Forecastle.Deployment.Session do
       # work and the application's cold boot. The two allowances are added; a
       # separate readiness poll after this would be asking an already-settled
       # init process the same question again.
-      wait_boot: state.launcher_timeout + deployment.boot_timeout,
+      # Use the asynchronous notification form so the adapter's status file can
+      # distinguish an env.sh/launcher refusal from a boot that is still in
+      # progress. OTP's integer form waits internally and exits `:timeout`, with
+      # the detached launcher's status no longer observable.
+      wait_boot: {self(), boot_ref},
       shutdown: {:halt, state.shutdown_timeout},
       peer_down: :stop
     }
@@ -287,24 +311,97 @@ defmodule Forecastle.Deployment.Session do
     try do
       case :peer.start_link(options) do
         {:ok, peer} ->
-          peer_started(peer, state)
+          await_peer_boot(peer, boot_ref, state, work)
 
         {:ok, peer, _node} ->
-          peer_started(peer, state)
+          await_peer_boot(peer, boot_ref, state, work)
 
         {:error, reason} ->
           {:error,
-           "#{deployment.root} did not boot through its stock launcher within " <>
-             "#{state.launcher_timeout + deployment.boot_timeout}ms: #{inspect(reason)}"}
+           "the OTP peer controller for #{deployment.root} could not be started: " <>
+             inspect(reason)}
       end
     after
       File.rm_rf(work)
     end
   catch
+    :exit, :timeout ->
+      {:error,
+       "#{state.deployment.root} did not boot through its stock launcher within " <>
+         "#{state.launcher_timeout + state.deployment.boot_timeout}ms"}
+
     kind, reason ->
       {:error,
        "#{state.deployment.root} could not be booted through its stock launcher: " <>
          Exception.format(kind, reason, __STACKTRACE__)}
+  end
+
+  defp await_peer_boot(peer, boot_ref, state, work) do
+    timeout = state.launcher_timeout + state.deployment.boot_timeout
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_peer_boot(peer, boot_ref, state, Path.join(work, "launcher.status"), timeout, deadline)
+  end
+
+  defp await_peer_boot(peer, boot_ref, state, status_file, timeout, deadline) do
+    left = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^boot_ref, {:started, _node, ^peer}} ->
+        peer_started(peer, state)
+
+      {^boot_ref, {:boot_failed, reason, ^peer}} ->
+        stop_peer(peer)
+        {:error, "the OTP peer for #{state.deployment.root} failed to boot: #{inspect(reason)}"}
+
+      {:EXIT, ^peer, reason} ->
+        {:error,
+         "the OTP peer controller for #{state.deployment.root} exited while booting: " <>
+           inspect(reason)}
+    after
+      min(left, @boot_interval) ->
+        case launcher_status(status_file) do
+          {:ok, 0} when left > 0 ->
+            # `-detached` makes the stock launcher return after handing the VM
+            # off, before OTP's init-started notification reaches us. Zero is
+            # therefore progress rather than a completed boot; only a non-zero
+            # status is an early refusal.
+            File.rm(status_file)
+            await_peer_boot(peer, boot_ref, state, status_file, timeout, deadline)
+
+          {:ok, status} ->
+            stop_peer(peer)
+
+            {:error,
+             "the stock launcher for #{state.deployment.root} exited with status #{status} " <>
+               "before the OTP peer booted"}
+
+          :running when left > 0 ->
+            await_peer_boot(peer, boot_ref, state, status_file, timeout, deadline)
+
+          :running ->
+            stop_peer(peer)
+
+            {:error,
+             "#{state.deployment.root} did not boot through its stock launcher within " <>
+               "#{timeout}ms"}
+        end
+    end
+  end
+
+  defp launcher_status(path) do
+    case File.read(path) do
+      {:ok, bytes} ->
+        case Integer.parse(String.trim(bytes)) do
+          {status, ""} -> {:ok, status}
+          _ -> {:ok, "an unreadable status"}
+        end
+
+      {:error, :enoent} ->
+        :running
+
+      {:error, reason} ->
+        {:ok, inspect(reason)}
+    end
   end
 
   defp peer_started(peer, state) do
@@ -401,7 +498,7 @@ defmodule Forecastle.Deployment.Session do
     kind, reason -> {:error, Exception.format(kind, reason, __STACKTRACE__)}
   end
 
-  defp kill_server(server) do
+  defp kill_server(server, deployment) do
     if Process.alive?(server) do
       monitor = Process.monitor(server)
       Process.exit(server, :kill)
@@ -414,6 +511,16 @@ defmodule Forecastle.Deployment.Session do
     else
       :ok
     end
+    |> tap(fn _result -> fallback_stop(deployment, []) end)
+  end
+
+  defp fallback_stop(deployment, env) do
+    launcher = Path.join(deployment.root, "bin/#{deployment.name}")
+    if File.regular?(launcher), do: Deployment.stop(deployment, env), else: :ok
+  rescue
+    _error -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   defp expected_reboot(deployment, vsn) do

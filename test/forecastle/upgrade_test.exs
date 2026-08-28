@@ -52,27 +52,58 @@ defmodule Forecastle.UpgradeTest do
     # the tarball we are about to hand to release_handler contains it.
     ^next = assemble!(into: "next", vsn: @to)
 
-    {boot_elapsed, session} =
+    refused =
+      Deployment.deploy!(
+        "rel:#{deploy.root}/releases/#{@from}/sample",
+        deploy.root <> "-peer-refusal"
+      )
+
+    on_exit(fn -> Deployment.stop(refused) end)
+
+    {refusal_elapsed, refusal_result} =
       :timer.tc(fn ->
-        Deployment.start_peer!(deploy,
-          env: [
-            {"SAMPLE_GREETING", "hello-from-runtime"},
-            {"SAMPLE_BOOT_DELAY_MS", "200"},
-            {"FORECASTLE_SCENARIO", "present"}
-          ]
-        )
+        try do
+          refused_session =
+            Deployment.start_peer!(refused, env: [{"ERL_FLAGS", "-user application_user"}])
+
+          Deployment.stop(refused_session)
+          {:ok, :unexpectedly_started}
+        rescue
+          error -> {:error, Exception.message(error)}
+        end
       end)
 
+    {:error, refusal_message} = refusal_result
+
     on_exit(fn ->
-      Deployment.stop(session)
-      File.rm(relup)
+      try do
+        Deployment.stop(deploy)
+      after
+        File.rm(relup)
+      end
     end)
+
+    boot_marker = Path.join(deploy.root, "tmp/sample-application-started")
+
+    session =
+      Deployment.start_peer!(deploy,
+        env: [
+          {"SAMPLE_GREETING", "hello-from-runtime"},
+          {"SAMPLE_BOOT_DELAY_MS", "500"},
+          {"SAMPLE_BOOT_MARKER", boot_marker},
+          {"FORECASTLE_SCENARIO", "present"}
+        ]
+      )
+
+    app_started_when_boot_returned? = File.exists?(boot_marker)
+
+    on_exit(fn -> Deployment.stop(session) end)
 
     Deployment.stage!(session, Path.join(next, "sample-#{@to}.tar.gz"))
 
     booted = %{
       greeting: Deployment.call!(session, Sample, :greeting, []),
-      boot_elapsed: boot_elapsed,
+      app_started_when_boot_returned?: app_started_when_boot_returned?,
       env_marker: Deployment.call!(session, Sample, :env_marker, []),
       release_env: Deployment.call!(session, Sample, :release_env, []),
       counter: Deployment.call!(session, Sample.Counter, :info, []),
@@ -133,6 +164,7 @@ defmodule Forecastle.UpgradeTest do
 
     {:ok,
      deploy: deploy,
+     peer_refusal: %{elapsed: refusal_elapsed, message: refusal_message},
      session: session,
      booted: booted,
      unpacked: unpacked,
@@ -141,6 +173,13 @@ defmodule Forecastle.UpgradeTest do
   end
 
   describe "booting under the stock launcher" do
+    test "reports an env.sh peer refusal without waiting for the boot deadline",
+         %{peer_refusal: refusal} do
+      assert refusal.elapsed < 10_000_000
+      assert refusal.message =~ "stock launcher"
+      assert refusal.message =~ "exited with status 1 before the OTP peer booted"
+    end
+
     test "is configured by config/runtime.exs", %{booted: booted} do
       # Through Elixir's own pipeline, in the booting VM, with nothing of
       # Forecastle's involved: the launcher is Mix's, sys.config is the one Mix
@@ -199,10 +238,12 @@ defmodule Forecastle.UpgradeTest do
     test "does not report the peer started before application startup finishes",
          %{booted: booted} do
       # OTP's peer user process reports `started` through
-      # init:notify_when_started/1. The fixture deliberately spends 200ms inside
-      # Application.start/2; returning sooner would mean wait_boot covered only
-      # the control connection rather than the release boot.
-      assert booted.boot_elapsed >= 200_000
+      # init:notify_when_started/1. The fixture writes this marker only after its
+      # deliberately delayed Application.start/2 has started the supervision
+      # tree, and the origin checks it in the first instruction after
+      # start_peer!/2. Unlike total elapsed boot time, this fails if peer control
+      # connects before the application finishes.
+      assert booted.app_started_when_boot_returned?
     end
 
     test "uses the release's own ERTS and carries only scenario environment",

@@ -261,7 +261,7 @@ defmodule Forecastle.RestartUpgradeTest do
     # before the raw launcher starts so there is only one incarnation at a time.
     restarted_pid = Deployment.os_pid(session)
     Deployment.stop(session)
-    Deployment.await_exit!(restarted_pid)
+    Deployment.await_exit!(restarted_pid, 50)
 
     quiet_start = Deployment.start!(deploy, [{"SAMPLE_GREETING", @restart_greeting}])
     quiet_heart_env = Deployment.rpc!(deploy, @heart_report)
