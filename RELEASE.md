@@ -26,9 +26,12 @@
   seconds shorter than the session deadline. Its clock starts only after the
   unbounded install RPC returns, so the outer watchdog can still fire first; the
   session retains ownership of the command and normal teardown waits for it.
-  Peer arguments are quoted for erlexec's
-  args-file grammar, and invalid peer handoff files are refused before provisional
-  restart evidence is consumed. The loopback control connection has no separate
+  The case template timeout stays above the default teardown budget. A dead
+  predecessor's pid is cleared before a replacement starts, so a failed peer
+  connection cannot make fallback verify the wrong incarnation. Peer arguments
+  are quoted for erlexec's args-file grammar, and empty, partial, or otherwise
+  invalid peer handoff files are refused before provisional restart evidence is
+  consumed. The loopback control connection has no separate
   authentication layer and assumes a single-tenant test host; it is not a
   security boundary against mutually untrusted local processes. The old direct-deployment
   `install_supervised/3` and `install_supervised!/3` helpers are deprecated in

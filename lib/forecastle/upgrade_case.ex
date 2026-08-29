@@ -170,6 +170,11 @@ defmodule Forecastle.UpgradeCase do
 
   use ExUnit.CaseTemplate
 
+  @upgrade_timeout 660_000
+
+  @doc false
+  def timeout, do: @upgrade_timeout
+
   using do
     quote do
       alias Forecastle.Deployment
@@ -177,7 +182,7 @@ defmodule Forecastle.UpgradeCase do
       # Generous, because a single test module here can assemble releases, boot a
       # node and reboot it. ExUnit's default of 60s is a description of a unit
       # test.
-      @moduletag timeout: 600_000
+      @moduletag timeout: unquote(@upgrade_timeout)
     end
   end
 

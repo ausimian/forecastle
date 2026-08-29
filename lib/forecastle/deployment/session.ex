@@ -113,6 +113,7 @@ defmodule Forecastle.Deployment.Session do
       :claimed -> finish_stop(session)
       {:waiting, next_owner} -> await_stop(session, next_owner, deadline)
       :stopped -> :ok
+      :unavailable -> finish_stop(session)
     end
   end
 
@@ -296,11 +297,18 @@ defmodule Forecastle.Deployment.Session do
     remember_env(state, state.env)
     stop_peer(old_peer)
 
-    with :ok <- await_exit(old_pid, state.exit_timeout),
-         {:ok, restarted} <-
-           start_peer(%{state | peer: nil, os_pid: nil, last_os_pid: nil, down: nil}) do
-      {:reply, {:ok, :restarted}, restarted}
-    else
+    case await_exit(old_pid, state.exit_timeout) do
+      :ok ->
+        state = forget_pid(state)
+
+        case start_peer(%{state | peer: nil, down: nil}) do
+          {:ok, restarted} ->
+            {:reply, {:ok, :restarted}, restarted}
+
+          {:error, message} ->
+            {:reply, {:error, message}, %{state | peer: nil, down: message}}
+        end
+
       {:error, message} ->
         {:reply, {:error, message},
          %{state | peer: nil, os_pid: nil, last_os_pid: old_pid, down: message}}
@@ -369,19 +377,12 @@ defmodule Forecastle.Deployment.Session do
   def handle_info({:EXIT, peer, reason}, %{peer: peer, install: install} = state) do
     case expected_reboot(state.deployment, install.vsn) do
       :ok ->
-        with :ok <- await_exit(install.old_os_pid, state.exit_timeout),
-             {:ok, restarted} <-
-               start_peer(%{
-                 state
-                 | env: state.env ++ install.env,
-                   peer: nil,
-                   os_pid: nil,
-                   last_os_pid: nil,
-                   down: nil
-               }) do
-          {:noreply, %{restarted | install: %{install | env: []}}}
-        else
-          {:error, message} -> fail_install(state, message)
+        case await_exit(install.old_os_pid, state.exit_timeout) do
+          :ok ->
+            replace_after_install(state, install)
+
+          {:error, message} ->
+            fail_install(state, message)
         end
 
       {:error, why} ->
@@ -758,6 +759,11 @@ defmodule Forecastle.Deployment.Session do
     :exit, _reason -> :ok
   end
 
+  defp forget_pid(state) do
+    remember_pid(state, nil)
+    %{state | os_pid: nil, last_os_pid: nil}
+  end
+
   defp stop_env_store(nil), do: :ok
 
   defp stop_env_store(env_store) do
@@ -875,6 +881,18 @@ defmodule Forecastle.Deployment.Session do
          last_os_pid: state.os_pid,
          down: message
      }}
+  end
+
+  defp replace_after_install(state, install) do
+    state =
+      state
+      |> Map.put(:env, state.env ++ install.env)
+      |> forget_pid()
+
+    case start_peer(%{state | peer: nil, down: nil}) do
+      {:ok, restarted} -> {:noreply, %{restarted | install: %{install | env: []}}}
+      {:error, message} -> fail_install(state, message)
+    end
   end
 
   defp install_diagnosis(install) do
@@ -1056,7 +1074,11 @@ defmodule Forecastle.Deployment.Session do
   defp write_private(path, content) do
     File.open!(path, [:write, :exclusive], fn file ->
       File.chmod!(path, 0o600)
-      IO.binwrite(file, content)
+
+      case IO.binwrite(file, content) do
+        :ok -> :ok
+        {:error, reason} -> raise File.Error, reason: reason, action: "write to", path: path
+      end
     end)
   end
 

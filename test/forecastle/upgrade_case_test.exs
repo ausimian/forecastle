@@ -13,6 +13,8 @@ defmodule Forecastle.UpgradeCaseTest do
 
   use Forecastle.UpgradeCase
 
+  alias Forecastle.Deployment.Session
+
   test "aliases the module that drives a release" do
     # A missing alias would leave this comparing `Elixir.Deployment` - a
     # perfectly good atom that no module answers to - against the real one, so
@@ -23,7 +25,11 @@ defmodule Forecastle.UpgradeCaseTest do
   test "gives the module a timeout a release can be booted inside", context do
     # ExUnit's default is 60 seconds, which is a description of a unit test. A
     # module here can deploy a release, boot a node and reboot it.
-    assert context.timeout == 600_000
+    assert context.timeout == Forecastle.UpgradeCase.timeout()
+
+    deployment = Forecastle.Deployment.new(context.scratch, "my_app")
+
+    assert Session.stop_timeout(deployment, []) < context.timeout
   end
 
   test "names a scratch directory of this module's own", %{scratch: scratch} do

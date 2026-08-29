@@ -3063,10 +3063,15 @@ Decisions in it worth not relitigating:
   stable, and no caller may retain a raw incarnation handle. An environment
   passed to the install command is retained by the replacement and later
   incarnations; this is how a test makes a target's runtime providers see a
-  different scenario from the initial boot. Launcher and Castle commands have a
+  different scenario from the initial boot. Once the predecessor is confirmed
+  gone its pid is cleared before the replacement starts, so a replacement that
+  boots but never connects cannot make teardown confirm the dead predecessor as
+  though it were the live incarnation. Launcher and Castle commands have a
   separate command deadline. The session's call deadline is also a ceiling on
   caller-supplied MFA timeouts, so no structured call can make teardown
-  unbounded. The session derives a nominal
+  unbounded. The case template's module timeout stays above the derived default
+  stop budget, so ExUnit cannot kill teardown before its controller-loss
+  fallback is reached. The session derives a nominal
   `CASTLE_INSTALL_TIMEOUT` five seconds shorter than its own install deadline,
   but the clocks start at different moments: the shell begins confirmation only
   after its unbounded install RPC returns. A slow install can therefore make the
@@ -3117,10 +3122,10 @@ Decisions in it worth not relitigating:
   invocation at the result. A provisional re-exec therefore selects the target's
   args itself; the session never guesses the version. The session creates the
   argument file exclusively, narrows it before writing through the creating
-  handle, and refuses an existing name. The hook accepts only an owner-only work
-  directory and regular owner-only argument file, refuses an existing output
-  name and an application-supplied `-user`, and creates the
-  combined file with noclobber under a private umask. `-user` is asked of the
+  handle, checks the write result, and refuses an existing name. The hook accepts
+  only a non-empty, owner-only regular argument file, refuses an existing output
+  name and an application-supplied `-user`, checks each component copy, and
+  creates the combined file with noclobber under a private umask. `-user` is asked of the
   same `-emu_args_exit` vector used for heart, before its first `-extra`, rather
   than looked for in one file: flag variables, escapes and nested args files all
   reach erlexec and therefore all reach the answer. An unmeasurable vector is a

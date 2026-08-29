@@ -890,6 +890,16 @@ defmodule Forecastle.EnvScriptTest do
       assert File.read!(combined) == "not ours\n"
     end
 
+    test "refuses an empty peer argument handoff", %{root: root} do
+      work = peer_work(root, "")
+
+      run = start(root, [{"FORECASTLE_PEER_WORK", work}])
+
+      refute run.status == 0
+      assert run.stderr =~ "OTP peer arguments are empty"
+      refute File.exists?(Path.join(work, "vm.args"))
+    end
+
     test "refuses an application args file that already controls the user process", %{root: root} do
       work = peer_work(root)
       selected = Path.join(root, "selected.vm.args")

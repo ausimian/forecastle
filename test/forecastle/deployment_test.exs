@@ -926,6 +926,40 @@ defmodule Forecastle.DeploymentTest do
       assert File.read!(capture) == "dead@host\n"
     end
 
+    test "a failed replacement forgets the predecessor pid after confirming its exit" do
+      root = Path.join(@root, "failed-session-replacement")
+      File.rm_rf!(root)
+      File.mkdir_p!(Path.join(root, "bin"))
+      on_exit(fn -> File.rm_rf(root) end)
+      stub!(root, "my_app", "exit 7\n")
+
+      old_pid = exited_pid()
+      env_store = start_supervised!({Agent, fn -> session_store([], old_pid) end})
+
+      state = %{
+        deployment: Deployment.new(root, "my_app", boot_timeout: 100),
+        env: [],
+        env_store: env_store,
+        peer: nil,
+        os_pid: old_pid,
+        last_os_pid: nil,
+        install: nil,
+        down: nil,
+        exit_timeout: 100,
+        launcher_timeout: 1_000,
+        call_timeout: 100,
+        shutdown_timeout: 100
+      }
+
+      assert {:reply, {:error, message}, failed} =
+               Session.handle_call({:restart, []}, self(), state)
+
+      assert message =~ "stock launcher"
+      assert failed.os_pid == nil
+      assert failed.last_os_pid == nil
+      assert Agent.get(env_store, & &1.os_pid) == nil
+    end
+
     test "an unreachable environment store is not mistaken for completed teardown" do
       {:ok, env_store} = Agent.start(fn -> session_store([]) end)
       Agent.stop(env_store)
