@@ -165,7 +165,7 @@ defmodule Forecastle.CastleCliTest do
       # A refusal is final, so it is reported in full and nothing is left in
       # doubt for the epilogue to raise - and there is nothing to wait for: the
       # system said no, and polling would only delay the report.
-      refute err =~ "outcome is not known"
+      refute err =~ "result was not confirmed"
       assert calls(context) == ["rpc", "Castle.install(~s(0.1.1))"]
     end
 
@@ -224,7 +224,7 @@ defmodule Forecastle.CastleCliTest do
       stub_commit!(context, :done)
       assert ["rpc", expression] = castle!(context, ["commit"])
 
-      refute expression =~ "No release is awaiting commit"
+      refute expression =~ "No release awaits commit"
     end
 
     test "exits non-zero when there was nothing to commit", context do
@@ -233,7 +233,7 @@ defmodule Forecastle.CastleCliTest do
       assert {output, status} = castle(context, ["commit"])
 
       assert status == 1
-      assert output == "No release is awaiting commit. Pass a version explicitly.\n"
+      assert output == "No release awaits commit. Pass a version explicitly.\n"
       refute output =~ @nothing_to_commit_signal
     end
 
@@ -244,7 +244,7 @@ defmodule Forecastle.CastleCliTest do
       assert {output, 1} = castle(context, ["commit"])
 
       assert output ==
-               noise <> "\nNo release is awaiting commit. Pass a version explicitly.\n"
+               noise <> "\nNo release awaits commit. Pass a version explicitly.\n"
     end
 
     test "exits zero, and reports, when a commit happened", context do
@@ -269,7 +269,7 @@ defmodule Forecastle.CastleCliTest do
       assert {output, 1} = castle(context, ["commit"])
 
       assert output ==
-               "before\nafter\nNo release is awaiting commit. Pass a version explicitly.\n"
+               "before\nafter\nNo release awaits commit. Pass a version explicitly.\n"
     end
 
     test "a done record wins over a non-zero launcher status", context do
@@ -288,8 +288,7 @@ defmodule Forecastle.CastleCliTest do
       assert err ==
                "--rpc-eval : RPC failed with reason :noconnection\n" <>
                  "trailing launcher output\n" <>
-                 "WARNING: commit succeeded, but the launcher exited with status 7 after " <>
-                 "reporting the result.\n"
+                 "WARNING: commit succeeded. The launcher then exited with status 7.\n"
 
       refute out =~ @commit_done_signal
       refute err =~ @commit_done_signal
@@ -299,12 +298,11 @@ defmodule Forecastle.CastleCliTest do
       stub_commit_with_status!(context, :nothing, 6, "", "launcher warning", "")
 
       assert {out, err, 1} = castle_streams(context, ["commit"])
-      assert out == "No release is awaiting commit. Pass a version explicitly.\n"
+      assert out == "No release awaits commit. Pass a version explicitly.\n"
 
       assert err ==
                "launcher warning\n" <>
-                 "WARNING: no release was committed; the launcher exited with status 6 after " <>
-                 "reporting the result.\n"
+                 "WARNING: no release was committed. The launcher then exited with status 6.\n"
 
       refute out =~ @nothing_to_commit_signal
       refute err =~ @nothing_to_commit_signal
@@ -350,8 +348,8 @@ defmodule Forecastle.CastleCliTest do
 
       assert err ==
                "ordinary output only\n" <>
-                 "ERROR: commit returned no recognised result; it may or may not be permanent. " <>
-                 "Run bin/castle releases to inspect release state.\n"
+                 "ERROR: commit returned no recognised result. Whether the release is permanent " <>
+                 "is unknown. Run bin/castle releases.\n"
     end
 
     test "preserves a successful result when ordinary-output filtering fails", context do
@@ -361,7 +359,7 @@ defmodule Forecastle.CastleCliTest do
                castle_streams(context, ["commit"], failing_nth_tool(context, "awk", 2))
 
       assert out == ""
-      assert err == "WARNING: commit succeeded, but its ordinary output could not be displayed.\n"
+      assert err == "WARNING: commit succeeded. Its output is unavailable.\n"
       refute err =~ @commit_done_signal
       refute err =~ @nothing_to_commit_signal
     end
@@ -372,10 +370,9 @@ defmodule Forecastle.CastleCliTest do
       assert {out, err, 1} =
                castle_streams(context, ["commit"], failing_nth_tool(context, "awk", 2))
 
-      assert out == "No release is awaiting commit. Pass a version explicitly.\n"
+      assert out == "No release awaits commit. Pass a version explicitly.\n"
 
-      assert err ==
-               "WARNING: no release was committed, and ordinary command output could not be displayed.\n"
+      assert err == "WARNING: no release was committed. Command output is unavailable.\n"
 
       refute err =~ @commit_done_signal
       refute err =~ @nothing_to_commit_signal
@@ -390,8 +387,9 @@ defmodule Forecastle.CastleCliTest do
       assert out == ""
 
       assert err ==
-               "ERROR: commit result could not be read safely; it may or may not be permanent. " <>
-                 "Run bin/castle releases to inspect release state.\n"
+               "ERROR: cannot safely read the commit result. Whether the release is permanent " <>
+                 "is unknown. " <>
+                 "Run bin/castle releases.\n"
 
       refute err =~ @commit_done_signal
       refute err =~ @nothing_to_commit_signal
@@ -522,7 +520,7 @@ defmodule Forecastle.CastleCliTest do
       assert {output, 1} =
                castle(context, ["install", "0.1.1"], [{"CASTLE_INSTALL_TIMEOUT", "1"}])
 
-      assert output =~ "0.1.1 is not the running release, 1s after installing it"
+      assert output =~ "0.1.1 was not running 1s after installation"
       # And what the last attempt saw, which is what says where it went wrong.
       assert output =~ "0.1.1 is not the running release. 0.1.0 is."
     end
@@ -547,8 +545,8 @@ defmodule Forecastle.CastleCliTest do
       assert status != 0
 
       assert err ==
-               "ERROR: CASTLE_INSTALL_TIMEOUT must be a whole number of seconds, " <>
-                 "got: soon%0Aforged%0D%1B[31m%07\n"
+               "ERROR: CASTLE_INSTALL_TIMEOUT must be a whole number of seconds; " <>
+                 "got soon%0Aforged%0D%1B[31m%07.\n"
 
       refute recorded?(context)
     end
@@ -563,7 +561,7 @@ defmodule Forecastle.CastleCliTest do
 
       assert status != 0
       assert err =~ String.replace(tmp, "é", "%C3%A9")
-      assert err =~ "set RELEASE_TMP somewhere writable"
+      assert err =~ "Set RELEASE_TMP to a writable directory."
       refute recorded?(context)
     end
   end
@@ -600,7 +598,7 @@ defmodule Forecastle.CastleCliTest do
       {{output, status}, elapsed} = timed(fn -> install(context, "0.1.1", "3") end)
 
       assert status == 1
-      assert output =~ "3s after installing it"
+      assert output =~ "was not running 3s after installation"
       assert elapsed < @runaway, "a 3s timeout took #{elapsed}ms"
     end
 
@@ -612,7 +610,7 @@ defmodule Forecastle.CastleCliTest do
       {{output, status}, elapsed} = timed(fn -> install(context, "0.1.1", "1") end)
 
       assert status == 1
-      assert output =~ "1s after installing it"
+      assert output =~ "was not running 1s after installation"
       assert confirmations(context) >= 1
       assert elapsed < @runaway, "a 1s timeout took #{elapsed}ms"
     end
@@ -662,7 +660,7 @@ defmodule Forecastle.CastleCliTest do
       stub_confirmations!(context, :never)
 
       assert {output, 1} = install(context, "0.1.1", "01")
-      assert output =~ "1s after installing it"
+      assert output =~ "was not running 1s after installation"
     end
   end
 
@@ -716,7 +714,7 @@ defmodule Forecastle.CastleCliTest do
       assert {output, status} = castle(context, ["install", "0.1.1"], [{"RELEASE_TMP", tmp}])
 
       assert status != 0
-      assert output =~ "can be written by anyone and is not sticky"
+      assert output =~ "is writable by other users and has no sticky bit"
       assert output =~ "chmod +t"
       refute recorded?(context)
       assert File.ls!(tmp) == []
@@ -857,7 +855,7 @@ defmodule Forecastle.CastleCliTest do
       assert out == ""
       # What the install said, and that nothing confirmed it.
       assert occurrences(err, "Now running 0.1.1") == 1
-      assert err =~ "outcome is not known"
+      assert err =~ "result was not confirmed"
       assert err =~ "bin/castle releases"
       # Not only the clock's own complaint, which was the whole defect.
       assert err =~ "date +%s"
@@ -874,7 +872,7 @@ defmodule Forecastle.CastleCliTest do
       assert status != 0
       assert out == ""
       assert occurrences(err, "Now running 0.1.1") == 1
-      assert err =~ "outcome is not known"
+      assert err =~ "result was not confirmed"
       assert err =~ "bin/castle releases"
     end
 
@@ -889,13 +887,13 @@ defmodule Forecastle.CastleCliTest do
                ])
 
       assert occurrences(err, "Now running 0.1.1") == 1
-      assert occurrences(err, "is not the running release, 1s") == 1
-      refute err =~ "outcome is not known"
+      assert occurrences(err, "was not running 1s") == 1
+      refute err =~ "result was not confirmed"
 
       stub_launcher!(context, "echo '** (Castle.Error) Install of 0.1.1 failed.' >&2\nexit 3\n")
 
       assert {_out, failed, 3} = castle_streams(context, ["install", "0.1.1"])
-      refute failed =~ "outcome is not known"
+      refute failed =~ "result was not confirmed"
     end
   end
 
@@ -1040,7 +1038,7 @@ defmodule Forecastle.CastleCliTest do
       assert out == ""
       assert occurrences(err, "RPC failed with reason :noconnection") == 1
       assert occurrences(err, "Now running") == 1
-      assert err =~ "is not the running release, 1s after installing it"
+      assert err =~ "was not running 1s after installation"
     end
 
     test "leaves what the launcher wrote to standard error on standard error", context do
@@ -1081,7 +1079,7 @@ defmodule Forecastle.CastleCliTest do
 
       assert occurrences(out, "Now running") == 0
       assert occurrences(err, "Now running") == 1
-      assert err =~ "is not the running release, 1s after installing it"
+      assert err =~ "was not running 1s after installation"
     end
 
     test "stays on standard error when the node went away and came back", context do
@@ -1133,7 +1131,8 @@ defmodule Forecastle.CastleCliTest do
 
       assert status != 0
       assert out == ""
-      assert err =~ "install cannot use release version [0.1.1%0A--rpc-eval"
+      assert err =~ "release version [0.1.1%0A--rpc-eval"
+      assert err =~ "is not valid for install"
       refute recorded?(context)
     end
   end
@@ -1165,22 +1164,22 @@ defmodule Forecastle.CastleCliTest do
   describe "usage" do
     test "is printed, with a zero exit, when no command is given", context do
       assert {output, 0} = castle(context, [])
-      assert output =~ "The known commands are:"
+      assert output =~ "Commands:"
       refute recorded?(context)
     end
 
     test "is printed, with a non-zero exit, for an unknown command", context do
       assert {output, status} = castle(context, ["frobnicate"])
       assert status != 0
-      assert output =~ "Unknown command frobnicate"
+      assert output =~ "unknown command: frobnicate"
       refute recorded?(context)
     end
 
     test "documents that commit's version is optional", context do
       assert {output, 0} = castle(context, [])
       assert output =~ ~r/commit \[VSN\]/
-      assert output =~ "With no VSN, commits the release awaiting commit"
-      assert output =~ "when there is none"
+      assert output =~ "Without VSN, commit the release awaiting commit"
+      assert output =~ "if none exists"
     end
 
     test "documents upgradable, and that the operations ask it for themselves", context do
@@ -1189,20 +1188,22 @@ defmodule Forecastle.CastleCliTest do
       # one - and that asking it first is not a step they are missing.
       assert {output, 0} = castle(context, [])
 
-      assert output =~ ~r/upgradable\s+Asks whether the system can be upgraded from/
-      assert output =~ "saying nothing if it can"
-      assert output =~ "ask that same question themselves"
-      assert output =~ "cannot upgrade from that state"
-      assert output =~ "If the release root should be writable"
+      assert output =~
+               ~r/upgradable\s+Check whether an upgrade can start from the running release/
+
+      assert output =~ "No output means yes"
+      assert output =~ "before unpack or install can run"
+      assert output =~ "Both commands"
+      assert output =~ ~r/restore\s+releases\/RELEASES and restart/
     end
 
     test "describes OTP's fallback release record accurately", context do
       assert {output, 0} = castle(context, [])
 
-      assert output =~ ~r/OTP is\s+using a fallback release record/
-      assert output =~ "instead of one loaded from releases/RELEASES"
+      assert output =~ "OTP must load releases/RELEASES"
+      assert output =~ "fallback release record"
       assert output =~ ~r/read-only deployment can run and\s+restart/
-      assert output =~ "cannot take an upgrade"
+      assert output =~ "cannot be upgraded"
     end
 
     test "documents the timeout install waits for, and its default", context do
@@ -1212,7 +1213,7 @@ defmodule Forecastle.CastleCliTest do
       assert output =~ "86400"
       # And that it bounds the asking rather than any single question, which is
       # what an operator wanting a hard limit needs to know.
-      assert output =~ "not an individual question"
+      assert output =~ ~r/does not limit a\s+single RPC/
     end
 
     test "does not echo control bytes from the timeout in help", context do
@@ -1222,7 +1223,7 @@ defmodule Forecastle.CastleCliTest do
                castle_streams(context, [], [{"CASTLE_INSTALL_TIMEOUT", hostile}])
 
       assert out == ""
-      assert err =~ "(300%0Aforged%0D%1B[31m%07, at most 86400)"
+      assert err =~ "(300%0Aforged%0D%1B[31m%07; maximum 86400)"
       refute err =~ "\r"
       refute err =~ "\e"
       refute err =~ "\a"
@@ -1233,7 +1234,7 @@ defmodule Forecastle.CastleCliTest do
         assert {output, status} = castle(context, [unquote(command)])
 
         assert status != 0
-        assert output =~ "#{unquote(command)} expects a version as argument"
+        assert output =~ "#{unquote(command)} requires a version."
         refute recorded?(context)
       end
     end
@@ -1271,7 +1272,8 @@ defmodule Forecastle.CastleCliTest do
           assert {output, status} = castle(context, [command, unquote(version)])
 
           assert status != 0, "#{command} accepted #{inspect(unquote(version))}"
-          assert output =~ "ERROR: #{command} cannot use release version ["
+          assert output =~ "ERROR: release version ["
+          assert output =~ "] is not valid for #{command}"
           refute recorded?(context), "#{command} delegated #{inspect(unquote(version))}"
         end
       end
@@ -1293,7 +1295,10 @@ defmodule Forecastle.CastleCliTest do
         assert {"", err, status} = castle_streams(context, ["install", version])
 
         assert status != 0
-        assert err == "ERROR: install cannot use release version [0.1.1#{encoded}forged]\n"
+
+        assert err ==
+                 "ERROR: release version [0.1.1#{encoded}forged] is not valid for install.\n"
+
         refute recorded?(context)
       end
     end
@@ -1314,7 +1319,10 @@ defmodule Forecastle.CastleCliTest do
 
         assert {output, status} = castle(context, ["remove", version])
         assert status != 0
-        assert output == "ERROR: remove cannot use release version [1.2.3-#{encoded}]\n"
+
+        assert output ==
+                 "ERROR: release version [1.2.3-#{encoded}] is not valid for remove.\n"
+
         refute recorded?(context)
       end
     end
@@ -1330,8 +1338,8 @@ defmodule Forecastle.CastleCliTest do
         assert status != 0
 
         assert err ==
-                 "ERROR: install cannot validate release version [<unprintable>]; " <>
-                   "release-version validation is unavailable. Check od and awk.\n"
+                 "ERROR: cannot validate release version [<unprintable>] for install. " <>
+                   "Check that od and awk are available.\n"
 
         refute recorded?(context)
       end
@@ -1346,8 +1354,8 @@ defmodule Forecastle.CastleCliTest do
       assert status != 0
 
       assert err ==
-               "ERROR: remove cannot validate release version [1.2.3-caf%C3%A9]; " <>
-                 "release-version validation is unavailable. Check od and awk.\n"
+               "ERROR: cannot validate release version [1.2.3-caf%C3%A9] for remove. " <>
+                 "Check that od and awk are available.\n"
 
       refute recorded?(context)
     end
@@ -1386,7 +1394,7 @@ defmodule Forecastle.CastleCliTest do
         assert {"", err, status} = castle_streams(context, ["remove", version])
 
         assert status != 0
-        assert err == "ERROR: remove cannot use release version [#{version}]\n"
+        assert err == "ERROR: release version [#{version}] is not valid for remove.\n"
         refute err =~ "\e"
         refute recorded?(context)
       end

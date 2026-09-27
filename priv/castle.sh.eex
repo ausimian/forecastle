@@ -216,7 +216,7 @@ validate_vsn () {
       version_display=$(castle_safe_display "$version") ||
         version_display="<unprintable>"
       printf '%s\n' \
-        "ERROR: $command cannot validate release version [$version_display]; release-version validation is unavailable. Check od and awk." >&2
+        "ERROR: cannot validate release version [$version_display] for $command. Check that od and awk are available." >&2
       exit 1
       ;;
   esac
@@ -224,14 +224,14 @@ validate_vsn () {
   if [ -n "$invalid" ]; then
     version_display=$(castle_safe_display "$version") || version_display="<unprintable>"
     printf '%s\n' \
-      "ERROR: $command cannot use release version [$version_display]" >&2
+      "ERROR: release version [$version_display] is not valid for $command." >&2
     exit 1
   fi
 }
 
 require_vsn () {
   if [ -z "$2" ]; then
-    printf '%s\n' "ERROR: $1 expects a version as argument" >&2
+    printf '%s\n' "ERROR: $1 requires a version." >&2
     exit 1
   fi
 
@@ -273,7 +273,7 @@ canonical_timeout () {
     "" | *[!0-9]*)
       timeout_display=$(castle_safe_display "$1") || timeout_display="<unprintable>"
       printf '%s\n' \
-        "ERROR: CASTLE_INSTALL_TIMEOUT must be a whole number of seconds, got: $timeout_display" >&2
+        "ERROR: CASTLE_INSTALL_TIMEOUT must be a whole number of seconds; got $timeout_display." >&2
       return 1
       ;;
   esac
@@ -291,7 +291,7 @@ canonical_timeout () {
   if [ "${#seconds}" -gt 9 ] || [ "$seconds" -gt "$install_timeout_max" ]; then
     timeout_display=$(castle_safe_display "$1") || timeout_display="<unprintable>"
     printf '%s\n' \
-      "ERROR: CASTLE_INSTALL_TIMEOUT must be at most ${install_timeout_max}s, got: $timeout_display" >&2
+      "ERROR: CASTLE_INSTALL_TIMEOUT must not exceed ${install_timeout_max}s; got $timeout_display." >&2
     return 1
   fi
 
@@ -313,7 +313,7 @@ clock_now () {
     "" | *[!0-9]*)
       now_display=$(castle_safe_display "$now") || now_display="<unprintable>"
       printf '%s\n' \
-        "ERROR: date +%s did not report the seconds since the epoch, which install needs to time itself; got: $now_display" >&2
+        "ERROR: install needs date +%s to return whole seconds since the epoch; got $now_display." >&2
       return 1
       ;;
   esac
@@ -343,7 +343,7 @@ scratch_dir () {
   if ! mkdir -p "$CASTLE_TMP" 2>/dev/null; then
     tmp_display=$(castle_safe_display "$CASTLE_TMP") || tmp_display="<unprintable>"
     printf '%s\n' \
-      "ERROR: cannot create $tmp_display, which install needs to capture what the system reports; set RELEASE_TMP somewhere writable" >&2
+      "ERROR: cannot create $tmp_display. Set RELEASE_TMP to a writable directory." >&2
     return 1
   fi
 
@@ -364,7 +364,7 @@ scratch_dir () {
       [ -n "$(find -L "$CASTLE_TMP" -prune -perm -0002 2>/dev/null)" ]; then
     tmp_display=$(castle_safe_display "$CASTLE_TMP") || tmp_display="<unprintable>"
     printf '%s\n' \
-      "ERROR: $tmp_display can be written by anyone and is not sticky, so another user could replace what install captures into after it has been created. Set the sticky bit on it (chmod +t), or point RELEASE_TMP at a directory of your own" >&2
+      "ERROR: $tmp_display is writable by other users and has no sticky bit. Run chmod +t on it, or set RELEASE_TMP to a private directory." >&2
     return 1
   fi
 
@@ -373,7 +373,7 @@ scratch_dir () {
   if ! (umask 077 && mkdir "$dir" 2>/dev/null); then
     dir_display=$(castle_safe_display "$dir") || dir_display="<unprintable>"
     printf '%s\n' \
-      "ERROR: cannot claim $dir_display, which install needs to capture what the system reports. Another install may be running under this process id, or one that was killed may have left it behind - remove it if nothing is using it" >&2
+      "ERROR: cannot claim $dir_display for install output. Another install may be using it. If not, remove the directory and retry." >&2
     return 1
   fi
 
@@ -407,7 +407,7 @@ install_epilogue () {
     fi
 
     printf '%s\n' \
-      "ERROR: install of $install_vsn was started and its outcome is not known - nothing above confirmed it. Ask the system what it is running: bin/castle releases" >&2
+      "ERROR: install of $install_vsn started. Its result was not confirmed. Run bin/castle releases to check which version is running." >&2
   fi
 
   rm -rf "$install_scratch" 2>/dev/null || true
@@ -589,7 +589,7 @@ install_and_confirm () {
       fi
 
       printf '%s\n' \
-        "ERROR: $1 is not the running release, ${install_timeout}s after installing it" >&2
+        "ERROR: $1 was not running ${install_timeout}s after installation." >&2
       install_outcome=reported
 
       exit 1
@@ -688,7 +688,7 @@ case $1 in
       # from this invocation's record. Never replay captured output on this path.
       if [ "$commit_parse_status" -ne 0 ]; then
         printf '%s\n' \
-          "ERROR: commit result could not be read safely; it may or may not be permanent. Run bin/castle releases to inspect release state." >&2
+          "ERROR: cannot safely read the commit result. Whether the release is permanent is unknown. Run bin/castle releases." >&2
 
         if [ "$commit_status" -ne 0 ]; then
           exit "$commit_status"
@@ -707,7 +707,7 @@ case $1 in
         fi
 
         printf '%s\n' \
-          "ERROR: commit returned no recognised result; it may or may not be permanent. Run bin/castle releases to inspect release state." >&2
+          "ERROR: commit returned no recognised result. Whether the release is permanent is unknown. Run bin/castle releases." >&2
         exit 1
       fi
 
@@ -744,12 +744,12 @@ case $1 in
             case $commit_result in
               done)
                 printf '%s\n' \
-                  "WARNING: commit succeeded, but its ordinary output could not be displayed." >&2
+                  "WARNING: commit succeeded. Its output is unavailable." >&2
                 ;;
 
               nothing)
                 printf '%s\n' \
-                  "WARNING: no release was committed, and ordinary command output could not be displayed." >&2
+                  "WARNING: no release was committed. Command output is unavailable." >&2
                 ;;
             esac
           else
@@ -766,12 +766,12 @@ case $1 in
             case $commit_result in
               done)
                 printf '%s\n' \
-                  "WARNING: commit succeeded, but the launcher exited with status $commit_status after reporting the result." >&2
+                  "WARNING: commit succeeded. The launcher then exited with status $commit_status." >&2
                 ;;
 
               nothing)
                 printf '%s\n' \
-                  "WARNING: no release was committed; the launcher exited with status $commit_status after reporting the result." >&2
+                  "WARNING: no release was committed. The launcher then exited with status $commit_status." >&2
                 ;;
             esac
           fi
@@ -779,13 +779,13 @@ case $1 in
 
         *)
           printf '%s\n' \
-            "ERROR: commit result could not be read safely; it may or may not be permanent. Run bin/castle releases to inspect release state." >&2
+            "ERROR: cannot safely read the commit result. Whether the release is permanent is unknown. Run bin/castle releases." >&2
           exit 1
           ;;
       esac
 
       if [ "$commit_result" = "nothing" ]; then
-        printf '%s\n' "No release is awaiting commit. Pass a version explicitly."
+        printf '%s\n' "No release awaits commit. Pass a version explicitly."
         exit 1
       fi
     fi
@@ -797,42 +797,40 @@ case $1 in
     usage_name=$(castle_safe_display "$(basename "$0")") || usage_name="<unprintable>"
     usage_message="Usage: $usage_name COMMAND [ARGS]
 
-Manages the releases known to a running system. The system itself is
-controlled through the standard launcher, bin/<%= release.name %>.
+Manage releases on a running system through bin/<%= release.name %>.
 
-The known commands are:
+Commands:
 
-    releases       Lists the releases currently known to the system, and their status
-    upgradable     Asks whether the system can be upgraded from, saying nothing if it can
-    unpack \"VSN\"   Unpacks $RELEASE_TARBALL_PREFIX-<VSN>.tar.gz
-    install \"VSN\"  Installs VSN and waits until it is the version running now
-    commit [VSN]   Commits VSN, so that it becomes the version that runs on restart.
-                   With no VSN, commits the release awaiting commit, and says so
-                   when there is none.
-    remove \"VSN\"   Uninstalls VSN from the system
+    releases       List known releases and their status.
+    upgradable     Check whether an upgrade can start from the running release.
+                   No output means yes.
+    unpack \"VSN\"   Unpack $RELEASE_TARBALL_PREFIX-<VSN>.tar.gz.
+    install \"VSN\"  Install VSN, then wait for it to start running.
+    commit [VSN]   Make VSN permanent; restarts will boot it.
+                   Without VSN, commit the release awaiting commit. Exit non-zero
+                   if none exists.
+    remove \"VSN\"   Remove VSN from the system.
 
-unpack and install ask that same question themselves. They refuse while OTP is
-using a fallback release record instead of one loaded from releases/RELEASES.
-They cannot upgrade from that state. If the release root should be writable,
-resolve the RELEASES problem and restart. A read-only deployment can run and
-restart but cannot take an upgrade.
+OTP must load releases/RELEASES before unpack or install can run. Both commands
+refuse OTP's fallback release record. For a writable release root, restore
+releases/RELEASES and restart. A read-only deployment can run and restart. It
+cannot be upgraded.
 
-An upgrade is not complete when the system accepts it: one that restarts the
-emulator is still to reboot, and one that replaces the emulator finishes on the
-way back up. So install asks the system what it is running until it answers
-with the version installed, and fails if it never does.
+Some upgrades continue after OTP accepts them. An emulator restart still has to
+reboot; an emulator replacement finishes during startup. The install command
+checks the running version until VSN appears. If it never does, install fails.
 
-CASTLE_INSTALL_TIMEOUT is how long it keeps asking, in seconds
-($timeout_help_display, at most ${install_timeout_max}). It bounds the
-asking, not an individual question: a node that keeps the connection open
-without answering is waited on indefinitely, so a hard limit has to come from
-outside, from timeout(1) or whatever runs this.
+CASTLE_INSTALL_TIMEOUT sets the polling window in seconds
+($timeout_help_display; maximum ${install_timeout_max}). It does not limit a
+single RPC. A node that keeps the connection open without answering can hold the
+command indefinitely. Use timeout(1) or the service supervisor to set a hard
+limit.
 "
     printf '%s\n' "$usage_message" >&2
 
     if [ -n "$1" ]; then
       command_display=$(castle_safe_display "$1") || command_display="<unprintable>"
-      printf '%s\n' "ERROR: Unknown command $command_display" >&2
+      printf '%s\n' "ERROR: unknown command: $command_display." >&2
       exit 1
     fi
     ;;

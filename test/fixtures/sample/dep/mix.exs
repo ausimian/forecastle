@@ -19,7 +19,7 @@ defmodule SampleDep.MixProject do
       app: :sample_dep,
       version: version(),
       elixir: "~> 1.18",
-      appup: "appup.exs",
+      appup: appup(),
       compilers: Mix.compilers() ++ [:appup],
       deps: deps()
     ]
@@ -29,12 +29,26 @@ defmodule SampleDep.MixProject do
     [extra_applications: []]
   end
 
+  # Switched by the test suite so that the fixture can present the state the
+  # project-supplied appups exist for: a dependency that ships none of its own,
+  # which is what a dependency taken from Hex almost always is. Unset, it ships
+  # the file beside this one, as it always did.
+  #
+  # "none" rather than an empty value, for the reason the sample's own
+  # `SAMPLE_APPUP` gives: `System.cmd/3` cannot pass an empty one.
+  defp appup do
+    case System.get_env("SAMPLE_DEP_APPUP", "appup.exs") do
+      "none" -> nil
+      path -> path
+    end
+  end
+
   @doc """
   This application's version, which `appup.exs` needs too.
 
   `SAMPLE_DEP_VSN` pins it independently of the sample's, so that the fixture
   can be assembled as a transition in which *only* project-owned applications
-  changed. `mix forecastle.relup`'s `auto` strategy makes a transition a restart
+  changed. `mix castle.relup`'s `auto` strategy makes a transition a restart
   when the version of an application the project does not own moved, and this
   application - a dependency of the sample - otherwise always moves with it.
   Unset, which is how every other suite builds the fixture, it moves in step as
@@ -43,6 +57,8 @@ defmodule SampleDep.MixProject do
   def version, do: System.get_env("SAMPLE_DEP_VSN") || System.get_env("SAMPLE_VSN", "0.1.0")
 
   defp deps do
-    [{:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle)}]
+    # Build-time only, for the `:appup` compiler above. See the sample's own
+    # `mix.exs` for why the shape matters.
+    [{:forecastle, path: System.get_env("FORECASTLE_PATH", @forecastle), runtime: false}]
   end
 end

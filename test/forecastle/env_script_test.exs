@@ -182,6 +182,37 @@ defmodule Forecastle.EnvScriptTest do
     end
   end
 
+  describe "the RELEASES bootstrap" do
+    test "runs before Forecastle exports its heart flag", %{root: root} do
+      File.rm!(Path.join(root, "releases/RELEASES"))
+      bootstrap_elixir(root, :ok)
+
+      run = start(root)
+
+      assert File.read!(Path.join(root, "bootstrap-options")) == "<unset>\n"
+      assert File.read!(Path.join(root, "releases/RELEASES")) == "[].\n"
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      refute run.stderr =~ "Erlang has closed"
+      refute run.stderr =~ "Would reboot"
+    end
+
+    test "exports its heart flag after a failed bootstrap", %{root: root} do
+      File.rm!(Path.join(root, "releases/RELEASES"))
+      bootstrap_elixir(root, :error)
+
+      run = start(root)
+
+      assert File.read!(Path.join(root, "bootstrap-options")) == "<unset>\n"
+      assert run.status == 0
+      assert run.env["ELIXIR_ERL_OPTIONS"] == "-heart"
+      assert run.env["CASTLE_HEART_FLAGS"] == "1"
+      assert run.stderr =~ "bootstrap failed"
+      assert run.stderr =~ "cannot create"
+      refute File.exists?(Path.join(root, "releases/RELEASES"))
+    end
+  end
+
   # **The fragment does not read these variables to decide anything; it asks
   # erlexec what the argument vector came out as.** That is the fix, and the
   # matrix below is why it had to be: erlexec applies shell-style quoting and
@@ -1591,6 +1622,47 @@ defmodule Forecastle.EnvScriptTest do
       Path.join([root, "releases", vsn, "elixir"]),
       ~s|ERTS_BIN=\nERTS_BIN="$SCRIPT_PATH"/../../#{erts}/bin/\n|
     )
+  end
+
+  # An executable stand-in for the first-start VM. It keeps the ERTS_BIN line
+  # the fragment parses from Mix's generated elixir script, records whether the
+  # helper inherited Forecastle's -heart, and then either creates RELEASES or
+  # fails as the real Castle.make_releases/0 call can. The lifecycle lines are
+  # emitted only when the helper received that flag, so the success test fails
+  # against the old ordering for the same reason the real daemon command did.
+  defp bootstrap_elixir(root, outcome) do
+    action =
+      case outcome do
+        :ok ->
+          """
+          case ${ELIXIR_ERL_OPTIONS-} in
+            *-heart*)
+              printf '%s\n' 'heart: Erlang has closed.' >&2
+              printf '%s\n' 'heart: Would reboot. Terminating.' >&2
+              ;;
+          esac
+          printf '[].\n' > "$RELEASE_ROOT/releases/RELEASES"
+          exit 0
+          """
+
+        :error ->
+          """
+          printf '%s\n' 'bootstrap failed' >&2
+          exit 23
+          """
+      end
+
+    path = Path.join([root, "releases", @vsn, "elixir"])
+
+    File.write!(path, """
+    #!/bin/sh
+    ERTS_BIN=
+    ERTS_BIN="$SCRIPT_PATH"/../../#{@erts}/bin/
+    printf '%s\n' "${ELIXIR_ERL_OPTIONS-<unset>}" > "$RELEASE_ROOT/bootstrap-options"
+    #{action}
+    """)
+
+    File.chmod!(path, 0o755)
   end
 
   # The same file as a release with `include_erts: false` has it, which is Mix's

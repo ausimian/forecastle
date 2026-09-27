@@ -1,728 +1,179 @@
+Forecastle 1.0 stops intercepting runtime configuration and stops replacing the
+Mix launcher. Release management moves to a separate `bin/castle`, relups can be
+generated during `mix release`, and new tasks check and draft appups. It
+requires Castle 1.x and Elixir 1.18 or later; an older Castle cannot install a
+release built by this Forecastle. Read *Upgrading an existing deployment* below
+before upgrading: the security fix in this release does not reach an existing
+deployment through a hot upgrade.
+
 ### Added
 
-- `bin/castle`, a release management CLI, is now installed alongside the
-  standard launcher. It provides `releases`, `upgradable`, `unpack`, `install`,
-  `commit` and `remove`, and delegates to the running system through the standard
-  launcher.
-- `bin/castle upgradable` asks whether the system can be upgraded from, for an
-  operator who wants to know where one stands without staging or installing
-  anything. It says nothing when it can, and exits zero; when it cannot, it
-  reports the same refusal `unpack` and `install` would, and exits non-zero.
-  Nothing has to call it first — those two ask the question for themselves, from
-  inside the operation.
-- `bin/castle commit` may now be given no version, in which case it commits the
-  provisional release awaiting commit. It exits non-zero if there is none, so
-  automation can tell nothing was committed.
-- `bin/castle install` now confirms that the version it installed is the one
-  running before it reports success, rather than trusting what
-  `release_handler` replied. That reply says only that the upgrade was
-  accepted: a transition that restarts the emulator is replied to and *then*
-  reboots, so a successful upgrade can arrive back here as a lost connection,
-  and an upgrade that replaces the emulator finishes on the way back up, where
-  it can still fail and roll back. A reply that the node has gone away is
-  therefore taken to settle nothing either way, and `install` polls
-  `Castle.running/1` until the version is running - exiting 0 only then, and
-  non-zero on a real failure or if the version never becomes the running one.
-  What the install printed on standard output is held back until the version has
-  been confirmed. Only then does it go to standard output as the report of
-  success it is; if the version is never confirmed it goes to standard error
-  with the rest of the diagnosis instead, so nothing on the success stream ever
-  describes an install that did not take effect. What the launcher wrote to
-  standard error stays on standard error throughout - from the install, and from
-  every confirmation after it: the two streams are captured separately, so a
-  warning from the VM, or from a config provider running in the peer that
-  resolves the target's configuration, arrives where a pipeline watching that
-  stream will find it, including when it arrives just as the upgrade is being
-  declared good.
-
-  Everything that could refuse to go on is settled before the install runs - the
-  timeout, the clock, and somewhere to capture what the launcher says, which is
-  a directory `install` creates for itself under `RELEASE_TMP` and removes when
-  it is done. Past that point the system is on another release, and stopping
-  there would leave that unsaid and unconfirmed.
-
-  And when something does go wrong past that point - the deadline has to be
-  timed from after the install, so not everything can be settled in advance -
-  what the install said is reported anyway, along with the fact that nothing
-  confirmed it and a pointer at `bin/castle releases`. A failure late in the
-  wait never leaves an operator holding a diagnostic about a clock or a
-  temporary file with no mention of the release that moved.
-
-  One of those checks is worth spelling out, because it can refuse a directory
-  that would have been used before: `RELEASE_TMP` must not be writable by
-  everyone unless it is sticky. Where it is, another user can rename the capture
-  directory and leave a symlink in its place, whatever mode it was created
-  with - renaming an entry is the parent directory's business, not the entry's -
-  so `install` says so and stops rather than racing it. Neither ordinary setting
-  is affected: the default is a `tmp` directory inside the release itself, and
-  `/tmp` is sticky on every mainstream Unix, which is exactly what the sticky bit
-  is for. A shared directory that is world-writable and *not* sticky is the one
-  case, and `chmod +t` on it, or a `RELEASE_TMP` of the operator's own, is what
-  the message asks for.
-
-  `CASTLE_INSTALL_TIMEOUT` sets how long it keeps asking, in seconds, and
-  defaults to 300, with 86400 the most it accepts: how long a reboot takes is a
-  property of the system being upgraded. It is a deadline in elapsed time
-  rather than a count of attempts, so the time the attempts themselves take
-  counts against it, and the clock is whole seconds, so the wait can come out
-  up to a second short of the number given. It is the system clock, so a
-  correction to that clock while `install` is waiting moves the deadline with
-  it; there is no monotonic clock to be had from a POSIX shell, and elapsed
-  wall-clock time is what a number of seconds means to an operator anyway.
-
-  It is a deadline for the *retrying*, not a limit on any single question.
-  Nothing can interrupt one already in flight: `rpc` reaches the node through
-  `:erpc`, which waits indefinitely, so a node that holds the connection open
-  without answering holds the attempt with it - as it would hold the install
-  itself, which happens before the deadline exists at all. An operator who
-  needs a hard bound has to impose one from outside, with `timeout(1)` or
-  whatever runs the deployment.
-
-  Worth knowing before it surprises anyone: a lost connection is exactly what a
-  successful restart looks like from out here, and so is a wrong cookie, or a
-  node that was already down. `install` asks about those until the deadline and
-  then fails, rather than failing at once. That is honest - it genuinely cannot
-  tell whether the system is coming back - but with the default it means a
-  five-minute wait for a typo in `RELEASE_COOKIE`. Set `CASTLE_INSTALL_TIMEOUT`
-  low when driving a system that is known to be reachable.
-
-  And the other way round: interrupting `bin/castle install` stops the waiting,
-  not the upgrade. The work runs on the system being upgraded, in
-  `release_handler`, and it carries on whether or not anything is still
-  listening - so a version may well become the running one after the command
-  that asked for it has gone. `bin/castle releases` is how to find out where
-  the system actually got to.
-
-  That polling is what carries an emulator restart, and it is the reason the
-  initial reply cannot be trusted: `release_handler` accepts a
-  `restart_emulator` transition and then reboots, so the reply may not even
-  survive long enough to arrive.
-  `install` treats a lost connection as settling nothing and keeps asking until
-  the version it installed answers - across the reboot, and across the cold boot
-  after it. Both paths are covered end to end by the `:e2e` suite, and every
-  branch of the shell logic - inconclusive, confirmed, failed, timed out - against
-  a launcher stub as well. A continuation that fails and rolls back on the way up
-  belongs to `restart_new_emulator`, which is not supported; see *Known
-  limitations*.
-- `mix forecastle.relup` now takes an upgrade strategy, because whether a
-  transition can be hot is a property of the edge between two releases rather
-  than of either release. `--hot` requires a genuine hot upgrade and fails,
-  having written nothing, if the transition cannot be one - a missing appup
-  entry, an ERTS change, or an appup that asks for the emulator to be restarted -
-  which is what a pipeline that promises zero downtime needs. `--restart` makes
-  every transition in the relup a single `restart_emulator` instruction, written
-  directly, with no appup read for any application, not even one the project
-  owns: the escape hatch for a change whose upgrade instructions are not worth
-  maintaining. With
-  neither, the strategy is `auto`, and each transition is generated from the
-  appups unless something in it cannot be hot-upgraded - in which case that
-  transition, and only that one, becomes a restart.
-
-  `auto` makes a transition a restart when the ERTS version changed - which is
-  not a hot upgrade under any policy, and which no appup could make one - or when
-  the version of an application the project does not own changed and *no appup
-  covers that move*: a dependency, one of Elixir's own applications, or one of
-  OTP's. An appup entry that names the from-version is an instruction for this
-  transition whoever wrote it, so an edge it covers stays hot; nothing matching
-  means there is no hot upgrade to be had. The appup read is the one beside the
-  target release's copy of the application,
-  `lib/<app>-<vsn>/ebin/<app>.appup`, and the from-version is matched the way
-  `systools_relup` matches it, so an appup that names a from-version as a regex
-  resolves here exactly as it will during the upgrade.
-
-  Each direction is classified on its own, because an appup's upgrade and
-  downgrade lists are independent and a from-version in one need not be in the
-  other: a relup may carry a hot upgrade from a version and a restart back down
-  to it. Applications merely added or removed are left to `systools`, since
-  starting or stopping one is hot. Which transitions were chosen, and why, is
-  printed.
-
-  Every restart generated is the one-stage `restart_emulator`: the relup is
-  evaluated in full in the running system, and the emulator then reboots. The
-  two-stage `restart_new_emulator` - which boots a hybrid temporary release
-  carrying the new ERTS, kernel, stdlib and sasl over the old applications, and
-  continues the relup on the way up - is not a strategy here. It is refused
-  where it turns up. The task keeps the exact instruction name in its output
-  because the two transitions behave differently.
-
-  That is also why `auto` decides the ERTS case for itself rather than asking
-  `systools` and taking what comes: `systools` inserts `restart_new_emulator` on
-  its own whenever the ERTS version differs between the two releases, so a
-  default strategy that simply generated a relup would ship the two-stage
-  transition without anybody having chosen it. An ERTS change becomes a
-  `restart_emulator` transition instead, and whatever `systools` does produce for
-  the remaining transitions is inspected, so a `restart_new_emulator` arriving
-  through an appup is refused rather than packaged.
-
-  `auto` does not fall back to a restart when an appup for an application the
-  project *does* own is missing, either. A transition it judged hot and `systools`
-  then could not generate is a failure, so that the default never silently ships
-  something other than the upgrade it decided on; ask for the restart with
-  `--restart`.
-
-  A run says which transitions restart - or that none of them do - exactly once,
-  and the announcement names both ways a restart can arrive: the edges `auto`
-  classified, with the reason for each, and any `restart_emulator` an appup asked
-  for by name. It also says that the emulator reboots into a provisional release
-  that must be committed. Both kinds are settled after generation, because only
-  one of them is knowable before it: an appup's own instruction is invisible
-  until `systools` has produced a script. `--hot` and `--restart` remain the ways
-  to insist on something else.
-- The release now selects a provisional version after an upgrade that restarted
-  the emulator, which is what makes such an upgrade work on a deployment
-  supervised by systemd, Docker, Kubernetes or runit.
-
-  `release_handler` writes the version it installed to
-  `releases/new_start_erl.data` and deliberately leaves
-  `releases/start_erl.data` - which is where the stock launcher reads
-  `RELEASE_VSN` from - naming the version that is still permanent. That is the
-  rollback property, and it is worth keeping: a provisional release that dies
-  before `bin/castle commit` is followed by an ordinary start of the version that
-  was permanent before, with nobody intervening. What it costs is that something
-  has to select the installed version on the boot after the reboot, and the
-  `env.sh` fragment is now that something.
-
-  It requires *two* markers, not one, and it re-execs the launcher rather than
-  assigning `RELEASE_VSN` in place. Two markers, because `new_start_erl.data` is
-  written before the reboot and never removed, so on its own it is not evidence
-  that a reboot was asked for: Castle arms a marker of its own beside it and
-  clears it if the install failed, and the fragment requires both files and
-  requires them to name one version. A re-exec, because by the time the launcher
-  sources `env.sh` it has already resolved the version directory, and everything
-  it goes on to use - the boot script, `vm.args`, `sys.config`, the `elixir`
-  launcher itself - hangs off that. With no valid pair, the stock launcher reads
-  `start_erl.data` exactly as it always did.
-  A malformed OTP marker is renamed to `new_start_erl.data.rejected.<pid>` for
-  inspection; its contents are not printed or left able to control another start.
-  Marker values in a warning are percent-encoded rather than replaced by a
-  label, so the release is still named. An ordinary space survives that
-  encoding, which matters because OTP builds its marker as `EVsn ++ " " ++ Vsn`
-  and the fragment keeps the remainder exactly: Mix permits spaces in versions,
-  so a space-bearing release is still named in the warning that tells an
-  operator which releases to inspect.
-
-  The selection comes before anything else the hook configures, and that is
-  load-bearing rather than tidy. Re-exec'ing means the hook is read again, so
-  anything decided beforehand is decided about the version being *replaced* - and
-  exported to the pass that boots. `heart` is the case that shows it: the two
-  versions can carry different `vm.args`, so whether the emulator is already
-  getting a `-heart` has to be asked about the one that will actually start.
-  Everything after the selection is therefore settled once, by that pass.
-
-  What is atomic is the *claim*, and it is worth being exact about because the
-  rest follows from it. The fragment takes Castle's marker by renaming it, which
-  is one operation, so exactly one start can act on the pair however many are
-  racing. OTP's file is then read and removed in further steps, and no POSIX
-  operation moves two files together - so the pair is not consumed as a unit, and
-  the order is what makes that safe: the marker goes first, so a start killed
-  part way through leaves no marker behind, and the next start reads
-  `start_erl.data` and boots the version that was permanent. A provisional
-  selection can therefore be lost by an ill-timed kill. It cannot be applied
-  twice, and it cannot be applied to a version that was never installed.
-- The release now runs OTP's `heart`, deliberately configured to do nothing, on
-  the commands that start the system.
-
-  This is not a watchdog and is not offered as one. `release_handler` calls
-  `heart:set_cmd/1` while preparing *any* transition that restarts the emulator,
-  and with no `heart` process that raises `badarg` - so the install failed before
-  anything rebooted, on exactly the externally supervised deployment this library
-  is for. The handshake has to be satisfied, and running the real `heart`
-  satisfies it through documented interfaces only.
-
-  `heart` is then kept out of the way. `HEART_COMMAND` is not set, so an
-  unexpected death starts nothing; `HEART_NO_KILL=TRUE`, so a node that misses
-  heartbeats is not killed; `HEART_BEAT_TIMEOUT` is raised to heart's documented
-  maximum, because `HEART_NO_KILL` alone does not make a heart-beat time-out
-  harmless - the port program exits once it has run its command, and `heart` is a
-  kernel process, so `init` halts the node when it goes; and `$ROOT/bin/start`,
-  the path `release_handler` composes into heart's temporary command and does not
-  check, is shipped and does nothing at all. That last one is not belt and
-  braces: `HEART_NO_KILL` suppresses the kill but *not* the command, so a
-  `bin/start` that really started the release could start a second node beside a
-  live one. The external supervisor remains the only thing that starts this
-  release. `-heart` is added to `ELIXIR_ERL_OPTIONS` only when the emulator is not
-  going to get one anyway: two of them make `init:get_argument(heart)` answer
-  `{ok, [[], []]}`, which heart's own startup check has no clause for, and the
-  boot hangs having printed nothing.
-
-  **Whether the emulator is already going to get one is measured rather than
-  guessed at, and there is more than one way for it to arrive.**
-  `ELIXIR_ERL_OPTIONS` is the variable Mix's generated `elixir` expands; `erl`
-  itself prepends `ERL_AFLAGS` and appends `ERL_FLAGS` and then `ERL_ZFLAGS` to
-  its effective command line; and the launcher passes `vm.args` as `-args_file`,
-  so a project's own `rel/vm.args.eex` carries flags too - and `erl` follows a
-  nested `-args_file` out of it. A flag arriving by any of those routes reaches
-  `init:get_argument/1` exactly as one on the command line does, and a deployment
-  that had one used to receive it plus the appended one, which is the boot hang
-  above.
-
-  It is recognised however it is written, which is why the hook does not read
-  these itself: `erl` applies shell-style quoting and backslash escaping to
-  everything it takes from the environment and from an args file, so `'-heart'`,
-  `"-heart"` and `-he\art` all arrive as `-heart` without containing the word.
-  The hook therefore asks `erl` - with the start's own environment and args file,
-  and without starting a VM - what argument list it would build, and adds a flag
-  only if that list has none. **It asks on every start**, whether or not anything
-  in the environment looks like it could carry a flag, which costs one
-  `fork`+`exec` of a C program that exits without booting an emulator - about
-  11ms, once per node start. Nothing is asked for an `eval`, an `rpc` or a
-  `remote`: the whole hook runs only for the commands that start the system.
-
-  `ERL_OTP<major>_FLAGS` is covered along with the rest. It is undocumented and
-  described by OTP's own source as for internal use, but `erl` reads it, so a
-  `-heart` there is a `-heart` the emulator gets - and because asking is
-  unconditional, one set only there is detected like any other.
-
-  The `erl` that is asked is the one the launcher is going to run, and the hook is
-  told which that is by the file that decides it: Mix's generated
-  `releases/<vsn>/elixir` resolves the emulator through an `ERTS_BIN` it rewrites
-  at build time, so the hook reads that assignment out of the same file the
-  launcher will, and falls back to `erl` on `PATH` - which is what an
-  un-rewritten `ERTS_BIN` means - for a release built with `include_erts: false`.
-  That matters because a release root holds more than one `erts-*` as soon as an
-  ERTS-changing release has been unpacked into it, and `ERL_OTP<major>_FLAGS` is
-  named for the OTP version of whichever emulator answers.
-
-  Where the question cannot be answered - an args file `erl` refuses to read, for
-  instance - the hook adds nothing and says so on standard error. The start
-  proceeds normally. To support `restart_emulator` upgrades, either make the
-  `-emu_args_exit` probe answerable so the hook can add a missing flag, or supply
-  exactly one `-heart` through the effective `RELEASE_VM_ARGS` or emulator
-  options. A duplicate `-heart` hangs the boot in silence. Adding nothing is the
-  safe fallback: an upgrade that needs an emulator restart then fails loudly
-  with the system still running. A `vm.args` that is simply *absent* is not such
-  a case: the file is passed to `erl` only when it exists, so a release shipping
-  none is asked about without it rather than reported unmeasurable.
-
-  All three variables are **assigned**, and `HEART_COMMAND` is **unset**, rather
-  than defaulted - so a deployment that already has any of them in its
-  environment gets the defanged heart anyway. That is deliberate and it is not
-  negotiable while this hook is in use: the supervisor owning the restart is the
-  contract the rest of this depends on, and an inherited `HEART_COMMAND`, a
-  `HEART_NO_KILL` of anything but `TRUE`, or a shorter `HEART_BEAT_TIMEOUT` each
-  break it - the last one by giving a stalled node a way to be killed that a
-  release without `-heart` has not got.
-  A start that overrides one of them says so on standard error, naming the value
-  it displaced and why, because a setting that silently stops taking effect is
-  worse than one that is refused - and refusing is what it does *not* do: a
-  conflicting variable is a configuration mistake, not a reason to fail a boot. A
-  deployment that sets none of them, which is the ordinary case, says nothing. A
-  variable that is *set to nothing* counts as a value for the two that are
-  assigned, and is reported as `[]`: neither an empty `HEART_NO_KILL` nor an empty
-  `HEART_BEAT_TIMEOUT` is the value that replaces it. An empty `HEART_COMMAND`
-  stays silent, because unsetting a variable that was already empty changes
-  nothing heart can read.
-- A test suite. It assembles a real release from a fixture application and, in
-  the `:e2e` suite, boots it and upgrades it - once hot, asserting that the
-  operating system pid does not change, and once through an emulator restart,
-  asserting that it does, that an uncommitted provisional release rolls back when
-  it is killed, and that committing makes it the version an ordinary start boots.
-  The restart suite runs the whole transition on a deployment whose environment
-  already carries a `HEART_COMMAND`, a `HEART_NO_KILL` of `FALSE` and an
-  11-second beat timeout, and whose `vm.args` supplies a `-heart` spelled
-  `-he\art`, and asks the running node what it was actually started with. That
-  start is given a deadline, because a boot handed two `-heart` flags hangs rather
-  than fails and would otherwise stop the suite for as long as whatever ran it
-  would wait. The `env.sh` hook is also run directly, over a release-shaped directory,
-  so that what it selects and what environment it leaves behind are asserted by
-  observation rather than by reading the script.
+- `bin/castle`, a release management CLI installed alongside the standard
+  launcher, with `releases`, `upgradable`, `unpack`, `install`, `commit` and
+  `remove`.
+  - `upgradable` reports whether the node can be upgraded, and exits non-zero
+    with the reason when it cannot.
+  - `commit` with no version commits the release awaiting commit, and exits
+    non-zero if there is none.
+  - `install` confirms that the installed version is running before it reports
+    success, waiting across an emulator restart. `CASTLE_INSTALL_TIMEOUT`
+    (default 300 seconds) bounds the wait. A wrong cookie or a node that is down
+    looks the same as a restart in progress, so `install` waits out the timeout
+    before failing. Interrupting `install` stops the wait, not the upgrade.
+    `install` refuses a `RELEASE_TMP` that is world-writable and not sticky.
+    ([forecastle#13](https://github.com/ausimian/forecastle/issues/13))
+- One-stage `restart_emulator` upgrades under systemd, Docker, Kubernetes or
+  runit. The release starts OTP `heart` configured to do nothing, because
+  `release_handler` needs it to prepare a restart. After the restart the node
+  boots the installed version provisionally, until it is committed.
+  ([forecastle#10](https://github.com/ausimian/forecastle/issues/10),
+  [castle#14](https://github.com/ausimian/castle/issues/14))
+- Upgrade strategies for `mix castle.relup`. `auto`, the default, keeps a
+  transition hot unless the ERTS changes or a dependency changes version without
+  a matching appup. `--hot` fails rather than restart. `--restart` makes every
+  transition an emulator restart.
+  ([forecastle#4](https://github.com/ausimian/forecastle/issues/4))
+- Baseline specs for `mix castle.relup`: `rel:` an assembled release, `tar:` a
+  shipped tarball, and `ref:` a git ref built in a worktree. A bare path means
+  `rel:`. Resolved `tar:` and `ref:` baselines are cached under
+  `_build/castle/baselines`. Prefer `tar:`, because a rebuilt baseline may differ
+  from the release that was deployed.
+  ([forecastle#26](https://github.com/ausimian/forecastle/issues/26))
+- `mix castle.relup --dry-run`, which reports whether a relup could be generated,
+  and which transitions would restart, without writing it.
+  ([forecastle#31](https://github.com/ausimian/forecastle/issues/31))
+- `mix castle.appup`, which fails when a module changed between two builds and no
+  appup instruction mentions it.
+  ([forecastle#27](https://github.com/ausimian/forecastle/issues/27))
+- `mix castle.appup.gen`, which drafts missing appup entries for review.
+  ([forecastle#29](https://github.com/ausimian/forecastle/issues/29))
+- Appups for dependencies, supplied under `rel/appups` and placed into the
+  assembled release, never into `deps/`.
+  ([forecastle#30](https://github.com/ausimian/forecastle/issues/30))
+- Relup generation during assembly. An `upgrade_from:` release option names the
+  baselines, and one `mix release` produces a tarball containing the relup.
+  ([forecastle#28](https://github.com/ausimian/forecastle/issues/28),
+  [forecastle#40](https://github.com/ausimian/forecastle/issues/40))
+- `Forecastle.UpgradeCase` and `Forecastle.Deployment`, a harness for testing
+  upgrades of a project's own release.
+  ([forecastle#32](https://github.com/ausimian/forecastle/issues/32))
 
 ### Changed
 
-- **Breaking:** Forecastle no longer touches configuration. It used to set
-  `:runtime_config_path` to `false`, install a `Config.Reader` of its own,
-  initialise every config provider itself and stash the results, and rename the
-  `sys.config` Mix wrote to `build.config` — so that the standard launcher could
-  not configure the system and Castle had to expand the configuration in a
-  preboot VM before every start. All of that is gone. Mix decides which file
-  configures a release at runtime, initialises the providers a project declared
-  with whatever term it declared them with, writes `sys.config`, and expands
-  runtime configuration in the booting VM, exactly as it does for a release
-  Forecastle was never involved in.
-
-  The reason that interception existed was to give the version being upgraded
-  *to* a configuration resolved by *its* providers, which is not something a
-  boot of the version being upgraded *from* can produce.
-  [castle#13](https://github.com/ausimian/castle/issues/13) now does that
-  properly: `install` and `commit` materialise the target's configuration in a
-  temporary `:peer`, booted on the target's own code and running the target's
-  own providers through Elixir's own pipeline. The two changes are atomic —
-  neither works without the other. It is also the only path Castle 1.0 has: the
-  branch that read a `build.config` is gone along with the file, so a release
-  assembled by this Forecastle carries the `sys.config` Mix wrote and nothing
-  else, and an older Castle handed one looks for a file that is not there. This
-  release requires the Castle it ships with, and that Castle requires this one.
-
-  What this fixes, what it costs, and what it means for an existing deployment
-  are below.
-- The `env.sh` fragment no longer expands configuration, and no longer runs on
-  every start. It used to run a preboot VM on every `start`, `daemon` and
-  `eval`, to expand `build.config` and to create `releases/RELEASES`. The
-  configuration half is gone outright. What remains is `releases/RELEASES`, and
-  the fragment now creates it only when the release has not got one — the first
-  start of a deployment, and no start after it. It is still appended after any
-  `env.sh` the project supplied. It also configures `heart` and selects a
-  provisional version after an emulator restart — see *Added* — and everything in
-  it is now gated on a command that starts the system, so an `eval`, an `rpc` or
-  a `remote` reaches none of it.
-
-  A release therefore starts as quickly as a plain Mix release every time bar
-  the first, and a start that used to fail because configuration could not be
-  expanded now fails, or does not, wherever Mix would have it fail. A start that
-  *cannot* create `releases/RELEASES` — a release root nothing may write to, say
-  — warns and carries on, rather than refusing to start a system that does not
-  need that file in order to run.
-- `bin/castle unpack` and `bin/castle install` refuse a system that cannot be
-  upgraded from, and say why and what to do about it. The refusal is Castle's,
-  made inside the operation itself, so what `bin/castle` does is pass it on: the
-  message goes to standard error and the command exits non-zero, which is what a
-  script chaining `unpack` and `install` needs. What decides is the release
-  record `release_handler` is working from, not whether `releases/RELEASES` is on
-  disk: it reads that file once, in its `init`, and when the file is missing — or
-  cannot be read — it works from a record it builds out of the boot script's name
-  and version, which names no applications. Upgrading from that is silently wrong
-  rather than refused; see the fix below for what it leaves behind.
-
-  **The remedy is a restart, not creating the file.** Nothing can repair the
-  record a running system holds: `release_handler` never reads `RELEASES` again
-  after its `init`, so a file created afterwards changes nothing about what the
-  node is working from — and the first operation that changes anything, `unpack`
-  among them, writes the record it is already holding straight back over the
-  file, so creating it by hand is erased moments later and a restart after
-  *that* reads the erased version. Restart first, and the release creates the
-  file before the system starts.
-
-  **A restart is enough only when the file was missing.** The record is
-  synthesised when `RELEASES` was absent *or* unreadable, and the `env.sh`
-  fragment creates it only when it is absent — so a file that is there and cannot
-  be read is stepped over on every start, and the system comes back on another
-  synthesised record. Make that file readable, or remove it, before restarting;
-  otherwise the restart changes nothing and the refusal repeats. Castle's message
-  says which of the two applies.
-
-  Nothing asks the question ahead of those operations, and a deployment script
-  should not either. A check made in one call and acted on in another is a check
-  about a moment that has passed: the node can restart in between, onto a record
-  it makes up afresh, and the operation would then go ahead on an answer that no
-  longer held. `commit`, `remove` and `releases` are not refused at all — none of
-  them can write that record back, and refusing them could strand a version that
-  was already installed.
-- Assembling a release that includes Windows executables still warns, but for a
-  different reason, and the warning says so. The `.bat` launcher now boots: Mix
-  writes the `sys.config` it reads and configures the system itself, which it
-  could not do while Forecastle was withholding both. What a Windows deployment
-  has not got is `bin/castle`, which is a POSIX shell script, so nothing on it
-  can unpack, install or commit an upgrade.
-- **Breaking:** the `:appup` compiler now fails the build when the `:appup`
-  project key names a file that does not exist, rather than warning and
-  carrying on. The project asked for an appup and cannot have one, and the
-  alternative is a release whose missing upgrade instructions only surface
-  later — in `:systools.make_relup/4`, or during the upgrade itself. Its
-  messages also reach the shell now: diagnostics returned by a compiler are
-  for editors to display inline, and nothing prints them on the command line.
-  A project that only has an appup in some environments should say so, rather
-  than name a file that is not there:
-
-  ```elixir
-  appup: if(Mix.env() == :prod, do: "appup.exs")
-  ```
-
-  A `nil` key is the supported off switch: it removes any output an earlier
-  build left and reports nothing further.
+- **Breaking:** `mix forecastle.relup` is now `mix castle.relup`. There is no
+  compatibility alias, so rename the task in build pipelines. `mix compile.appup`
+  is unchanged.
+  ([forecastle#24](https://github.com/ausimian/forecastle/issues/24))
 - **Breaking:** the standard Mix launcher, `bin/<release>`, is no longer
-  replaced. It keeps everything Mix gives it — cookie handling, distribution,
-  `eval`/`rpc`/`remote`, daemon mode, version selection — and stays current with
-  Elixir's own launcher. The release management commands that Forecastle used
-  to graft onto it have moved to `bin/castle`; `bin/<release> unpack`,
-  `install`, `commit`, `remove` and `releases` are now `bin/castle unpack` and
-  so on.
-- The Castle integration is installed by extending the release's `env.sh`
-  rather than by replacing the launcher. An `env.sh` supplied through
-  `rel/env.sh.eex` is preserved and runs first.
-- `mix forecastle.relup` with no strategy switch is now `auto`, which changes what
-  an existing invocation does with some transitions. Case by case, against a task
-  that simply asked `systools` for the relup:
-
-  - **A dependency bump whose appup covers the move** - an entry naming this
-    from-version, in the direction being generated - is a hot upgrade, exactly as
-    it was. **Unchanged.** This is the ordinary case, a Castle bump among them.
-  - **A dependency bump with no appup, or none that matches** already failed. The
-    task delegated to `systools_relup:get_script_from_appup/5`, which throws
-    `file_problem` for an appup that is not there and `no_relup` when no entry
-    matches the from-version, so this case produced no relup before either. It
-    still fails, and only the message changed: it names the application, both
-    versions and the appup entry that is missing, rather than reporting
-    `no_relup` against whichever application `systools` happened to reach first.
-  - **An ERTS change** did produce a relup, and the wrong kind.
-    `systools_relup:check_for_emulator_restart/5` inserts the two-stage
-    `restart_new_emulator` on its own whenever the ERTS version differs, warning
-    only that it changed - so the relup carried a transition nobody had chosen,
-    which continues across the reboot and which Castle does not support. `auto`
-    now decides this case for itself, as a one-stage restart
-    transition, and announces it. `--restart` generates the same thing on
-    request. **Materially changed.**
-  - **An appup that names an emulator restart itself** was passed straight
-    through, and the relup was written with the restart in it without anybody
-    being told. `auto` now announces a one-stage `restart_emulator` and refuses
-    the two-stage `restart_new_emulator`; `--hot` refuses both; and `--restart` -
-    which reads no appup at all - makes the transition a `restart_emulator` by
-    its own choosing. **Materially changed.**
-
-  So the two cases that changed are the two that used to write a relup carrying
-  an emulator restart; the other two are a hot upgrade that is still a hot
-  upgrade, and a failure that is still a failure.
-
-  `--hot` is **not** the previous behaviour and is not the way back to it: it
-  refuses an appup-supplied emulator restart that the old task packaged. What it
-  is good for is a pipeline that wants the generation to fail rather than degrade.
-  `--restart` is the way to get a relup out of the two changed cases.
-- A `mix forecastle.relup` run that fails now writes nothing at all. It used to
-  let `systools` write the relup and report afterwards, which was harmless while
-  every refusal came from `systools` itself; the strategies add refusals that can
-  only be made once a relup has been generated, so the file is now written by the
-  task, from the term it inspected, when there is nothing left to refuse. A relup
-  already in the output directory is therefore the one still sitting there after
-  a failure, rather than one that was replaced by a plan that was then rejected.
-  The bytes are unchanged: the same encoding comment and single term `systools`
-  writes and `release_handler` reads.
-
-  The relup is also never opened for writing. It is published by renaming a
-  staging file written beside it in the same directory, so the guarantee holds
-  for a failure with a file already open too: a truncating write that then failed
-  - out of space, a killed process, a close that failed - would leave the earlier
-  relup empty or half a plan even though the run failed. A reader now sees the
-  whole of one relup or the whole of the other, and a build that reads it while a
-  generation is running cannot read a partial one.
-- `mix forecastle.relup` now requires at least one of `--fromto`, `--upfrom` or
-  `--downto`. It used to accept none and write a relup with no transitions in it,
-  which is not an upgrade plan and which `release_handler` can do nothing with.
-- Raised the minimum Elixir requirement to 1.18.
+  replaced. The release management commands move from `bin/<release>` to
+  `bin/castle`. Castle's integration is appended to `env.sh`, after any
+  `rel/env.sh.eex` the project supplies.
+  ([forecastle#3](https://github.com/ausimian/forecastle/issues/3))
+- **Breaking:** Forecastle no longer intercepts runtime configuration. Mix
+  configures the release as it would without Forecastle, `sys.config` is no
+  longer renamed to `build.config`, and Castle resolves the target's
+  configuration when it installs. This requires Castle 1.x.
+  ([forecastle#6](https://github.com/ausimian/forecastle/issues/6),
+  [castle#13](https://github.com/ausimian/castle/issues/13))
+- **Breaking:** the `:appup` compiler fails the build when the `:appup` key names
+  a missing file. Set the key to `nil` to turn an appup off, for example
+  `appup: if(Mix.env() == :prod, do: "appup.exs")`.
+- Starts no longer run a preboot VM to expand configuration. Only the first
+  start of a deployment runs one, to create `releases/RELEASES`; if it cannot,
+  the start warns and continues, but the node cannot be upgraded.
+- `bin/castle unpack` and `install` refuse a node that started without an
+  accepted `RELEASES` file, because `release_handler` would upgrade it
+  incompletely. Restart the node to recover. If the file exists but cannot be
+  read, fix or remove it first.
+- `mix castle.relup` with no strategy switch is `auto`, and two cases now
+  generate differently. An ERTS change becomes a one-stage `restart_emulator`
+  rather than the unsupported two-stage `restart_new_emulator`. An emulator
+  restart requested by an appup is announced if it is `restart_emulator` and
+  refused if it is `restart_new_emulator`.
+- A failed `mix castle.relup` writes nothing, and a relup is published
+  atomically.
+- `mix castle.relup` requires at least one of `--fromto`, `--upfrom` or
+  `--downto`.
+- Windows releases now boot, but have no `bin/castle` and so cannot be upgraded.
+  Assembly warns about this.
+- The minimum supported Elixir version is 1.18.
 
 ### Security
 
-- Rejected release versions and invalid environment settings are shown with a
-  reversible, single-line representation. Diagnostics name the command and
-  preserve visible ASCII; other bytes are percent-encoded, so paths remain
-  identifiable without letting control bytes forge logs or drive a terminal.
-- `bin/castle` built its RPC expression by interpolating the version
-  argument into Elixir source, so a version such as `1.2.3));System.stop(1)#`
-  closed the sigil and ran arbitrary code on the node with the release
-  cookie's authority. `bin/castle` now refuses the characters that can end
-  the sigil, escape within it, or start an interpolation, along with the
-  path separator, and control characters: a version is echoed back in the
-  messages that report a failure to act on it, so one carrying a newline can
-  add a whole line of its own to that output - including a forgery of the
-  launcher's disconnect diagnostic, which `install` reads to decide whether a
-  failure was really a reboot, and which would have it confirm and report a
-  success for an install that had failed. Managed versions must be valid UTF-8
-  and contain no C0, DEL or C1 controls. If that validation is unavailable, the
-  command refuses the version and names the failed validation. The same sink
-  existed in the launcher Forecastle used to generate.
-
-  Which versions are accepted does not depend on the locale the release
-  inherited. Neither script expresses the forbidden bytes as a `[[:cntrl:]]`
-  character class, because a shell resolves that against its locale: dash and a
-  C-locale bash match C0 and DEL, while a UTF-8 bash also matches the C1 block,
-  and glibc puts U+2028 and U+2029 in the class as well. A literal set of the C0
-  bytes and DEL is used instead, so the answer is the same under every supported
-  shell. `bin/castle` keeps that set only as a shortcut in front of the byte
-  decoder, which remains authoritative for invalid UTF-8 and C1; the `env.sh`
-  fragment, which deliberately forks no tool to choose a version, refuses C0 and
-  DEL and leaves C1 to the marker comparison and the version-directory check
-  that already have to pass.
+- The launcher generated by Forecastle 0.1.x built its RPC expressions by
+  interpolating the version argument into Elixir source, so a version such as
+  `1.2.3));System.stop(1)#` ran arbitrary code on the node with the release
+  cookie's authority. `bin/castle` refuses versions containing sigil, escape or
+  interpolation characters, path separators or control characters, and shows
+  rejected values percent-encoded so they cannot inject lines into its output.
+  An existing deployment keeps the old launcher until its `bin` directory is
+  replaced; see *Upgrading an existing deployment*.
 
 ### Fixed
 
-- Argumentless `bin/castle commit` now uses a dedicated machine result instead
-  of matching human-facing text in command output. Its diagnostic can change
-  without changing the exit status, and launcher output around the result is
-  preserved. A recognised result remains authoritative if the launcher exits
-  afterwards. If no result can be read safely, the command withholds the machine
-  output, reports that permanence is unknown and points to `bin/castle releases`.
-  Install's lost-connection check is isolated as a whole-line launcher
-  diagnostic, so ordinary error copy cannot trigger the restart-confirmation
-  path.
-- `mix forecastle.relup` failed with `:systools is not available` in projects
-  that do not themselves depend on `:sasl`, because Elixir prunes unused OTP
-  applications from the build's code path.
-- `mix forecastle.relup` exited 0 when it had generated nothing.
-  `:systools.make_relup/4` reports ordinary failure by returning `:error`, and
-  Mix does not turn what a task returns into an exit status, so a build
-  pipeline could not tell that generation had failed. Nothing removes a relup
-  the task did not write, so the build then went on to package whatever plan an
-  earlier run had left in the project root, as this version's. The task now
-  says what `systools` could not do and fails. Warnings that `systools` used to
-  print for itself - an ERTS version change among them - are passed on rather
-  than swallowed.
-- `mix forecastle.relup --outdir` was accepted and then ignored, so the relup
-  was written to the current directory regardless, overwriting any unrelated
-  relup already there. The switch now decides where the file goes, and the
-  directory has to exist. Post-assembly still copies the relup it finds in the
-  project root, which is where the default puts it, so `--outdir` is for
-  generating a relup to look at or to keep - not for feeding one to a release.
-- Assembling a release checked only that a `relup` existed in the project
-  root before packaging it, so an upgrade plan for another version — or the
-  remains of a write that was interrupted — was copied in and later applied by
-  `release_handler` as this version's plan. The relup is now read and its
-  target version checked against the release being assembled, and assembly
-  fails if it does not match, if the upgrade and downgrade sections are not
-  the lists `release_handler` will reach into, or if the file cannot be read
-  as an upgrade plan at all. That is the contract OTP applies in
-  `systools_make:check_relup/1` when it packs a tarball itself, plus the
-  version check; Mix packs its own tarball, so nothing was applying it. A
-  build that was silently packaging the wrong plan will now stop instead —
-  before assembly begins, so a rejected relup leaves no half-built release
-  behind for a later build to stumble over.
-- `mix forecastle.relup` discarded arguments it did not recognise, so a
-  mistyped switch, or a path given without one, generated a relup between
-  releases the caller had not named instead of reporting the mistake. Omitting
-  `--target` raised a `KeyError` from the middle of the task. Both are now
-  errors that say what is wrong, as is repeating `--target` or `--outdir`,
-  which used to keep the last occurrence and generate from a target the
-  caller had not asked for. `--fromto`, `--upfrom` and `--downto` may still
-  be given more than once, as they always could.
-- A release naming its runtime configuration file with `:runtime_config_path`
-  booted `config/runtime.exs` instead. The option was read as a boolean — any
-  value meant "there is runtime configuration" — and the provider that replaced
-  Mix's was hardcoded to `config/runtime.exs`, so a project asking for
-  `config/prod_runtime.exs` got the other file if it happened to exist, and a
-  provider pointing at a file that was never copied into the release if it did
-  not. Mix has always handled this option correctly, and now nothing overrides
-  it.
-- Config providers declared with anything other than a keyword list were handed
-  something else. `Mix.Release` allows any term as a provider's init argument,
-  and Forecastle rewrote a non-list into `[path: term]` and then added an `:env`
-  key to whatever was left — so a provider declared with a binary, a map or a
-  plain list saw a keyword list it had never asked for. Providers are no longer
-  intercepted, so `init/1` is called by Mix, with the term the project wrote.
-- Runtime configuration could not read the standard release variables.
-  The launcher sources `env.sh`, and so used to run the preboot VM that expanded
-  configuration, before it assigns `RELEASE_COOKIE`, `RELEASE_NODE`,
-  `RELEASE_TMP` and the rest, leaving them unset for `runtime.exs`. Nothing
-  expands configuration from `env.sh` any more: the launcher exports all of them
-  before it starts the VM that configures itself, so `runtime.exs` sees them the
-  way Mix's own documentation says it does.
-- Concurrent `start`, `daemon` and `eval` invocations no longer race on
-  `sys.config`. Expanding configuration into the version directory meant two
-  boots with differing environments overwrote each other's configuration; Mix
-  applies the resolved configuration inside the booting VM instead, and writes
-  nothing.
-- `bin/castle` looked for the launcher at `bin/$RELEASE_NAME`. `RELEASE_NAME`
-  names the node, not the executable, so setting it sent the CLI looking for
-  a launcher that does not exist. It is now passed through to the launcher
-  and the executable is the one named at build time.
-- The `RELEASES` file was created relative to the working directory, so
-  starting a release from anywhere other than its root left the system unable
-  to manage its own releases. Where the launcher is invoked from still makes no
-  difference.
-- An upgrade could silently leave an application running from the release it was
-  replacing. `release_handler` only replaces the code path of an application it
-  knows has changed version, and it knows that by comparing the release record it
-  is running against the one it is installing. Where `releases/RELEASES` was
-  missing at startup, the record it is running is one OTP builds out of the boot
-  script, which names no applications at all — so *nothing* compared as changed,
-  and every application whose new code the relup does not explicitly load was
-  left reachable only through the directory of the superseded release, which the
-  next `bin/castle remove` deletes. Nothing reported it. The file is now created
-  before the system starts, and `bin/castle unpack` and `bin/castle install`
-  refuse rather than upgrade a system that started without one — the operations
-  reading the node's own records as they act, so that a file which appeared after
-  the boot that went looking for it is not mistaken for a system that can be
-  upgraded, and so that nothing acts on an answer given before a restart. The
-  `:e2e`
-  suite covers it with an application whose version changes and whose appup asks
-  for nothing, which is the shape that used to go unnoticed.
-- The `GitHub` link in the Hex package metadata pointed at the Castle
-  repository rather than Forecastle's.
-- The `:appup` compiler left `<app>.appup` behind in `ebin` once the project
-  stopped asking for one, whether because the source file was deleted or
-  because the `:appup` key was removed. It only worked out where the output
-  went on its way to writing it, so neither of those cases could remove
-  anything. An incremental build — which is what a CI cache produces —
-  therefore went on packaging upgrade instructions from an earlier version of
-  the application, and `release_handler` applied that obsolete plan during a
-  hot upgrade. The stale output is now deleted instead. Leaving the `:appup`
-  key unset is a supported way to turn an appup off for an environment: the
-  earlier output is removed, and beyond saying so once, nothing is reported.
-  Removal needs the compiler to stay in `:compilers` — dropping it from the
-  list stops it running at all, as it would any Mix compiler.
-- The `:appup` project key is resolved relative to the project file, as the
-  README has always said it is, rather than to whatever the working directory
-  happens to be. That is what makes "the source is missing" a trustworthy
-  verdict, now that it deletes the output and fails the build.
-- The `:appup` compiler returned a bare diagnostic where `Mix.Task.Compiler`
-  expects a list of them, so Mix discarded it and reported that the compiler
-  had misbehaved instead of saying what was wrong. It also ignored the result
-  of writing the appup, and so reported success when the write had failed.
-- The appup was written as the formatter produced it, which is Unicode
-  chardata rather than iodata. An appup containing a codepoint above 255 —
-  a module or term with a non-ASCII name — failed to write at all, and one
-  between 128 and 255 was written as a lone byte that `:file.consult/1`
-  cannot read back, so the build reported success and left behind an appup
-  that `systools` will not parse. It is encoded as UTF-8 now.
+- `mix castle.relup` failed in projects that do not depend on `:sasl`, because
+  Elixir prunes unused OTP applications from the code path.
+- `mix castle.relup` exited 0 when `:systools` could not generate a relup, so a
+  build could go on to package a stale one. It now fails, and passes `:systools`
+  warnings on.
+  ([forecastle#7](https://github.com/ausimian/forecastle/issues/7))
+- `mix castle.relup --outdir` was ignored, and the relup always went to the
+  current directory.
+  ([forecastle#7](https://github.com/ausimian/forecastle/issues/7))
+- `mix castle.relup` ignored unrecognised arguments and raised `KeyError` without
+  `--target`. Both are now errors, as is a repeated `--target` or `--outdir`.
+- `mix castle.relup` refuses a baseline with the same version as the target,
+  which produced an entry `release_handler` can never use.
+- Assembly packaged any `relup` in the project root without checking it. The
+  relup's target version and structure are now checked before assembly begins.
+- A `:runtime_config_path` other than `config/runtime.exs` was ignored, and config
+  providers declared with a non-keyword argument received a rewritten one. Mix
+  now handles both.
+  ([forecastle#6](https://github.com/ausimian/forecastle/issues/6))
+- Concurrent `start`, `daemon` and `eval` invocations no longer overwrite each
+  other's `sys.config`.
+- `releases/RELEASES` was created relative to the working directory, so a release
+  started from anywhere but its root could not manage its own releases. Such a
+  node could then upgrade incompletely, leaving applications running from the
+  superseded release's directory.
+- The `:appup` compiler left a stale `<app>.appup` in `ebin` after its source or
+  the `:appup` key was removed, so incremental builds packaged obsolete upgrade
+  instructions.
+  ([forecastle#8](https://github.com/ausimian/forecastle/issues/8))
+- The `:appup` key is resolved relative to the project file, not the working
+  directory.
+- Mix discarded the `:appup` compiler's diagnostics, and the compiler reported a
+  failed write as success.
+- An appup containing non-ASCII characters failed to write, or was written in a
+  form `:systools` cannot read. It is now encoded as UTF-8.
+- The Hex package's GitHub link pointed at the Castle repository.
 
 ### Upgrading an existing deployment
 
-OTP's `release_handler` extracts release tarballs with `keep_old_files`, so a
-hot upgrade never replaces files that already exist at the top level. Upgrading
-a deployment that was built by an earlier Forecastle therefore leaves its old
-`bin/<release>` in place: the upgrade succeeds and `bin/castle` appears, since
-that file is new, but the old launcher and its release management commands
-remain until they are replaced out of band.
-
-Replace the contents of `bin` from the new release when migrating, or the
-deployment keeps running the launcher Forecastle used to generate - including
-the version argument handling fixed in this release.
-
-This applies to `bin/castle` too: once installed, later changes to it will not
-reach an existing deployment through a hot upgrade. That is the same property
-Mix's own `bin/<release>` has always had.
-
-`bin/start` is new, so it does appear, and both the heart configuration and the
-provisional-version selection live in the version directory's `env.sh`, which a
-hot upgrade does replace. So a deployment that takes one hot upgrade to this
-release can take a restart transition after it. What it cannot do is take a
-restart transition *as* the first upgrade from an older deployment: the node is
-running from the old version's `env.sh`, so it has no `heart` process, and
-`release_handler` calls `heart:set_cmd/1` while preparing the reboot - which
-raises, and the install fails before anything reboots. Get to this release with a
-hot upgrade or a redeploy first.
-
-Configuration is decided per version directory, so a deployment part way through
-this migration is coherent rather than confused: the version it is running keeps
-its `build.config`, and a restart back into it is still expanded the old way — by
-that version's own `env.sh` and its own copy of Castle, both of which the upgrade
-leaves where they are — while the version it is upgraded to has a `sys.config`
-and is resolved in a peer. Nothing has to be converted in place, and nothing in
-the new version reads the old file.
+- A hot upgrade from a release built by Forecastle 0.1.x keeps the old
+  `bin/<release>`, because `release_handler` does not overwrite existing
+  top-level files. `bin/castle` appears, but the old launcher and its release
+  management commands remain, including the vulnerability fixed above. Replace
+  the contents of `bin` from the new release when migrating. Later changes to
+  `bin/castle` do not reach a deployment through a hot upgrade either.
+- The first upgrade from a 0.1.x deployment cannot be a restart transition. The
+  running node has no `heart` process, so the install fails before rebooting.
+  Reach this release with a hot upgrade or a redeploy first; restart transitions
+  work after that.
+- A deployment part way through the migration stays coherent. The running
+  version keeps its `build.config` and its own copy of Castle, and the new
+  version uses its `sys.config`, resolved by the new Castle. Nothing needs
+  converting in place.
 
 ### Known limitations
 
-- **An emulator restart needs an external supervisor, and the release will not
-  restart itself.** The reboot is the point at which something outside the
-  release has to start it again: `bin/start` is inert on purpose, `HEART_COMMAND`
-  is unset, and nothing else in the release is watching. A deployment run by hand
-  from a shell, rather than under systemd, Docker, Kubernetes or runit, therefore
-  stays down after such an upgrade until somebody starts it - and the version it
-  comes back on is the one that was installed, because the markers are still
-  there waiting to be consumed.
-- **`restart_new_emulator` is not supported.** The two-stage transition - a
-  hybrid temporary release, a reboot into it, and the rest of the relup applied
-  on the way up - is refused wherever it turns up rather than generated. An ERTS
-  change, which is what `systools` would otherwise insert it for, is taken out of
-  `systools`' hands and treated as a one-stage restart transition instead.
-  Supporting the two-stage transition properly is its own piece of work, and not
-  only because the provisional boot would have to come up and *resume* an upgrade:
-  the version `release_handler` writes into `new_start_erl.data` for it is the
-  temporary hybrid release, whose version directory holds a boot script and a
-  configuration and none of the launcher's own files, so there is nothing there
-  for a launcher to boot. Castle arms no marker for it for that reason.
-- **A system that cannot write `releases/RELEASES` cannot be upgraded, only
-  restarted.** The release creates the file on its first start. Where that fails
-  — a deliberately read-only release root is an ordinary case — the start warns,
-  the system can run and restart, and `bin/castle unpack` and `bin/castle install`
-  refuse. If the deployment is intended to be writable, fix the reported error
-  and restart once before upgrading. A running system cannot be repaired in
-  place because `release_handler` reads the file only in its `init`.
-- Windows releases are not supported; see above. What is missing is now
-  `bin/castle` rather than a bootable release.
+- Emulator restarts need an external supervisor such as systemd, Docker,
+  Kubernetes or runit. The release does not restart itself, so a node started by
+  hand stays down after such an upgrade until it is started again, and then
+  boots the installed version.
+- `restart_new_emulator` is not supported. An ERTS change is generated as a
+  one-stage `restart_emulator` instead, and a `restart_new_emulator` in an appup
+  is refused.
+- A node that cannot write `releases/RELEASES` can run and restart but cannot be
+  upgraded. Fix the reported error and restart once before upgrading.
+- Windows releases have no `bin/castle`.

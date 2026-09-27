@@ -1,151 +1,12 @@
-defmodule Mix.Tasks.Forecastle.Relup do
+defmodule Forecastle.Relup do
   @moduledoc """
-  Generate a relup file between releases.
+  Generates relups for `mix castle.relup` and `Forecastle.generate_relup/1`.
 
-  `mix forecastle.relup` will generate a relup between a `target` release and
-  any number of other releases. The paths specifed in the options should
-  be the paths to `.rel` files (but without the .rel extension)
-
-  ## Command-line options:
-
-    - `--target` - the path to the .rel file in the target release
-    - `--fromto` - the path to the .rel file from a previous release
-    - `--upfrom` - the path to the .rel file from a previous release
-    - `--downto` - the path to the .rel file from a previous release
-    - `--outdir` - the directory to write the relup. Defaults to the current directory
-    - `--hot` - require every transition to be a hot upgrade
-    - `--restart` - make every transition a full emulator restart
-
-  The `--fromto`, `--upfrom` and `--downto` switches may be specified zero or more
-  times and have the following behaviour:
-
-    - `--fromto` generates both upgrade and downgrade instructions
-    - `--upfrom` generates only upgrade instructions
-    - `--downto` generates only downgrade instructions
-
-  At least one of them is required: a relup with no transitions in it is not an
-  upgrade plan.
-
-  The task fails if the relup could not be generated, so that a build pipeline
-  does not carry on and package whatever relup happened to be lying around. It
-  writes nothing when it fails, so a relup already in the output directory is
-  left as it was rather than replaced by one that was then refused. The relup
-  itself is never opened for writing: the bytes go to a staging file beside it
-  which is renamed over it once it is whole, so a failure with a file open cannot
-  leave half an upgrade plan behind either. A reader sees the whole of the old
-  relup or the whole of the new one.
-
-  `--outdir` must already exist, and a relative one is resolved from the
-  directory the task is run in, not from the project root. It only ever affects
-  where this task writes.
-  Post-assembly copies the relup it finds in the project root, which is where
-  the default puts it, so a relup destined for a release should be generated
-  without `--outdir`.
-
-  ## Upgrade strategy
-
-  The strategy is a property of each transition in the relup rather than of the
-  release, and there are three. `--hot` and `--restart` are mutually exclusive
-  and may each be given once; with neither, the strategy is `auto`.
-
-  ### `auto` (the default)
-
-  Every transition is generated from the applications' appups, as a hot upgrade,
-  unless something in that transition cannot be hot-upgraded - and then that
-  transition, and only that transition, becomes a restart.
-
-  Two things make a transition a restart. An **ERTS change** always does: it is
-  not a hot upgrade under any policy, and no appup could make it one. A **version
-  change in an application the project does not own** - a dependency, one of
-  Elixir's own applications, one of OTP's - does so only when no appup covers
-  that particular move, which is the question `:systools` would be answering a
-  moment later anyway. The appup consulted is the one beside the *target*
-  release's copy of the application, `lib/<app>-<vsn>/ebin/<app>.appup`, and the
-  from-version is matched the way `systools_relup` matches it - which includes
-  the regexes an appup is allowed to name a from-version with.
-
-  Each *direction* is classified on its own, because an appup carries separate
-  upgrade and downgrade lists and a from-version present in one need not be
-  present in the other. A relup can therefore carry a hot upgrade from a version
-  and a restart back down to it.
-
-  Applications *added* or *removed* between the two releases are left to
-  `:systools`, whose `add_application` and `remove_application` instructions are
-  hot: nothing has to be changed in place, only started or stopped.
-
-  `auto` does not fall back to a restart when an appup for an application the
-  project *does* own is missing. A transition it judged hot and `:systools` then
-  could not generate is a failure, so that `auto` never silently ships something
-  other than the upgrade it decided on; ask for the restart with `--restart`.
-
-  ### `auto` announces a restart
-
-  A restart transition is a legitimate outcome of `auto`, not a failure, so a run
-  that produces one writes the relup and says so. What it says names every edge
-  that will restart and why, whether `auto` classified it or an appup asked for
-  `restart_emulator` by name - the same transition arrived at two ways, and the
-  run has one verdict about it either way.
-
-  Both kinds are settled after generation, because only one of them is knowable
-  before it: an appup that names the instruction is invisible until `:systools`
-  has produced a script. Announcing from classification alone is how a run came
-  to say that every transition was a hot upgrade and then report a restart in the
-  same breath.
-
-  `--hot` and `--restart` remain the ways to insist. `--hot` fails on a
-  transition that would restart; `--restart` makes every transition one.
-
-  ### `--hot`
-
-  Every transition must be a genuine hot upgrade, and generation fails, non-zero
-  and having written nothing, if one cannot be: a missing appup entry, an ERTS
-  change, or an appup that asks for the emulator to be restarted. This is the
-  switch for a pipeline that requires zero-downtime deployment.
-
-  Note that this is feasibility rather than policy, and it is not the same
-  question `auto` asks. `--hot` reads every application's appup, including those
-  of the applications the project owns, and takes whatever the appups yield;
-  `auto` consults the appups only of the applications the project does not own,
-  in order to decide whether an edge can be hot at all.
-
-  ### `--restart`
-
-  Every transition is a single `restart_emulator` instruction, written directly.
-  No appup is read - not for the project's own applications either - and
-  `:systools` is not involved at all, which is the only way to be certain which
-  of OTP's two emulator-restart instructions ends up in the relup.
-
-  ## Which instruction, and what the operator sees
-
-  OTP has two emulator-restart instructions, and they are different transitions
-  rather than two spellings of one:
-
-    - `restart_emulator` sits at the end of the script. The relup is evaluated in
-      full in the running system, and the emulator then reboots.
-    - `restart_new_emulator` sits at the front. `release_handler` builds a hybrid
-      temporary release - the new ERTS, kernel, stdlib and sasl over the old
-      applications - reboots into that, and continues the rest of the relup on
-      the way up.
-
-  Every restart this task generates is `restart_emulator`, the one-stage
-  transition. `restart_new_emulator` is not a strategy here and is refused where
-  it turns up: it is a materially different path, and Castle is built for the
-  one-stage one.
-
-  That is why `auto` decides the ERTS case for itself.
-  `systools_relup:check_for_emulator_restart/5` inserts `restart_new_emulator`
-  on its own whenever the ERTS version differs between the two releases, and
-  `systools_rc:sort_emulator_restart/3` then hoists it to the front of the
-  script; changes to `kernel`, `stdlib` or `sasl` bring it in through those
-  applications' own appups. So an ERTS change is taken out of `:systools`' hands
-  before it is asked for anything, and whatever it does produce is inspected -
-  a `restart_new_emulator` arriving from an appup is refused rather than
-  shipped. The task keeps the exact instruction name in its output because the
-  two transitions behave differently.
+  The module resolves baselines, classifies each transition, invokes `:systools`
+  for hot transitions, rejects conflicting baselines, reports restart edges and
+  publishes the finished relup atomically. See `Mix.Tasks.Castle.Relup` for the
+  `auto`, `hot` and `restart` strategies.
   """
-  @shortdoc "Generate a relup file between releases"
-
-  use Mix.Task
 
   # Elixir's own applications. `:code.lib_dir/1` resolves them, but under
   # Elixir's library directory rather than OTP's, so nothing about the path
@@ -156,42 +17,115 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # The two instructions `release_handler` treats as "reboot the emulator".
   @restart_instructions [:restart_emulator, :restart_new_emulator]
 
-  # All `:keep` or `:count`, including the switches that may appear only once.
-  # `:string` would silently keep the last occurrence and `:boolean` would
-  # accept `--no-hot`, so a repeated or negated switch would quietly generate
-  # something other than what was asked for - the failure this task's argument
-  # handling exists to prevent. `:count` makes a repeat visible here as a count
-  # above one, and leaves `--no-hot` an unrecognised switch.
-  @options [
-    upfrom: :keep,
-    downto: :keep,
-    fromto: :keep,
-    outdir: :keep,
-    target: :keep,
-    hot: :count,
-    restart: :count
-  ]
+  @typedoc """
+  Which upgrade strategy every transition in the relup is generated under.
 
-  @impl Mix.Task
-  def run(command_line_args) do
-    ensure_systools!()
+  See `Mix.Tasks.Castle.Relup` for what each of them means.
+  """
+  @type strategy :: :auto | :hot | :restart
 
-    args = parse!(command_line_args)
+  @doc false
+  # The whole of generating a relup, once a caller has said which release it is
+  # for, which baselines it is against, and where the file goes.
+  #
+  # `@doc false` rather than public: the arguments are in the order the work
+  # happens rather than the order a caller would choose, and both callers that
+  # exist are in this project. The task's two directions arrive as two lists,
+  # because a baseline can legitimately be named in one direction and not the
+  # other; the assembly step passes the same list twice, which is what
+  # `--fromto` means.
+  #
+  # `resolved` is the spec-to-path map from `resolve_baselines!/1`, or `nil` to
+  # resolve here. The two callers want different answers and both are right.
+  #
+  # The task passes `nil`, because for it the target is a path somebody typed:
+  # resolving a baseline can mean unpacking a tarball or building a git ref, and
+  # spending minutes on that only to find the target release is not where the
+  # caller said it was is the wrong order to fail in. So it reads the target
+  # first.
+  #
+  # The assembly step passes a map it resolved during `pre_assemble`, because for
+  # it the target is Mix's own output and cannot be missing - while resolution is
+  # the largest thing that can fail *after* `:assemble` has created the version
+  # directory. Mix does not tidy up after a step of its own that raised, so a
+  # failure there leaves a release a corrected retry will decline to overwrite
+  # and exit 0 having assembled nothing. Resolving before `:assemble` takes that
+  # whole class out of the window; what is left needs the assembled target and
+  # has nowhere earlier to go.
+  #
+  # `dry_run?` defaults to `false` because publishing is what generating a relup
+  # is for. Only the task can ask for the other thing, and only because somebody
+  # typed `--dry-run`; the assembly step exists to put a relup into a release, so
+  # a mode that writes none would be a release assembled without its upgrade
+  # plan.
+  #
+  # Both arities are spec'd. A default argument leaves the shorter head a real
+  # exported function with no spec of its own, and the shorter head is the one
+  # the assembly step calls - so spec'ing only the longer one would have taken
+  # the type off the only call site outside this module.
+  @spec generate!(
+          Path.t(),
+          [binary()],
+          [binary()],
+          %{binary() => Path.t()} | nil,
+          strategy(),
+          Path.t()
+        ) ::
+          :ok
+  @spec generate!(
+          Path.t(),
+          [binary()],
+          [binary()],
+          %{binary() => Path.t()} | nil,
+          strategy(),
+          Path.t(),
+          boolean()
+        ) ::
+          :ok
+  def generate!(target_path, up_specs, down_specs, resolved, strategy, outdir, dry_run? \\ false)
+      when is_list(up_specs) and is_list(down_specs) and strategy in [:auto, :hot, :restart] and
+             is_boolean(dry_run?) do
+    Forecastle.Appup.ensure_systools!()
 
-    # Everything that can be settled from the command line alone is settled
-    # first, so that a mistyped `--outdir` is reported before any release is
-    # read rather than after a generation that then has nowhere to go.
-    strategy = fetch_strategy!(args)
-    outdir = get_outdir(args)
+    target = read_rel!(target_path)
 
-    target = read_rel!(fetch_target!(args))
-    ups = rel_paths(args, :upfrom) ++ rel_paths(args, :fromto)
-    downs = rel_paths(args, :downto) ++ rel_paths(args, :fromto)
+    resolved = resolved || resolve_baselines!(up_specs ++ down_specs)
+
+    ups = baseline_paths(up_specs, resolved)
+    downs = baseline_paths(down_specs, resolved)
     froms = read_froms!(ups ++ downs, target)
 
-    strategy
-    |> plan!(target, froms, ups, downs)
-    |> write_relup!(outdir)
+    refuse_ambiguous!("upgrade from", ups, froms)
+    refuse_ambiguous!("downgrade to", downs, froms)
+
+    # Publication before the verdict, and that ordering is load bearing. An
+    # announcement is a claim about a file that exists: encoding, opening,
+    # writing, closing or renaming can each fail, and every one of those leaves
+    # either no relup or - deliberately - the older one that was already there.
+    # Said first, the run printed that every transition was a hot upgrade and
+    # then failed to produce the relup it was describing.
+    #
+    # A dry run does not weaken that. There is no file for the verdict to be
+    # wrong about, and everything that could still have gone wrong about the
+    # *plan* - including encoding it - has already happened by the time anything
+    # is said. What is left unproven is only whether the bytes could have been
+    # written, which is what the notice below is careful not to claim.
+    {plan, verdict} = plan!(strategy, target, froms, ups, downs)
+
+    # Encoded either way, and published only on an ordinary run. That is where
+    # the line between the plan and the destination falls: encoding is the last
+    # thing that can fail about the relup *itself*, while opening, writing,
+    # closing and renaming are facts about a file, which a mode whose whole
+    # promise is that it writes nothing cannot go and find out.
+    bytes = encode!(plan)
+
+    unless dry_run?, do: publish_relup!(bytes, outdir)
+
+    if verdict, do: Mix.shell().info(verdict)
+
+    if dry_run?, do: Mix.shell().info(dry_run_notice(outdir))
+
+    :ok
   end
 
   @doc false
@@ -210,7 +144,7 @@ defmodule Mix.Tasks.Forecastle.Relup do
   @spec plan_transitions!(binary(), [binary()], [binary()], [binary()], [binary()]) ::
           {charlist(), list(), list()}
   def plan_transitions!(target_path, hot_ups, hot_downs, restart_ups, restart_downs) do
-    ensure_systools!()
+    Forecastle.Appup.ensure_systools!()
 
     target = read_rel!(target_path)
     froms = read_froms!(hot_ups ++ hot_downs ++ restart_ups ++ restart_downs, target)
@@ -221,99 +155,121 @@ defmodule Mix.Tasks.Forecastle.Relup do
     plan
   end
 
-  # Elixir prunes unused OTP applications from the build's code path, which would
-  # otherwise leave :systools - and :systools_relup, which answers whether an
-  # appup covers a transition - unavailable in projects that don't already depend
-  # on :sasl.
-  defp ensure_systools! do
-    Mix.ensure_application!(:sasl)
-    {:ok, _started} = :application.ensure_all_started(:sasl)
-    :ok
+  ## Resolving the baselines
+
+  # Each distinct spec resolved once, and the result mapped back onto the order
+  # it was named in rather than resolved per occurrence: a spec put in both
+  # directions - which is what `--fromto` does, and what the assembly step does
+  # with every baseline it is given - would otherwise build that commit twice,
+  # or, worse, once per direction into two cache entries.
+  #
+  # Two spellings of one release converge here rather than being deduplicated
+  # here: `rel:x` and a bare `x` resolve to the same path, and `read_froms!/2`
+  # reads each distinct *path* once.
+  #
+  # `:release` because a relup is generated from assembled releases. That is the
+  # expensive level, and it is the one this needs; the coverage check is what
+  # `:compile` is there for.
+  @doc false
+  # Public so that a caller can resolve *before* the work that would be wasted by
+  # a baseline that cannot be resolved - which for the assembly step means before
+  # `:assemble`. See `generate!/7` for why the two callers differ.
+  @spec resolve_baselines!([binary()]) :: %{binary() => Path.t()}
+  def resolve_baselines!(specs) do
+    Map.new(Enum.uniq(specs), fn spec ->
+      {spec, Forecastle.Baseline.resolve!(spec, :release).rel_path}
+    end)
   end
 
-  # `parse/2` discards anything it does not recognise, which for a task whose
-  # every argument is a path silently drops half the request - a mistyped
-  # switch, or a path given without one, would otherwise produce a relup
-  # between releases the caller did not name.
-  defp parse!(command_line_args) do
-    case OptionParser.parse(command_line_args, strict: @options) do
-      {cmdline_args, [], []} ->
-        cmdline_args
+  # Made unique *after* resolution as well as before it, because two specs can be
+  # one release: `rel:x` and a bare `x` are the same path written two ways, and
+  # two artefacts with the same bytes resolve to the same unpacking. Left in, the
+  # same from-version would appear twice in one direction of the relup -
+  # `release_handler` selects by from-version and would take the first, so the
+  # second is at best inert, and `:systools` was never asked a question that
+  # needed asking twice.
+  #
+  # Each direction on its own, because a release belongs in both directions of a
+  # `--fromto` and that is not a duplicate.
+  defp baseline_paths(specs, resolved) do
+    specs |> Enum.map(&Map.fetch!(resolved, &1)) |> Enum.uniq_by(&baseline_identity/1)
+  end
 
-      {_cmdline_args, argv, invalid} ->
-        Mix.raise(
-          "Unrecognised arguments: " <>
-            Enum.map_join(Enum.map(invalid, &elem(&1, 0)) ++ argv, ", ", &inspect/1)
-        )
+  # Which release a path *is*, rather than how it was spelled. `rel:` hands back
+  # the path it was given, deliberately, so one release reaches here under as
+  # many names as there are ways to write it: `./rel/...` and its absolute form
+  # are the same release, and so is a symlinked spelling of the same tree.
+  #
+  # Device and inode settle it where the filesystem will say - that is the same
+  # file by the only definition that does not depend on how it was reached, and
+  # it sees through a symlinked spelling of one tree, which a textual comparison
+  # cannot. `Path.expand/1` is the fallback for something that cannot be stat'd:
+  # this is not the place to report that, and `read_rel!/1` a moment later says
+  # exactly what it could not read and why.
+  #
+  # **The `.rel` file *and* the library directory, and the pair is the point.**
+  # The `.rel` alone was not enough, and what it left was a false *dedup* rather
+  # than a false ambiguity: `lib_dir/1` derives the code tree from the spelling of
+  # whichever path survived, so two release roots sharing one `.rel` - a symlink
+  # or a hard link to the same file - while holding different `lib/` trees
+  # collapsed into one baseline, and which code tree the relup was then generated
+  # against depended on the order the switches were written in. That is exactly
+  # the failure `refuse_ambiguous!/3` exists to prevent, arriving underneath it.
+  # Keyed on the pair, the two survive dedup and the ambiguity refusal names them.
+  #
+  # It is also why the library directory is compared by inode rather than by
+  # `Path.expand/1`: a symlinked spelling of one tree expands to two different
+  # strings, so a textual comparison there would refuse the
+  # one-release-reached-two-ways case that dedup exists for.
+  defp baseline_identity(path) do
+    {file_identity(path <> ".rel"), file_identity(lib_dir(path))}
+  end
+
+  defp file_identity(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{major_device: device, inode: inode}} -> {device, inode}
+      {:error, _reason} -> Path.expand(path)
     end
   end
 
-  # `--hot` and `--restart` are the same decision made two ways, so both
-  # together is a request that cannot be honoured rather than one to resolve by
-  # precedence.
-  defp fetch_strategy!(cmdline_args) do
-    given =
-      for {key, switch} <- [hot: "--hot", restart: "--restart"],
-          Keyword.has_key?(cmdline_args, key),
-          do: {key, switch, Keyword.fetch!(cmdline_args, key)}
-
-    case given do
-      [] -> :auto
-      [{key, switch, count}] -> once!(key, switch, count)
-      _both -> Mix.raise("--hot and --restart ask for opposite things and cannot be combined")
-    end
+  # Two *different* releases that share a version are not two transitions. A
+  # relup entry is selected by from-version, so only one of them could ever be
+  # used, and which one would be whichever `:systools` happened to put first -
+  # which is to say, whichever order the switches were written in. A relup that
+  # silently describes an upgrade from one of two candidate releases is worse
+  # than no relup, so this refuses rather than choosing.
+  #
+  # The specs now make this easy to reach without meaning to: one release can be
+  # named three ways, and `tar:my_app-1.0.0.tar.gz` beside `ref:v1.0.0` is a
+  # natural thing to write while checking that they agree. They may well not.
+  #
+  # Identical `.rel` terms would not settle it either. A `.rel` names
+  # applications and their versions and nothing about the code inside them, so
+  # two releases can agree on every line of it and share not one module - which
+  # is the whole reason `tar:` is recommended over `ref:` in the first place.
+  # Deduplicating on the path is therefore as far as this can go on its own; past
+  # that it is a question for whoever wrote the command line.
+  defp refuse_ambiguous!(label, paths, froms) do
+    paths
+    |> Enum.group_by(&froms[&1].vsn)
+    |> Enum.reject(&match?({_vsn, [_only]}, &1))
+    |> Enum.each(fn {vsn, ambiguous} -> Mix.raise(ambiguity(label, vsn, ambiguous)) end)
   end
 
-  defp once!(key, _switch, 1), do: key
-
-  defp once!(_key, switch, count) do
-    Mix.raise("#{switch} may be given once, but was given #{count} times")
-  end
-
-  defp fetch_target!(cmdline_args) do
-    case Keyword.get_values(cmdline_args, :target) do
-      [target] -> target
-      [] -> Mix.raise("--target is required: there is nothing to generate a relup for")
-      many -> Mix.raise(repeated("--target", many))
-    end
-  end
-
-  # A missing directory used to reach `systools` as a failure to open "relup",
-  # which does not mention the directory it could not open it in. Say so here
-  # instead. Creating it is deliberately not this task's job: a mistyped
-  # `--outdir` that springs into existence is how a relup ends up somewhere
-  # nothing looks for it.
-  defp get_outdir(cmdline_args) do
-    case Keyword.get_values(cmdline_args, :outdir) do
-      [] -> "."
-      [outdir] -> existing_dir!(outdir)
-      many -> Mix.raise(repeated("--outdir", many))
-    end
-  end
-
-  defp repeated(switch, values) do
-    "#{switch} may be given once, but was given #{length(values)} times: " <>
-      Enum.map_join(values, ", ", &inspect/1)
-  end
-
-  defp existing_dir!(outdir) do
-    if File.dir?(outdir) do
-      outdir
-    else
-      Mix.raise("--outdir #{outdir} is not a directory")
-    end
-  end
-
-  defp rel_paths(cmdline_args, type) do
-    cmdline_args |> Keyword.take([type]) |> Keyword.values()
+  defp ambiguity(label, vsn, paths) do
+    "#{length(paths)} different baselines were named for the #{label} #{vsn}: " <>
+      Enum.map_join(paths, ", ", &inspect/1) <>
+      ". A relup carries one entry per from-version and release_handler selects by " <>
+      "version, so only one of these could ever be used and which one would depend on " <>
+      "the order they were given in. Name the one you mean."
   end
 
   ## Reading the releases
 
   # The `.rel` terms are the whole description of a transition that is available
   # before any appup has been read: the release name and version, the ERTS
-  # version, and every application with its version. The switches name a `.rel`
-  # file without its extension, which is what `:systools` wants, so the
+  # version, and every application with its version. A release is named by its
+  # `.rel` file without the extension, which is what `:systools` wants, so the
   # extension goes back on here.
   defp read_rel!(path) do
     file = path <> ".rel"
@@ -344,10 +300,18 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # strategy: a relup between two differently-named releases is a mistake under
   # all three, and `:systools` does not refuse it - `check_for_emulator_restart/5`
   # carries both names into a warning and generates the relup regardless.
+  #
+  # The empty clause is a backstop rather than the refusal a caller meets. Both
+  # callers refuse first, in terms of how *they* were asked - the task names its
+  # three switches, `Forecastle.generate_relup/1` names the release's
+  # `upgrade_from:` option - because "you named no baselines" is only actionable
+  # when it says where the naming happens. What this clause is for is that a
+  # relup with no transitions in it is not an upgrade plan, so the next caller,
+  # or a switch that grows a way to pass none, cannot quietly produce one.
   defp read_froms!([], _target) do
     Mix.raise(
-      "at least one of --fromto, --upfrom or --downto is required: a relup with no " <>
-        "transitions in it is not an upgrade plan"
+      "no baselines were named, so there are no transitions to generate: a relup with " <>
+        "no transitions in it is not an upgrade plan"
     )
   end
 
@@ -365,27 +329,53 @@ defmodule Mix.Tasks.Forecastle.Relup do
       )
     end
 
+    # A baseline at the target's own version is not a transition, and `:systools`
+    # will not say so: it accepts the pair and generates an entry from the
+    # version to itself, whose script carries nothing but `point_of_no_return`.
+    # `release_handler` selects an entry by the version it is upgrading *from*
+    # and refuses to unpack a version a deployment already has, so such an entry
+    # could never be used - and a build would have packaged it as this release's
+    # upgrade plan without a word.
+    #
+    # The way to reach it without meaning to is assembling twice into one path:
+    # `upgrade_from:` pointed at the release being built names a directory
+    # `:assemble` has just replaced, so both the target and the baseline describe
+    # the new release. Refused here rather than in the assembly step, because the
+    # same spec typed at `mix castle.relup` is the same mistake.
+    if from.vsn == target.vsn do
+      Mix.raise(
+        "#{from.file} is version #{from.vsn}, which is the version being generated for. " <>
+          "A relup describes transitions between versions, and release_handler selects an " <>
+          "entry by the version it is upgrading from, so an entry from a version to itself " <>
+          "could never be used. Name the release this one is upgraded from - and if that " <>
+          "path is the release being assembled, it was overwritten by this build."
+      )
+    end
+
     from
   end
 
   ## The three strategies
 
   defp plan!(:restart, target, froms, ups, downs) do
-    announce_restart()
-
     # No appup is read on this path, so there is nothing an appup could have
     # asked for: the empty list is matched rather than discarded.
     {plan, []} = plan_transitions(target, froms, [], [], ups, downs)
 
-    plan
+    {plan, restart_verdict()}
   end
 
   defp plan!(:hot, target, froms, ups, downs) do
     Enum.each(froms, fn {_path, from} -> refuse_erts_change!(from, target) end)
 
-    target
-    |> systools_plan!(ups, downs)
-    |> refuse_hot_restarts!()
+    plan =
+      target
+      |> systools_plan!(ups, downs)
+      |> refuse_hot_restarts!()
+
+    # `--hot` says nothing on success: what it promises is that every transition
+    # is a hot upgrade, and it refuses rather than reports when one is not.
+    {plan, nil}
   end
 
   # Two things decide what `auto` does, and only one of them is knowable before
@@ -424,9 +414,7 @@ defmodule Mix.Tasks.Forecastle.Relup do
         edge_paths(restart_downs)
       )
 
-    settle_restarts!(chosen, appup_restarts)
-
-    plan
+    {plan, restart_verdict(chosen, appup_restarts)}
   end
 
   # Each direction on its own. An appup carries separate upgrade and downgrade
@@ -601,31 +589,24 @@ defmodule Mix.Tasks.Forecastle.Relup do
   ## Whether an appup covers a transition
 
   # Answered the way `systools_relup` answers it, so that `auto`'s judgement and
-  # the relup `:systools` would then generate cannot disagree. What its
-  # `get_script_from_appup/5` does, in OTP 28.3's `sasl-4.3`:
+  # the relup `:systools` would then generate cannot disagree. `Forecastle.Appup`
+  # is where the reading and the matching live, and where the account of what
+  # `get_script_from_appup/5` does is kept - it is shared with
+  # `mix castle.appup`, which has to ask about the same file, keyed by the same
+  # from-version, and reach the same answer.
   #
-  #   - it reads `<app_dir>/<app>.appup`, where `app_dir` holds the *target*
-  #     release's copy of the application. So the appup that decides an edge is
-  #     the new version's, and its entries are keyed by the version being
-  #     upgraded from - see `appup_file/2`.
-  #   - it takes the `up` list for an upgrade and the `dn` list for a downgrade.
-  #     Hence the direction: the two lists are independent, and a from-version in
-  #     one need not be in the other.
-  #   - it selects the entry with `appup_search_for_version/2`, *not* by string
-  #     equality. A from-version given as a charlist matches by term equality;
-  #     one given as a **binary** is a regular expression, run against the
-  #     from-version with `re:run/3` and accepted only when the whole match is
-  #     the from-version itself. That function is exported for reuse ("Used by
-  #     release_handler:find_script/4. Also used by kernel, stdlib and sasl
-  #     tests"), so it is called here rather than reimplemented, and a regex
-  #     from-version resolves exactly as the upgrade will resolve it.
+  # What is decided here rather than there is the *file*: `<app_dir>/<app>.appup`
+  # where `app_dir` holds the **target** release's copy of the application, which
+  # is the directory `:systools` resolves it to for this transition. So the appup
+  # that decides an edge is the new version's, keyed by the version being
+  # upgraded from.
   #
   # `nil` means covered. Anything else is the phrase that says what was missing.
   defp appup_gap(direction, app, target, from_vsn) do
     file = appup_file(app, target)
 
-    case appup_entries(file, direction) do
-      {:ok, entries} -> entry_gap(entries, from_vsn, direction, file)
+    case Forecastle.Appup.read(file) do
+      {:ok, appup} -> entry_gap(appup, from_vsn, direction, file)
       {:error, gap} -> gap
     end
   end
@@ -637,29 +618,10 @@ defmodule Mix.Tasks.Forecastle.Relup do
     Path.join([lib_dir(target.path), "#{app}-#{target.apps[app]}", "ebin", "#{app}.appup"])
   end
 
-  defp appup_entries(file, direction) do
-    case :file.consult(to_charlist(file)) do
-      {:ok, [{_appup_vsn, up, down}]} when is_list(up) and is_list(down) ->
-        {:ok, if(direction == :up, do: up, else: down)}
+  defp entry_gap(appup, from_vsn, direction, file) do
+    entries = Forecastle.Appup.entries(appup, direction)
 
-      {:ok, _terms} ->
-        {:error, "#{shorten(file)} cannot be read as an appup"}
-
-      {:error, :enoent} ->
-        {:error, "there is no appup at #{shorten(file)}"}
-
-      {:error, reason} ->
-        {:error, "#{shorten(file)} could not be read: #{inspect(reason)}"}
-    end
-  end
-
-  defp entry_gap(entries, from_vsn, direction, file) do
-    # Through `apply/3`, as `:systools.make_relup/4` is, and for the same reason:
-    # `:sasl` is not a dependency, so neither module is on the code path this is
-    # compiled against.
-    args = [to_charlist(from_vsn), entries]
-
-    case apply(:systools_relup, :appup_search_for_version, args) do
+    case Forecastle.Appup.script(entries, from_vsn) do
       {:ok, _script} -> nil
       :error -> missing_entry(direction, file, from_vsn)
     end
@@ -675,19 +637,11 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
   defp shorten(path), do: Path.relative_to_cwd(path)
 
-  # The applications the project is taken to own the appups for: its own, plus
-  # every child of an umbrella. Everything else in the release is something
-  # whose upgrade instructions, if it has any, were written for somebody else's
-  # transitions.
-  defp project_apps do
-    umbrella =
-      case Mix.Project.apps_paths() do
-        nil -> []
-        paths -> Map.keys(paths)
-      end
-
-    Enum.reject([Mix.Project.config()[:app] | umbrella], &is_nil/1)
-  end
+  # The applications the project is taken to own the appups for. In
+  # `Forecastle.Appup` because `mix castle.appup` defaults to the same set, and
+  # two answers to "which appups are ours" that could drift apart is one more
+  # than this pair of tasks can have.
+  defp project_apps, do: Forecastle.Appup.project_apps()
 
   # For the message only - the decision above rests on ownership alone. That is
   # why `Mix.Project.deps_apps/0`, which loads and caches the whole dependency
@@ -790,12 +744,10 @@ defmodule Mix.Tasks.Forecastle.Relup do
 
   # `restart_emulator` names the supported one-stage strategy. Keep that useful
   # vocabulary in the announcement without exposing release_handler internals.
-  defp announce_restart do
-    Mix.shell().info(
-      "--restart: every transition is a restart_emulator instruction. " <>
-        "Appups are ignored; no code is hot-loaded. " <>
-        "The restart target is provisional and must be committed after it boots."
-    )
+  defp restart_verdict do
+    "--restart: every transition is a restart_emulator instruction. " <>
+      "Appups are ignored; no code is hot-loaded. " <>
+      "The restart target is provisional and must be committed after it boots."
   end
 
   # The two ways a restart arrives, in one clause, so that a run has one verdict
@@ -824,20 +776,55 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # in the first clause here for exactly that reason - it is only true after
   # generation.
   #
+  # These *return* the verdict rather than printing it, and `generate!/7` prints
+  # it only once the relup has been published. An announcement is a claim about a
+  # file, and it was being made before the file existed: a failure to encode,
+  # open, write, close or rename left a run that had already said every
+  # transition was a hot upgrade and then produced no relup at all - or left the
+  # older one in place, which the publication contract promises and which the
+  # verdict would then have been describing instead.
+  #
   # This is where `auto` refused, while a restart transition could not be
   # completed. It now names the `restart_emulator` transition, the reboot and the
   # provisional state an operator must commit.
-  defp settle_restarts!([], []) do
-    Mix.shell().info("auto: every transition in this relup is a hot upgrade.")
+  defp restart_verdict([], []) do
+    "auto: every transition in this relup is a hot upgrade."
   end
 
-  defp settle_restarts!(chosen, found) do
-    Mix.shell().info(
-      describe_causes("auto made a restart transition of ", chosen, found) <>
-        ". Each uses restart_emulator and reboots into the installed release, which " <>
-        "stays provisional until committed. Use --hot to refuse restart transitions " <>
-        "or --restart to restart every transition."
-    )
+  defp restart_verdict(chosen, found) do
+    describe_causes("auto made a restart transition of ", chosen, found) <>
+      ". Each uses restart_emulator and reboots into the installed release, which " <>
+      "stays provisional until committed. Use --hot to refuse restart transitions " <>
+      "or --restart to restart every transition."
+  end
+
+  ## Saying that nothing was written
+
+  # Named for the switch, as `restart_verdict/0` is: what this says is about the
+  # invocation rather than about the relup, and an invocation is a command line.
+  #
+  # After the verdict rather than before it. The verdict is the answer to the
+  # question a dry run exists to ask - which edge can be hot, and why - and this
+  # is the caveat on it; put first it would read as a heading for everything
+  # after it. It is also the only output a `--hot --dry-run` that succeeds
+  # produces, since `--hot` says nothing on success, so it has to stand on its
+  # own as "this could have been generated".
+  #
+  # The destination is named because the promise is about that path in
+  # particular, and an operator who has just been told nothing was written is
+  # owed the name of the file it was not written to.
+  #
+  # **What is claimed is what this invocation did, and nothing about the file's
+  # contents.** It said "<path> is whatever it was before this run" once, and
+  # that is a claim about a moment that has already passed: nothing here locks or
+  # snapshots the destination, so an ordinary run sharing the output directory -
+  # two CI jobs, a `mix release` alongside - can publish over it while this one
+  # is still generating, and the sentence would be false as it was printed. Said
+  # this way there is nothing for a concurrent writer to falsify, because a run
+  # that did not write is a fact about the run.
+  defp dry_run_notice(outdir) do
+    "--dry-run: the relup was generated and then discarded. This run did not write " <>
+      "#{Path.join(outdir, "relup")}. Run without --dry-run to write it."
   end
 
   ## Writing the relup
@@ -846,8 +833,6 @@ defmodule Mix.Tasks.Forecastle.Relup do
   # which is the format `systools_relup:write_relup_file/2` writes and that
   # `release_handler` - and `Forecastle.verify_relup!/2`, on the way into a
   # release - reads back.
-  defp write_relup!(plan, outdir), do: publish_relup!(encode!(plan), outdir)
-
   defp encode!(plan) do
     case :unicode.characters_to_binary(:io_lib.format(~c"%% coding: utf-8~n~tp.~n", [plan])) do
       bytes when is_binary(bytes) -> bytes
@@ -893,12 +878,13 @@ defmodule Mix.Tasks.Forecastle.Relup do
     end
   end
 
-  # Unique per run: two `mix forecastle.relup` invocations sharing an `--outdir`
-  # must not stage over each other, so the name carries both the OS process and a
-  # counter within it. And unmistakable for a relup - a leading dot and a `.tmp`
-  # suffix - because post-assembly reads the path `relup`, and a staging file
-  # taken for an upgrade plan by anything that scans the directory would be worse
-  # than the failure this exists to prevent.
+  # Unique per run: two runs sharing an output directory must not stage over each
+  # other - two `mix castle.relup` invocations given the same `--outdir`, or one
+  # of those beside a `mix release` writing into a version path - so the name
+  # carries both the OS process and a counter within it. And unmistakable for a
+  # relup - a leading dot and a `.tmp` suffix - because post-assembly reads the
+  # path `relup`, and a staging file taken for an upgrade plan by anything that
+  # scans the directory would be worse than the failure this exists to prevent.
   defp staging_path(outdir) do
     Path.join(outdir, ".relup-#{System.pid()}-#{System.unique_integer([:positive])}.tmp")
   end

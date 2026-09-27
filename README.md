@@ -1,25 +1,28 @@
 # Forecastle
 
-Build-time support for hot-code upgrades.
+Forecastle prepares Elixir releases for hot-code upgrades. It adds Castle's
+release commands, places appups and relups, and generates relups during release
+assembly.
 
-`Forecastle` provides build-time support for the generation of releases that correctly support hot-code 
-upgrades. This includes:
+Forecastle also provides:
 
-  - Copying appup and relup files into place.
-  - Organising the generated release structure so that it's ready for hot-code upgrades.
-  - Adding a `bin/castle` command for unpacking and installing releases, alongside
-    the standard Mix launcher.
+- `mix compile.appup`, which compiles appup source into an application's `ebin`
+  directory.
+- `mix castle.appup`, which checks whether an appup covers the modules that
+  changed.
+- `mix castle.appup.gen`, which drafts missing appup entries.
+- `mix castle.relup`, which generates and checks relups.
+- `Forecastle.UpgradeCase` and `Forecastle.Deployment` for upgrade tests.
 
-Additionally, `Forecastle` ships with a appup compiler and a mix task for relup generation.
+The tasks use the Castle name because applications depend on Castle. Forecastle
+is its build-time dependency.
 
 ## Installation
 
-`Forecastle` is not intended to be taken as a direct dependency.  Most applications should prefer to
-take a dependency on [Castle](https://hexdocs.pm/castle/readme.html) directly which will, in turn 
-take a build-time dependency on `Forecastle`.
+Applications should depend on
+[Castle](https://hexdocs.pm/castle/readme.html), which brings in Forecastle.
 
-For projects that don't define a release, but use the `appup` compiler, it's sufficient to 
-bring `Castle` in as a build-time dependency:
+Projects that only compile appups can exclude Castle from the runtime release:
 
 ```elixir
 def deps do
@@ -29,8 +32,7 @@ def deps do
 end
 ```
 
-For projects that _do_ define one or more releases, `Castle` should be brought in
-as a runtime dependency:
+Projects that build Castle-managed releases need the runtime dependency:
 
 ```elixir
 def deps do
@@ -40,366 +42,411 @@ def deps do
 end
 ```
 
-### `Castle` and `Forecastle` are a matched pair
-
-Take `Castle` 1.0 or later with a 1.x `Forecastle`, and do not pair a 1.x
-`Forecastle` with an older `Castle`. The two halves divide one job between them
-and the boundary moved in 1.0: `Forecastle` no longer intercepts configuration at
-build time, and `Castle` works out the configuration of the version being
-installed for itself, in a temporary VM running that version's own code. That is
-`Castle` 1.0's only path: the branch that read the `build.config` `Forecastle`
-used to write is gone, along with the file. So a release assembled by a 1.x
-`Forecastle` carries the `sys.config` Mix wrote and nothing else, and an older
-`Castle` handed one looks for a file that is not there and refuses the install.
-
-Nothing in the build can enforce this. `Forecastle` is a dependency *of*
-`Castle`, so it cannot constrain the version of `Castle` that brought it in, and
-`Castle`'s own requirement on `Forecastle` is the only constraint there is. Take
-both from the same release series.
+Use Castle and Forecastle from the same release series. Forecastle 1.x leaves
+Mix's `sys.config` in place; Castle 1.x resolves target configuration at install
+time. Older Castle releases expect the removed `build.config` path and cannot
+manage this release layout.
 
 ## Integration
 
-`Forecastle` integrates into the steps of the release assembly process. It requires
-that the `Forecastle.pre_assemble/1` and `Forecastle.post_assemble/1` functions are
-placed around the `:assemble` step, e.g.:
+Define each release lazily and pass its options to `Castle.customize/1`:
 
 ```elixir
 defp releases do
   [
-    myapp: [
-      include_executables_for: [:unix],
-      steps: [&Forecastle.pre_assemble/1, :assemble, &Forecastle.post_assemble/1, :tar]
-    ]
+    myapp: fn ->
+      [include_executables_for: [:unix]]
+      |> Castle.customize()
+    end
   ]
 end
 ```
 
-## Build Time Support
+`Castle.customize/1` calls `Forecastle.steps/1`, which adds pre-assembly and
+post-assembly hooks around `:assemble`, places relup generation before `:tar`,
+and adds a final check for late changes to `upgrade_from:`.
 
-The following steps shape the release at build-time:
+Custom release steps keep their order. Generate the relup after every step that
+changes the release and immediately before the step that packages it. The
+default `[:assemble, :tar]` satisfies this rule.
 
-### Pre-assembly
+If a custom step packages the release without `:tar`, place
+`&Forecastle.generate_relup/1` immediately before that step. Forecastle keeps an
+explicitly placed generator and does not add another. It rejects generation
+after `:tar` when `upgrade_from:` is set.
 
-In the pre-assembly step:
+Set or compute `upgrade_from:` in the release definition, or in a step before
+`:assemble`. Forecastle resolves the option during pre-assembly and rejects
+later changes.
 
-  - Any `relup` in the project root is read and checked against the version being
-    assembled, so that a stale upgrade plan fails the build rather than being
-    packaged as this version's.
-  - A 'preboot' boot script is created that starts `:sasl`, `:compiler`,
-    `:elixir` and `:castle`, and none of the release's own applications. Castle
-    boots a temporary VM on this script to work out the configuration of the
-    version being installed.
+### Build-time changes
 
-The system is then assembled under the `:assemble` step as normal. Runtime
-configuration is Mix's business and is left entirely alone: the file named by
-`:runtime_config_path`, the providers declared through `:config_providers`, the
-`sys.config` Mix writes and the expansion the standard launcher performs at boot
-all behave exactly as they do without `Forecastle`.
+Before assembly, Forecastle:
 
-### Post-assembly
+- validates a project-root `relup` and rejects it when `upgrade_from:` is also
+  present;
+- resolves the baselines named by `upgrade_from:`;
+- validates appup sources under `rel/appups`;
+- creates a preboot script containing `:sasl`, `:compiler`, `:elixir` and
+  `:castle`, which Castle uses to resolve target configuration.
 
-In the post-assembly step:
+After assembly, Forecastle:
 
-  - A `bin/castle` command is added, providing the commands that manage releases.
-    The standard `bin/<release>` launcher that Mix generates is left untouched.
-  - A `bin/start` is added, and it does nothing at all. `release_handler`
-    composes `$ROOT/bin/start <data file>` and installs it as `heart`'s temporary
-    reboot command while preparing an emulator restart, and `heart` really does
-    run it. A Castle release is restarted by its supervisor rather than by
-    `heart`, so the one correct thing for that script to do is exit 0.
-  - The generated `env.sh` is extended with a hook, and everything in it runs
-    only for the commands that start the system. On the **first** start of a
-    deployment it creates `releases/RELEASES`, which is what lets the system
-    manage its own releases — a short-lived VM, once, and only while that file
-    is absent. If the release root is read-only, the start warns and carries on;
-    the system can run and restart but cannot unpack or install upgrades. If the
-    root is intended to be writable, fix the reported error and restart before
-    upgrading.
+- adds `bin/castle` and an inert `bin/start` used during emulator restarts;
+- appends Castle's startup hook to `env.sh` without changing the standard Mix
+  launcher;
+- copies the release's `.rel` file and any staged relup into the release;
+- installs dependency appups under `lib/<app>-<vsn>/ebin`.
 
-    Every start also runs OTP's `heart`, deliberately configured to do nothing:
-    `HEART_NO_KILL`, no `HEART_COMMAND`, a beat timeout at heart's documented
-    maximum, and the inert `bin/start` above. It is there for one reason —
-    `release_handler` calls `heart:set_cmd/1` while preparing an emulator
-    restart, and that raises where no `heart` process exists.
+The startup hook creates `releases/RELEASES` on the first start when the file is
+absent, using a short-lived helper VM. If the release root is read-only, the
+start warns and continues; the node can run and restart but cannot unpack or
+install upgrades until the error is fixed and the node restarted.
 
-    If your deployment already asks for `-heart` — in `rel/vm.args.eex`, in
-    `ELIXIR_ERL_OPTIONS`, in one of `ERL_AFLAGS`, `ERL_FLAGS` and `ERL_ZFLAGS`,
-    or in `ERL_OTP<major>_FLAGS` — that is fine, and nothing is added beside it:
-    two of the flag make `init:get_argument(heart)` answer `{ok, [[], []]}`,
-    which heart's own startup check has no clause for, so the boot would hang
-    having printed nothing. The hook settles it by asking `erl` what argument
-    list it would build, so quoting and escaping in those values are read the way
-    `erl` reads them, and all six places a flag can come from are covered at
-    once. It asks on every start, which costs one short-lived `erl` that exits
-    without booting anything; commands that do not start the system — `eval`,
-    `rpc`, `remote` — ask nothing.
+The hook also starts OTP heart with no restart command and selects a pending
+restart target. Forecastle adds its own `-heart` only after the helper exits,
+and never beside a `-heart` the deployment already supplies. A `-heart` in
+`rel/vm.args.eex` reaches only the system VM. One in `ELIXIR_ERL_OPTIONS` or
+`ERL_*FLAGS` also reaches the helper, which then prints heart's lifecycle
+messages on the first start.
 
-    Those three are **assigned**, and `HEART_COMMAND` is **unset**, rather than
-    defaulted — so a deployment that already has any of them in its environment
-    still gets a heart that does nothing. There is no opting out of that while
-    this hook is in use: your supervisor owning the restart is what the rest of
-    it depends on. A start that displaces one of your settings says so on
-    standard error, naming what it displaced, rather than failing the boot over a
-    configuration conflict or losing the setting silently. A deployment that sets
-    none of them says nothing at all.
+Projects may supply `rel/env.sh.eex`; its contents run first.
 
-    And a start that follows such a restart selects the version that was
-    installed. See *Upgrades that restart the emulator* below.
+Forecastle does not alter runtime configuration. Mix retains control of
+`:runtime_config_path`, `:config_providers`, `sys.config`, and normal boot-time
+configuration expansion.
 
-    Any `env.sh` the project supplies through `rel/env.sh.eex` is preserved, and
-    runs first.
-  - The generated _name.rel_ is copied into the `releases` folder as _name-vsn.rel_,
-    which is where `release_handler` looks for it when unpacking a tarball.
-  - Any checked `relup` is written into the version path of the release.
+## Managing releases
 
-## Managing Releases
-
-The release itself is controlled through the standard launcher that Mix generates,
-which `Forecastle` does not modify:
+Use the standard Mix launcher to control the running node:
 
 ```shell
-> myapp/bin/myapp start
-> myapp/bin/myapp remote
-> myapp/bin/myapp rpc "..."
-> myapp/bin/myapp stop
+myapp/bin/myapp start
+myapp/bin/myapp remote
+myapp/bin/myapp rpc "..."
+myapp/bin/myapp stop
 ```
 
-Moving the running system from one version to the next is done through `bin/castle`:
+Use `bin/castle` to manage versions:
 
 ```shell
-# List the releases the system knows about, and their status.
-> myapp/bin/castle releases
+# List known releases and their status.
+myapp/bin/castle releases
 
-# Ask whether this system can be upgraded from at all. Silence means it can.
-> myapp/bin/castle upgradable
+# Check whether this node can be upgraded. Success prints nothing.
+myapp/bin/castle upgradable
 
-# Unpack myapp-0.1.1.tar.gz, which you have placed in myapp/releases.
-> myapp/bin/castle unpack 0.1.1
+# Stage and install myapp-0.1.1.tar.gz from myapp/releases.
+myapp/bin/castle unpack 0.1.1
+myapp/bin/castle install 0.1.1
 
-# Make 0.1.1 the version that is running now. Whether the VM is restarted is a
-# property of the relup rather than of this command.
-> myapp/bin/castle install 0.1.1
+# Make the installed version permanent.
+myapp/bin/castle commit
 
-# Make the provisional release permanent. With no version given, this commits
-# the release awaiting commit and exits non-zero if there is none.
-> myapp/bin/castle commit
-
-# Or, having decided against it, remove it again.
-> myapp/bin/castle remove 0.1.1
+# Remove an unused version.
+myapp/bin/castle remove 0.1.1
 ```
 
-`unpack` and `install` exit non-zero when OTP is using its fallback release
-record instead of one loaded from `releases/RELEASES`. Each asks the system as
-it acts rather than trusting an earlier answer. Resolve the reported `RELEASES`
-problem, then restart; changing the file while the system is running does not
-replace the record already loaded.
+`unpack` and `install` refuse a node using the fallback release record created
+by `:release_handler`. Fix the reported `RELEASES` problem and restart before
+trying again. Replacing the file does not change the record already loaded by a
+running node.
 
-Version selection on restart needs nothing from `Forecastle` once a version has
-been committed: OTP's `release_handler` records the committed version in
-`releases/start_erl.data`, which is exactly where the standard launcher reads it
-from.
+### Emulator restarts
 
-### Upgrades that restart the emulator
+`bin/castle install` handles hot upgrades and one-stage `restart_emulator`
+transitions. For a restart transition, it waits until the target release has
+restarted and finished booting.
 
-`bin/castle install` is the same command whichever kind of transition the relup
-describes, and it exits 0 only once the version it installed is the one running —
-across a reboot, if there is one. What differs is what has to be in place around
-it.
+Run the release under an external supervisor such as systemd, Docker,
+Kubernetes or runit. The release process exits during the upgrade; Castle's
+`bin/start` and heart configuration do not restart it.
 
-**Your supervisor owns the restart.** `release_handler` calls `init:reboot()`,
-the operating system process exits, and nothing inside the release starts it
-again: `bin/start` is inert and `HEART_COMMAND` is unset — unset by the hook on
-every start, even where the environment supplies one — because two things
-starting one service is worse than the problem being solved. Run the release
-under systemd, a Docker restart policy, Kubernetes or runit. A release started by
-hand from a shell will simply stay down until you start it again.
+The installed version remains provisional until `bin/castle commit`. The
+installation restart boots the target, but a later ordinary restart returns to
+the previous permanent release until commit.
 
-**Until you commit, a restart takes you back.** `release_handler` writes the
-installed version to `releases/new_start_erl.data` and leaves
-`releases/start_erl.data` naming the version that is still permanent — only
-`bin/castle commit` writes that file. So a provisional release that crashes
-before it is committed is followed by an ordinary start of the version you were
-on, with nobody intervening. `bin/<release> version` reports that version too,
-because what it prints is the version *to be booted*; ask the running system if
-you want to know what is running.
+Forecastle does not generate or accept the two-stage `restart_new_emulator`
+transition.
 
-**Only the one-stage `restart_emulator` is supported.** `mix forecastle.relup`
-never generates the two-stage `restart_new_emulator` and refuses it wherever it
-finds one; see below.
+## Appup compiler
 
-## The Appup Compiler
+Write the appup as an Elixir expression:
 
-You are responsible for writing the [appup](https://www.erlang.org/doc/man/appup.html)
-scripts for your application, but `Forecastle` will copy the appup into the `ebin` folder
-for you. The steps are as follows:
+```elixir
+{
+  ~c"0.1.1",
+  [
+    {~c"0.1.0", [{:update, MyApp.Server, {:advanced, []}}]}
+  ],
+  [
+    {~c"0.1.0", [{:update, MyApp.Server, {:advanced, []}}]}
+  ]
+}
+```
 
-1. Write a file, in _Elixir form_, describing the application upgrade. e.g.:
-   ```elixir
-   # You can call the file what you like, e.g. appup.exs,
-   {
-    '0.1.1', # Code is eval'd so can also: to_charlist(Mix.Project.config[:version]),
-     [
-      {'0.1.0', [
-        {:update, MyApp.Server, {:advanced, []}}
-      ]}
-     ],
-     [
-      {'0.1.0', [
-        {:update, MyApp.Server, {:advanced, []}}
-      ]}
-     ]
-   }
-   ```
-   This file will typically be checked in to SCM.
-2. Add the appup file to the Mix project definition in mix.exs and add the
-   `:appup` compiler.
-   ```elixir
-   # Mix.exs
-   def project do
-     [
-       appup: "appup.exs", # Relative to the project root.
-       compilers: Mix.compilers() ++ [:appup]
-     ]
-   end
-   ```
+Configure the source and compiler in `mix.exs`:
 
-The compiler owns `<app>.appup` for the whole of its life. It rewrites it on every
-build, and deletes it again if the source goes away or the `:appup` key is dropped,
-so that an incremental build cannot ship upgrade instructions belonging to an
-earlier version. Naming a file that does not exist is a compilation error: the
-project asked for an appup and cannot have one.
+```elixir
+def project do
+  [
+    appup: "appup.exs",
+    compilers: Mix.compilers() ++ [:appup]
+  ]
+end
+```
 
-That housekeeping only happens while the compiler is registered. To turn an appup
-off for some environments, leave `:appup` in `:compilers` and let the `:appup` key
-be `nil` - the output is removed and nothing further is reported. Taking the
-compiler out of `:compilers` instead stops it running, and an output an earlier
-build wrote stays where it is.
+The compiler writes `<app>.appup` into `ebin` on every build. It removes stale
+output when the source or `:appup` setting disappears. To disable an appup for
+an environment, keep `:appup` in `:compilers` and set the project key to `nil`.
 
-## Relup Generation
+## Checking and drafting appups
 
-Forecastle contains a mix task, `forecastle.relup`, that simplifies the generation of
-the relup file. Assuming you have two _unpacked_ releases e.g. `0.1.0` and `0.1.1` 
-and you wish to generate a relup between them:
+`mix castle.appup` compares two builds and reports changed modules that the
+appup does not load or remove:
 
 ```shell
-> mix forecastle.relup --target myapp/releases/0.1.1/myapp --fromto myapp/releases/0.1.0/myapp
+mix castle.appup --from tar:artifacts/myapp-1.0.0.tar.gz
 ```
 
-If the generated file is in the project root, it will be copied during
-post-assembly to the release. That is where the task writes it by default;
-`--outdir` sends it somewhere else, which post-assembly will not find, and a
-relative `--outdir` is resolved from the directory the task is run in rather
-than from the project root. The directory has to exist already: a mistyped one
-that sprang into existence is how a relup ends up somewhere nothing looks for.
+`--to` defaults to the current build. Both switches accept the baseline specs
+described below. Repeat `--app` to select applications; by default the task
+checks owned applications and umbrella children.
 
-At least one of `--fromto`, `--upfrom` and `--downto` is required: a relup with
-no transitions in it is not an upgrade plan.
+The command exits non-zero when it finds a coverage error, including:
 
-The task fails if it could not generate the relup, so a build pipeline can tell,
-and a failure writes nothing at all - so any earlier relup is still sitting where
-post-assembly looks for one, rather than having been replaced by a plan that was
-then refused. The relup itself is never opened for writing: the bytes are staged
-in a file beside it and renamed over it once they are all there, so a run that
-dies with the file open cannot leave half a plan either. A reader sees the whole
-of the old relup or the whole of the new one. Assembly then checks the relup it
-is about to package really is this release's upgrade plan - the right target
-version, with the upgrade and downgrade sections `release_handler` will read -
-and fails if it is not. Between them, a build cannot quietly ship the previous
-version's plan.
+- a changed or added module that no instruction loads;
+- a removed module that no instruction deletes;
+- a module that an edge both loads and deletes;
+- duplicate instructions for a module;
+- a changed module missing from the application's `.app` file;
+- an invalid instruction or a missing from-version entry;
+- changed application code without an application version change.
 
-### Upgrade strategy
+An instruction for an unchanged module produces a warning. An emulator-restart
+edge needs no module-level coverage.
 
-Whether a transition can be hot is a property of the edge between two releases,
-not of either release, so it is chosen per relup:
+The check verifies coverage, not full appup validity. Relup generation remains
+the authority on whether `:systools` accepts the script. Module comparisons use
+the BEAM md5 and persisted attributes, avoiding differences caused only by
+stripping or documentation.
+
+Use `mix castle.appup.gen` to draft missing entries:
 
 ```shell
-# auto: hot where it can be
-> mix forecastle.relup --target ... --fromto ...
-
-# require a hot upgrade, and fail rather than degrade
-> mix forecastle.relup --target ... --fromto ... --hot
-
-# force a full emulator restart, with no appups at all
-> mix forecastle.relup --target ... --fromto ... --restart
+mix castle.appup.gen --from tar:artifacts/myapp-1.0.0.tar.gz
 ```
 
-`--hot` and `--restart` are mutually exclusive, and each may be given once.
+Review the generated source before committing it. The task identifies changed
+modules but cannot choose the correct state-transition instructions for an
+application.
 
-**`auto`**, the default, generates every transition from the applications'
-appups - unless something in that transition cannot be hot-upgraded, and then
-that transition, and only that one, becomes a restart. Two things do that:
+## Appups for dependencies
 
-- **an ERTS change**, always. It is not a hot upgrade under any policy and no
-  appup could make it one.
-- **a version change in an application you do not own** - a dependency, one of
-  Elixir's own applications, one of OTP's - when no appup covers that particular
-  move. The appup consulted is the one beside the *target* release's copy of the
-  application, `lib/<app>-<vsn>/ebin/<app>.appup`, and the from-version is
-  matched the way `systools_relup` matches it, which includes the regexes an
-  appup may name a from-version with. An entry that matches is an instruction for
-  this transition whoever wrote it, so the edge stays hot; nothing matching means
-  there is no hot upgrade to be had.
+Projects may supply appups for dependencies under `rel/appups`:
 
-Each *direction* is classified on its own, because an appup's upgrade and
-downgrade lists are independent: a relup may carry a hot upgrade from a version
-and a restart back down to it. Applications merely added or removed are left
-alone, since starting or stopping one is hot. Which transitions were chosen, and
-why, is printed once per run. Where the run goes on to succeed that is after the
-relup has been generated and inspected, since an appup may itself ask for the
-emulator to be restarted and nothing knows that until there is a script to look
-at.
+```text
+rel/appups/jason-1.4.0-1.4.2.exs
+```
 
-`auto` does not fall back to a restart when an appup for an application you *do*
-own is missing. A transition it judged hot and `systools` then could not generate
-is a failure, so that the default never quietly ships something other than the
-upgrade it decided on.
+The file uses the same appup form:
 
-The announcement names every edge that will restart and why — both the ones
-classification chose and any `restart_emulator` an appup asked for by name, in one
-message, since they are the same transition arrived at two ways. It says that
-each uses `restart_emulator`, reboots into the installed release, and leaves it
-provisional until committed. `--hot` and `--restart` are the ways to insist on
-something else.
+```elixir
+{~c"1.4.2", [{~c"1.4.0", [{:load_module, Jason.Encoder}]}],
+ [{~c"1.4.0", [{:load_module, Jason.Encoder}]}]}
+```
 
-**`--hot`** requires a genuine hot upgrade of every transition, and exits
-non-zero, having written nothing, if one cannot be: a missing appup entry, an
-ERTS change, or an appup that asks for the emulator to be restarted. This is
-about feasibility rather than policy, and it is not the same question `auto`
-asks: `--hot` reads every application's appup, including your own, and takes
-whatever they yield, where `auto` reads only those of the applications you do not
-own and reads them to decide whether the edge can be hot at all. It is the switch
-for a pipeline that promises zero downtime.
+Draft one with:
 
-**`--restart`** makes every transition a single `restart_emulator` instruction.
-No appup is read - not for your own applications either - and `systools` is not
-involved at all. Use it when the upgrade instructions a change would need are
-not worth writing or maintaining.
+```shell
+mix castle.appup.gen --app jason --from <spec>
+```
 
-### Which restart, and what the operator sees
+Forecastle validates these sources before assembly and writes them to
+`lib/<app>-<vsn>/ebin/<app>.appup`. It never changes `deps/`.
 
-OTP has two emulator-restart instructions and they are different transitions,
-not two spellings of one. Forecastle generates only the first:
+The build rejects stale filenames, owned applications, malformed appups,
+missing entries, ambiguous version matches, unreadable appups supplied by the
+dependency, and non-`.exs` files other than dotfiles. It also rejects overlays
+that replace the assembled appup and applications with no target `ebin`
+directory. Retry post-assembly failures with `mix release --overwrite`.
 
-| | `restart_emulator` | `restart_new_emulator` |
-| --- | --- | --- |
-| Where in the script | last | first |
-| Relup evaluated | in full, before the reboot | partly; continues on the way up |
-| Hybrid temporary release | no | yes - new ERTS, kernel, stdlib, sasl over the old applications |
-| `install_release/1` replies | `{ok, Vsn, Descr}` | `{continue_after_restart, Vsn, Descr}` |
+When a dependency ships its own appup, Forecastle merges the project entries
+before the dependency's entries. Project entries therefore override matching
+transitions while preserving the rest of the dependency appup.
 
-The transitions differ operationally, which is why the task keeps the exact
-strategy name in its output.
+To check the installed dependency appup, point `mix castle.appup --app <dep>` at
+an assembled `rel:` or `tar:` target.
 
-`restart_new_emulator` is not a strategy here, and is refused wherever it turns
-up. That is also why `auto` decides the ERTS case for itself rather than asking
-`systools` and taking what comes: `systools` inserts `restart_new_emulator` on
-its own whenever the ERTS version differs between two releases, so a default
-that simply generated a relup would ship the two-stage transition without
-anybody having chosen it.
+## Relup generation
 
-Performing a one-stage restart transition takes two things the release now
-carries: a `heart` process, because `release_handler` calls `heart:set_cmd/1`
-while preparing the reboot, and something to select the installed version on the
-way back up, because the reboot would otherwise come back on whichever version
-`releases/start_erl.data` names. Both are in the `env.sh` hook; see
-*Upgrades that restart the emulator* above for what your supervisor has to do.
+### During assembly
+
+Set `upgrade_from:` to a list of supported baselines:
+
+```elixir
+defp releases do
+  [
+    myapp: fn ->
+      [
+        include_executables_for: [:unix],
+        upgrade_from: ["tar:artifacts/myapp-1.0.0.tar.gz"]
+      ]
+      |> Castle.customize()
+    end
+  ]
+end
+```
+
+Forecastle resolves the baselines before assembly, then generates both upgrade
+and downgrade instructions immediately before `:tar`. The strategy is `auto`.
+One `mix release` therefore produces a tarball containing its relup.
+
+Omitting `upgrade_from:` skips generation. Forecastle rejects an empty or
+malformed value, duplicate options, unresolved baselines, late changes, and a
+project-root `relup` supplied at the same time.
+
+A failure after assembly leaves the target directory in place. Retry with
+`mix release --overwrite`.
+
+A `ref:` baseline builds that revision. Set no `upgrade_from:` while
+`CASTLE_BASELINE` is present, or Forecastle will reject the recursive baseline
+build.
+
+### For an existing target
+
+Generate a relup for an assembled target with `mix castle.relup`:
+
+```shell
+mix castle.relup \
+  --target myapp/releases/0.1.1/myapp \
+  --fromto myapp/releases/0.1.0/myapp
+```
+
+`--target` names the target `.rel` file without its extension. Supply at least
+one of `--fromto`, `--upfrom` and `--downto`. The task writes `relup` to the
+project root by default; `--outdir` selects an existing directory.
+
+### Baseline specs
+
+Relup generation, appup tasks and the test harness share one baseline grammar:
+
+| Spec | Source |
+| --- | --- |
+| `rel:path/to/release` | An assembled release, named by its `.rel` path without the extension |
+| `tar:path/to/release.tar.gz` | A release tarball |
+| `ref:git-ref` | A git revision built in a temporary worktree |
+
+A path without a prefix means `rel:`. `--target` is always a path, not a
+baseline spec.
+
+Prefer `tar:` when the shipped artifact is available. Relups select a transition
+by version string; a baseline rebuilt with different dependencies or tools may
+not match the deployed code.
+
+Forecastle caches resolved `tar:` and `ref:` baselines under
+`_build/castle/baselines`. Tar entries use the artifact digest. Git entries use
+the resolved commit, Mix environment and target, and the Elixir and ERTS
+versions. Cache this directory in CI.
+
+Writes are staged and renamed into place. A failed generation leaves an older
+relup untouched, and assembly checks that a staged relup targets the release
+being built.
+
+### Strategies
+
+`mix castle.relup` supports three strategies:
+
+```shell
+# Use hot upgrades where possible.
+mix castle.relup --target ... --fromto ...
+
+# Require every transition to remain hot.
+mix castle.relup --target ... --fromto ... --hot
+
+# Restart the emulator for every transition.
+mix castle.relup --target ... --fromto ... --restart
+```
+
+`auto`, the default, generates hot transitions unless the ERTS changes or an
+unowned application changes version without a matching appup. It classifies
+upgrade and downgrade directions separately. A missing appup for an owned
+application remains an error.
+
+`--hot` rejects any transition that requires a restart. `--restart` emits one
+`restart_emulator` instruction per transition and does not read appups.
+
+Forecastle prints every restart edge and its reason. It rejects
+`restart_new_emulator`, including instructions inserted by an appup.
+
+### Dry runs
+
+Add `--dry-run` to generate and validate the plan without writing the relup:
+
+```shell
+mix castle.relup --target ... --fromto ... --hot --dry-run
+```
+
+The exit status reports whether generation succeeded. A dry run cannot detect
+write failures at the destination. It still resolves and caches baselines, so
+`tar:` may unpack an artifact and `ref:` may build a revision.
+
+## Testing an upgrade
+
+Test an upgrade by starting the shipped release, installing the next version,
+and asserting that application state and code both moved as expected.
+
+`Forecastle.UpgradeCase` provides a scratch path for each test module.
+`Forecastle.Deployment` deploys baselines, controls the release, and runs Castle
+commands.
+
+```elixir
+defmodule MyApp.UpgradeTest do
+  use Forecastle.UpgradeCase
+
+  @moduletag :upgrade
+
+  @shipped "tar:artifacts/myapp-1.0.0.tar.gz"
+  @next "_build/prod/myapp-1.1.0.tar.gz"
+
+  setup_all %{scratch: scratch} do
+    deployment = Deployment.deploy!(@shipped, Path.join(scratch, "deploy"))
+    on_exit(fn -> Deployment.stop(deployment) end)
+
+    Deployment.start!(deployment)
+    Deployment.rpc!(deployment, "IO.puts(MyApp.Counter.bump())")
+
+    Deployment.stage!(deployment, @next)
+    Deployment.castle!(deployment, ["unpack", "1.1.0"])
+    Deployment.castle!(deployment, ["install", "1.1.0"])
+    Deployment.castle!(deployment, ["commit"])
+
+    {:ok, deployment: deployment}
+  end
+
+  test "moves to 1.1.0 without losing the count", %{deployment: deployment} do
+    assert Deployment.rpc!(deployment, "IO.puts(inspect(MyApp.Counter.info()))") ==
+             ~s({"1.1.0", 1})
+
+    assert Deployment.version(deployment) == "1.1.0"
+  end
+end
+```
+
+Mark these tests so the ordinary suite can exclude them; each test starts a
+release. Always stop a deployment in `on_exit/1`.
+
+Assert the code version as well as retained state. A missing appup instruction
+can leave old code serving calls while the release reports the new version.
+
+Use `Deployment.install_supervised!/3` for a `restart_emulator` transition. It
+acts as the external supervisor while `bin/castle install` waits for the release
+to return. Use `Deployment.castle!/3` for hot installs.
+
+`deploy!/3` copies the baseline into a separate destination and refuses to
+replace a running deployment. `start!/2` and `:boot_timeout` bound launcher and
+boot waits but do not stop a process that outlives a timeout. Increase
+`:boot_timeout` for applications that perform slow startup work.
+
+Deployment commands remove inherited release-launcher and emulator variables so
+the test does not accidentally use the developer's shell configuration.
