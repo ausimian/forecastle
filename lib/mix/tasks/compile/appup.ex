@@ -1,29 +1,25 @@
 defmodule Mix.Tasks.Compile.Appup do
   @moduledoc """
-  Compiles appup files into the application's ebin folder.
+  Compiles appup source into the application's `ebin` directory.
 
-  This compiler is provided by `Forecastle`, Castle's build-time half.
+  Configure the source with the `:appup` project key, relative to `mix.exs`:
 
-  The `:appup` project key names a file, relative to the project file, that is
-  evaluated for its value. It must not introduce top-level bindings. Whatever it
-  returns is written to `<app>.appup` alongside the application's beams.
+      def project do
+        [
+          appup: "appup.exs",
+          compilers: Mix.compilers() ++ [:appup]
+        ]
+      end
 
-  The output is removed again whenever the project stops asking for it, either
-  because the source is gone or because the `:appup` key was dropped. Leaving it
-  in place would let an incremental build - which is what a CI cache produces -
-  ship upgrade instructions from an earlier version of the application, and
-  `release_handler` would then apply that obsolete plan during a hot upgrade.
+  The source is evaluated for its value and must not introduce top-level
+  bindings. The compiler writes `<app>.appup` beside the application's BEAM
+  files on every build.
 
-  A configured but missing source is a compilation error: the project asked for
-  an appup and cannot have one, and the alternative is a release that only fails
-  later, in `:systools.make_relup/4` or during the upgrade itself.
-
-  Removal only happens while the compiler is registered. Taking `:appup` out of
-  `:compilers` stops it running at all, and whatever an earlier build wrote then
-  stays where it is - as it would for any Mix compiler dropped from the list. To
-  turn an appup off per environment, leave the compiler registered and let the
-  `:appup` key be `nil`: that path removes the output and says nothing further.
+  A configured but missing source is a compilation error. When the source or
+  project key is removed, the compiler deletes stale output. To disable appups
+  for one environment, keep the compiler registered and set `:appup` to `nil`.
   """
+
   @shortdoc "Compiles appup files"
   use Mix.Task.Compiler
 

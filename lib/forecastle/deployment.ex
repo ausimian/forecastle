@@ -1,64 +1,18 @@
 defmodule Forecastle.Deployment do
   @moduledoc """
-  A release on disk, and everything an upgrade test does to one.
+  Controls a release during an upgrade test.
 
-  Assembling a release proves it builds. Only starting one and moving it to the
-  next version proves the upgrade *works*, and that is what this is for: it
-  starts a release under its own stock Mix launcher, drives `bin/castle` against
-  it, asks the running node questions over `rpc`, and stands in for the external
-  supervisor a transition that restarts the emulator needs.
+  A deployment can use an existing release tree through `new/3`, or copy a
+  `rel:`, `tar:` or `ref:` baseline into an isolated destination through
+  `deploy!/3`. Copying protects the baseline cache from runtime changes.
 
-  It is deliberately not a test of anything. What "the upgrade worked" means is
-  the project's to say - a counter that survived, a socket still open, a job
-  still in flight - so nothing here asserts it. See `Forecastle.UpgradeCase` for
-  the case template this is the other half of, and for what a whole upgrade test
-  looks like.
+  The module starts and stops the stock Mix launcher, invokes `bin/castle`, runs
+  RPC expressions, and supervises one-stage emulator restarts. Tests define
+  their own success criteria; see `Forecastle.UpgradeCase` for an example.
 
-  ## The two ways to get one
-
-  `new/3` names a release tree that is already where it should be, which is what
-  a project's own `mix release --path` produces.
-
-  `deploy!/3` takes a *baseline spec* - the same `rel:`, `tar:` and `ref:`
-  grammar `mix castle.relup` reads, see `Forecastle.Baseline` - and lays the
-  release it names out in a directory of its own. That is what makes an upgrade
-  test from the artefact that actually shipped a single line, and `tar:` is the
-  spec to reach for: a relup is selected by from-version *string* and never
-  checked against the code that is running, so a baseline rebuilt from source
-  today is a release that was never deployed.
-
-  **It copies rather than deploying in place, and that is not tidiness.**
-  `Forecastle.Baseline` resolves `tar:` and `ref:` into an immutable cache under
-  `_build/castle/baselines`, keyed on what the entry was built from. Starting a
-  release writes `releases/RELEASES` into it, unpacking one puts another release
-  beside it and installing rewrites `start_erl.data` - so a deployment run in the
-  cache would leave every later resolution of that spec holding a half-upgraded
-  system, with nothing to say so.
-
-  ## The environment a release is started with
-
-  Every command runs with `scrubbed_env/1` applied, which unsets the variables
-  that would otherwise leak from the shell running the tests into the release
-  being tested. That is not hygiene either: `ELIXIR_ERL_OPTIONS` and its four
-  siblings carry flags to the emulator, so a `-heart` in a developer's shell or a
-  CI image ends up in every release these tests start, and a release that already
-  supplies one is then given two - which leaves `heart:check_start_heart/0` with
-  no clause to match and hangs the boot having printed nothing.
-
-  **Every variable the generated launcher reads as a default is unset**, and that
-  is a rule rather than a list: `bin/<name>` takes `RELEASE_VM_ARGS`,
-  `RELEASE_BOOT_SCRIPT`, `RELEASE_MODE`, `RELEASE_DISTRIBUTION` and the rest from
-  the environment where they are set, so one of them inherited from a shell or a
-  CI image does not merely add a flag - it points the release at a different args
-  file, a different boot script, a different configuration or a different
-  distribution mode. What that produces is a test of a release materially unlike
-  the one that would be deployed, presenting as a bug in the release rather than
-  as a leaked variable. `Forecastle.DownstreamUpgradeTest` measures the rule
-  against the launcher Mix actually generated, so a variable a later Elixir adds
-  shows up as a failure rather than as a hole.
-
-  Anything a caller passes is applied after the scrub, so a test that wants one
-  of these set says so and gets it.
+  Commands unset inherited emulator flags and release-launcher defaults before
+  applying the environment supplied by the caller. This keeps the deployment
+  independent of the shell or CI process running the test.
   """
 
   # `flunk/1` only. A deployment that never answers is a test failure and wants
@@ -158,26 +112,10 @@ defmodule Forecastle.Deployment do
                RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP)
 
   @doc """
-  Names a release tree that is already laid out where it is wanted.
+  Describes an existing release tree.
 
-  `root` is the directory holding `bin/`, `lib/` and `releases/` - what
-  `mix release --path` was pointed at - and `name` is the release inside it, so
-  that `bin/<name>` is the launcher.
-
-  Options:
-
-    * `:cd`  - the directory commands are run from. Defaults to the current one,
-      which for a test run is the project root rather than the release, and
-      deliberately: a launcher invoked from somewhere other than the release root
-      is the ordinary case, and running from inside the release would stop these
-      tests from covering it.
-    * `:env` - environment carried by every command this deployment runs, on top
-      of `scrubbed_env/1` and underneath anything a call passes for itself.
-    * `:boot_timeout` - how long, in milliseconds, the release is given to answer
-      an rpc after `daemon` has returned. Defaults to 20 seconds, which is a
-      description of a release that does nothing on the way up: an application
-      that runs migrations, warms a cache or waits on a dependency takes longer,
-      and its project is the only thing that knows how much longer.
+  `root` contains `bin`, `lib` and `releases`; `name` selects `bin/<name>`.
+  Options are `:cd`, `:env`, and `:boot_timeout`, which defaults to 20 seconds.
   """
   @spec new(Path.t(), binary(), keyword()) :: t()
   def new(root, name, opts \\ []) when is_binary(root) and is_binary(name) do
@@ -191,33 +129,11 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  Resolves a baseline spec and lays the release it names out in `into`.
+  Resolves a baseline and copies its release into an isolated destination.
 
-  The spec is the grammar `Forecastle.Baseline` reads - `rel:` an assembled
-  release, `tar:` a shipped artefact, `ref:` a git ref built in a worktree - and
-  a value with no prefix is a `rel:` path. `tar:` is the one to prefer, for the
-  reason `Forecastle.Baseline` gives: it is the release that shipped rather than
-  one rebuilt from the same source with today's toolchain.
-
-  `into` is emptied first and the release copied into it, so the deployment is
-  this test's to write to and the resolved baseline stays exactly as it was
-  resolved. Options are `new/3`'s.
-
-  Refuses a spec that does not resolve to a release, and a destination that
-  overlaps the one it does. Both are asked *before* the destination is emptied:
-  everything that can be found out about the source is found out while there is
-  still nothing to lose by saying so.
-
-  It also refuses a destination whose release is **running**, by asking it. That
-  check is deliberately cheap and therefore not a proof of absence: a release
-  answers, or it does not, and a previous run interrupted in the seconds between
-  `daemon` spawning the VM and that VM accepting distribution answers "no"
-  exactly as an absent one does. Telling those apart takes waiting, and waiting
-  taxes every ordinary deployment - the common case is a destination holding a
-  release that really is stopped - to cover a few seconds of an already abnormal
-  one. So the guard catches a running deployment and not one that is still
-  starting, and `Forecastle.UpgradeCase`'s advice stands: stop what you started,
-  in an `on_exit`.
+  Accepts `rel:`, `tar:` and `ref:` specs. The function validates the source and
+  destination before emptying `into`, and refuses overlapping paths or a release
+  already running there. Options are the same as `new/3`.
   """
   @spec deploy!(binary(), Path.t(), keyword()) :: t()
   def deploy!(spec, into, opts \\ []) when is_binary(spec) and is_binary(into) do
@@ -462,20 +378,7 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  The release version an ordinary start of this deployment would boot.
-
-  Read from `releases/start_erl.data`, which is `<erts vsn> <release vsn>`, and
-  read the way the launcher reads it: `bin/<name>` takes `RELEASE_VSN` from
-  `cut -d' ' -f2`, so this takes the second space-separated field. **Not the
-  last one**, which is what it took while it was a private helper here. The two
-  answers differ only for a version that itself contains a space - which Castle
-  permits, since its rule is valid UTF-8 with no control characters - and for
-  one of those the launcher's answer is the one that is true about what starts.
-
-  That file is written by Mix at assembly and afterwards only by
-  `release_handler:make_permanent/1`, so between an install and the commit that
-  follows it this still names the version being upgraded *from* - which is the
-  rollback target, and is right rather than stale.
+  Returns the deployed release version from `releases/start_erl.data`.
   """
   @spec version(t()) :: binary()
   def version(%__MODULE__{} = deployment) do
@@ -488,11 +391,9 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  Puts a release tarball where `bin/castle unpack` will find it.
+  Copies a release tarball into the deployment's `releases` directory.
 
-  `release_handler` looks for `releases/<name>-<vsn>.tar.gz` under the release
-  root, which is the name `mix release` gives the archive it packs, so the
-  archive is copied under the name it already has. Returns where it was put.
+  Returns the copied path.
   """
   @spec stage!(t(), Path.t()) :: Path.t()
   def stage!(%__MODULE__{} = deployment, tarball) do
@@ -502,33 +403,11 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  Starts the release as a daemon and waits for it to answer.
+  Starts the release as a daemon and waits for it to accept RPC calls.
 
-  Returns what the launcher printed, which is how a test gets at what `env.sh`
-  said on the way past - the two streams merged. `launcher!/3` raises if the
-  start itself failed, so a caller that ignores the return value still gets that.
-
-  **The launcher is given a deadline, and that is not belt-and-braces.** A boot
-  that hangs is a real failure mode here. If the `-heart` guard misses a flag in
-  `vm.args`, the first-start helper returns, Forecastle adds another flag, and
-  the system VM hangs inside `daemon`: `heart:check_start_heart/0` has no clause
-  for `{ok, [[], []]}`. The helper does not receive `vm.args`. Environment-wide
-  flags such as `ELIXIR_ERL_OPTIONS` are different; they reach both VMs.
-  `System.cmd/3` has no deadline of its own and `setup_all` has no ExUnit timeout,
-  so without this a regression in the guard stops the suite for as long as
-  whatever is running it will wait. Measured by putting the old guard back.
-
-  **What the deadline does is fail the test, and that is all it does.** Nothing
-  here can reach the operating system process behind `System.cmd/3` - closing
-  the port does not terminate the program on the other end of it - so a launcher
-  that hung is still hung when the failure is reported, and a boot that was
-  merely slow may finish afterwards and leave a node running. The same goes for
-  the install in `install_supervised/3`. Both are already-failing situations
-  that somebody is about to look at, and killing a real deployment on a guess
-  would take away what they came to look at; what would not be acceptable is the
-  harness leaving the impression that it had tidied up, so it says here that it
-  has not. `:boot_timeout` is where a release that is slow rather than stuck
-  belongs.
+  Returns combined launcher output. The launcher and boot waits are bounded. A
+  timeout fails the test but may leave the operating-system process running, so
+  callers must still register `stop/2` with `on_exit/1`.
   """
   @spec start!(t(), env()) :: binary()
   def start!(%__MODULE__{} = deployment, env \\ []) do
@@ -572,25 +451,10 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  Stops the release, tolerating a system that is not running.
+  Stops the release, returning `{output, status}`.
 
-  Returns `{output, status}` rather than raising, because the place this belongs
-  is an `on_exit` callback: a suite that failed part way through may have left
-  nothing to stop, and a teardown that raised there would report itself instead
-  of the failure that got it here.
-
-  **It is bounded, and of all the rpcs here this is the one that has to be.**
-  `bin/<name> stop` is an rpc to `System.stop/0`, so a node that accepted a
-  distribution connection and then wedged never answers it - and the reason that
-  matters more here than elsewhere is *where* this is called from. Every other
-  command runs inside a test, under the module's ExUnit timeout; a teardown runs
-  after one, and what it would bury is the failure that had just been reported.
-  A suite whose `await_boot!/2` correctly timed out would sit in teardown for the
-  whole module timeout and then finish with an `on_exit callback` error, which
-  says nothing about the boot.
-
-  Answers `:timeout` in that case, which is neither a stop nor a failure to find
-  anything to stop, and should not be mistaken for either.
+  A stopped or unreachable release is tolerated for teardown. Returns `:timeout`
+  when the stop RPC does not answer within the probe deadline.
   """
   @spec stop(t(), env()) :: {binary(), non_neg_integer()} | :timeout
   def stop(%__MODULE__{name: name} = deployment, env \\ []) do
@@ -598,12 +462,9 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  The operating system pid of the running release, as the release reports it.
+  Returns the operating-system pid reported by the running release.
 
-  `bin/<name> pid` is an rpc, so this is the beam's own `System.pid/0` rather
-  than anything about the process that asked - which is what makes it usable both
-  for telling one incarnation of the node from another and for waiting on the
-  first to go away.
+  The RPC is bounded and the final output line must contain only the pid.
   """
   @spec os_pid(t(), env()) :: binary()
   def os_pid(%__MODULE__{name: name} = deployment, env \\ []) do
@@ -665,21 +526,10 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  Waits until the release accepts an rpc, or fails the test.
+  Waits until the release accepts an RPC call.
 
-  The deadline is the deployment's `:boot_timeout`. A release that does nothing
-  on the way up answers in a second or two; one that runs migrations or waits on
-  a dependency does not, and how long it should be given is a property of the
-  project rather than of this harness.
-
-  It is a budget for waiting rather than a stopwatch, and is approximate to
-  within one probe: a probe already in flight is allowed to finish, and one is
-  always made even when the whole deadline is shorter than the polling interval.
-  Erring on the side of patience is deliberate - the alternative is failing a
-  release that answered a fraction of a second after an arbitrary number.
-
-  `env` is the environment the rpc is made with, and it is not decoration: it is
-  how a release started under a node name or cookie of its own is reached again.
+  The deployment's `:boot_timeout` is a total budget. Pass the same environment
+  used to start a release with a custom node name or cookie.
   """
   @spec await_boot!(t(), env()) :: :ok
   def await_boot!(%__MODULE__{} = deployment, env \\ []) do
@@ -762,12 +612,9 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  Waits until the operating system process `pid` is gone, or fails the test.
+  Waits for an operating-system process to exit.
 
-  Asked of the operating system rather than of the node: a node that has stopped
-  answering rpc is not necessarily a process that has exited, and starting the
-  replacement while the old beam still holds the distribution port is how a
-  supervised restart turns into a name clash instead of a boot.
+  Raises an ExUnit failure when the process remains after the timeout.
   """
   @spec await_exit!(binary(), pos_integer()) :: :ok
   def await_exit!(pid, timeout \\ @exit_timeout) when is_integer(timeout) do
@@ -794,24 +641,11 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  Installs `vsn` through `bin/castle` while acting as the release's supervisor,
-  returning `{output, status}`.
+  Installs a restart-based transition while acting as the external supervisor.
 
-  **This is the call for a transition that restarts the emulator, and the reason
-  there is no single one that covers both kinds.** Such a transition applies the
-  relup and then reboots, and nothing inside the release starts it again - that
-  is the design rather than a gap: `bin/start` is inert, `HEART_COMMAND` is
-  unset, and systemd, Docker or runit owns the restart. So a test of one has to
-  be the supervisor. `bin/castle install` is run in a task, because it keeps
-  asking the system what it is running until the version it installed answers;
-  this waits for the old *operating system process* to go, starts the release
-  again, and then collects what the install made of it.
-
-  A hot upgrade never leaves that process, so this would wait for an exit that is
-  not coming. Use `castle/3` or `castle!/3` with `["install", vsn]` for one.
-
-  For a test that wants the failure rather than the tuple, `install_supervised!/3`
-  raises on a non-zero status the way every other bang here does.
+  Runs `bin/castle install`, waits for the old process to exit, starts the release
+  again, and returns `{output, status}` after Castle confirms the target. Use
+  `castle/3` for hot installs, which do not exit their process.
   """
   @spec install_supervised(t(), binary(), env()) :: {binary(), non_neg_integer()}
   def install_supervised(%__MODULE__{} = deployment, vsn, env \\ []) do
@@ -826,14 +660,7 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  `install_supervised/3`, raising on a non-zero exit.
-
-  The install can fail on either side of the reboot, and the far side is the
-  one a bang name is doing work for: `bin/castle install` polls for the version
-  it installed *after* the release has come back, so an upgrade that rolled back
-  on the way up is reported here and nowhere earlier. Returning the tuple under
-  a bang name left that for a caller to notice, and a test written the way the
-  documentation suggests - substituting this for `castle!/3` - would not have.
+  Runs `install_supervised/3` and raises on a non-zero exit.
   """
   @spec install_supervised!(t(), binary(), env()) :: binary()
   def install_supervised!(%__MODULE__{} = deployment, vsn, env \\ []) do
@@ -920,14 +747,10 @@ defmodule Forecastle.Deployment do
   end
 
   @doc """
-  The caller's environment with everything that leaks into a release unset, and
-  `extra` applied on top.
+  Returns the environment used for deployment commands.
 
-  Public because a project builds the releases it upgrades between as well as
-  running them, and the same variables redirect a `mix release` as redirect a
-  launcher. Anything in `extra` wins, so a test that wants one of the scrubbed
-  variables set - which is how you give a release a hostile environment to boot
-  in - simply names it.
+  It unsets inherited emulator flags and Mix launcher defaults, then applies the
+  caller's entries.
   """
   @spec scrubbed_env(env()) :: env()
   def scrubbed_env(extra \\ []) do

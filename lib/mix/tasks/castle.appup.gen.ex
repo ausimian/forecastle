@@ -1,159 +1,51 @@
 defmodule Mix.Tasks.Castle.Appup.Gen do
   @moduledoc """
-  Draft the appup entry for a transition, and write or merge it into the appup
-  source.
-
-  This task is provided by `Forecastle`, Castle's build-time half, and named for
-  `Castle` because that is the package a project depends on.
+  Drafts appup entries for a transition and writes them to source.
 
       mix castle.appup.gen --from <spec> [--to <spec>] [--app <app>]...
 
-  The arguments are `mix castle.appup`'s, and the diff is the same diff:
-  `Forecastle.Build` reads both builds for both tasks, so the check and the
-  generator cannot disagree about which modules moved. What is added here is
-  writing.
+  The build and application options match `mix castle.appup`. Review the
+  generated source and comments before committing it.
 
-  `.gen.` is the established Elixir idiom for *this writes source you will review
-  and commit*, which is exactly the intent. `design/upgrade-tooling.md` §D2 in
-  ausimian/castle is why: an appup synthesised during assembly would ship
-  upgrade instructions nobody read, derived from a comparison nobody saw. So
-  generation is an explicit act, its output is a source file, and the `:appup`
-  compiler is unchanged.
+  ## Drafts
 
-  ## What it drafts, and what it refuses to decide
+  `Forecastle.Appup.Draft` selects instructions from module changes and BEAM
+  behaviour attributes. The draft calls out decisions that require review,
+  including state migration data, missing `code_change` callbacks, supervisor
+  children, unsupervised processes, changed behaviour roles, and instruction
+  ordering.
 
-  `Forecastle.Appup.Draft` holds the decision table - behaviours out of the
-  beam's `Attr` chunk, and nothing else - and the comments that go beside each
-  instruction. Those comments are not decoration. The `Extra` term in an
-  `{:advanced, Extra}` is always `[]` and nothing can derive it; a
-  `{:update, M, :supervisor}` reconciles child *specs* and does not upgrade the
-  children; `update` only reaches processes found through the supervision tree,
-  so an unsupervised process keeps its old code silently while the appup looks as
-  though it covered it; and the ordering is stable rather than correct. A draft
-  that hides its uncertainty is worse than no draft.
+  Existing entries selected for the same from-version are not changed. Use
+  `mix castle.appup` after generation to verify coverage.
 
-  Three more are said where they apply, and each is a fact about one module
-  rather than a property of the table: an instruction naming a module the `.app`
-  does not list cannot resolve object code; an advanced update on a module that
-  exports no `code_change` fails the install with `undef`; and a module whose
-  behaviour *role* changed between the two builds is drafted for what it becomes
-  while the process running now was started by the old code. All three still
-  draft the instruction - leaving one out silently is the failure this tooling
-  exists to catch, arriving from the other direction.
+  ## Writing
 
-  ## The three writing cases
+  For an owned application, the task writes the file named by the `:appup`
+  project key. If the key is absent, it writes `appup.exs` beside `mix.exs` and
+  tells you to configure the key and compiler.
 
-    * **no appup yet** - the file is written.
-    * **an existing appup whose AST is a pure literal** - the entry is merged in
-      and the diff printed.
-    * **an existing appup that computes** - **refused**, with the entry printed
-      to merge by hand.
+  For a dependency, it writes
+  `rel/appups/<app>-<from>-<to>.exs`. Forecastle places this file in the assembled
+  release and never writes to `deps/`.
 
-  The third is what makes the other two safe. An appup source is arbitrary
-  evaluated Elixir, and flattening one into a static term would silently discard
-  the logic that decides what it produces. `Forecastle.Appup.Source` is where
-  that is decided, and it is decided on the parsed AST rather than guessed at
-  from the text.
+  A missing source is created. A pure-literal appup source is updated without
+  changing its comments or formatting. Computed source is refused and the entry
+  is printed for manual merging.
 
-  An entry is added to a direction only where
-  `systools_relup:appup_search_for_version/2` - the function `:systools` and
-  `release_handler` select an entry with, which `mix castle.appup` and
-  `mix castle.relup`'s `auto` also call - finds none. An entry that is already
-  there is never rewritten: once a transition has instructions, they are the
-  author's.
+  The task also refuses applications present in only one build, unchanged
+  application versions, applications with no BEAM files, malformed appups,
+  ambiguous dependency entries, and files that change before replacement.
 
-  ## What it never does silently
+  If the application version changed but no modules moved, the task writes an
+  empty entry. If both directions already have entries, it reports a no-op. A
+  dependency entry already covered by another source is also a no-op when both
+  directions are covered.
 
-  **Every way this run can end without writing an instruction is either a
-  refusal or a named no-op.** That is a deliberate answer to the failure this
-  tree has produced repeatedly - something that reports success having done
-  nothing - and it is what the exit status is derived from.
-
-  Refused, by name, and non-zero:
-
-    * an application in one build and not the other. `:systools` covers that with
-      `add_application` / `remove_application` and no appup entry describes it,
-      so there is nothing to draft. `mix castle.appup` reports the same state as
-      a *note* and exits zero, and the difference is deliberate: a check has an
-      answer for it and a generator that was asked to write something has not.
-    * an application whose version did not move. `:systools` consults no appup
-      for one, so an entry keyed by the version it already has is not a
-      transition.
-    * a build of the application with no beams in it. Every module of the other
-      side would read as added or removed, and the entry drafted from that would
-      be an instruction to load or delete the whole application. Refused rather
-      than written, and the hand-written empty entry is printed instead for the
-      rare application that genuinely has no code.
-    * an appup that computes, one that is not an appup, and one whose merged form
-      does not read back as the entry that was drafted.
-    * a source that could not be written: one that appeared after being read as
-      absent, one that changed after being read, or a write that failed. Nothing
-      is left half-written - see `Forecastle.Appup.Source.create/2` and
-      `replace/2` - and the entry is printed so the refusal leaves something to
-      act on.
-
-  Named, and zero:
-
-    * **nothing moved, and the version did.** The entry is written with an empty
-      script, and the comment beside it says the script is empty and why: an
-      appup with no entry for a from-version is refused by `make_relup/4`
-      outright, so an empty script is the instruction that nothing has to be
-      loaded rather than an omission.
-    * **the appup already has an entry for this from-version** in both
-      directions. Nothing is added and the run says so - and it says, too, that
-      an entry existing is not the same as it covering everything that moved,
-      because nothing here has checked that and `mix castle.appup` is what does.
-    * **the `rel/appups` sources for the same dependency already answer for it**
-      between them. A dependency's appups are one file per transition and the
-      release merges every file naming the application into one appup, so
-      coverage is a question about the *set*, this file included: a sibling keyed
-      on a regular expression can already select this from-version. Where a
-      sibling answers for one direction and the file being written is not there
-      yet, this is a **refusal** rather than a no-op, because a new file carries
-      both directions or neither. Two entries in the set that can both be
-      selected for one direction are a refusal too - whether they are in two
-      files or in one - because that is a tree the next build refuses, whatever
-      this run does.
-
-  ## Where it writes
-
-  The file named by the `:appup` project key, resolved against the project it
-  belongs to - the current project, or an umbrella child. Where the key is unset,
-  `appup.exs` beside `mix.exs`, and the report says to add the key and the
-  `:appup` compiler, without which nothing compiles the file.
-
-  An application `--app` names that is neither the current project nor an
-  umbrella child - a dependency - is written to `rel/appups/<app>-<from>-<to>.exs`
-  instead, which `Forecastle.Appup.Dep` reads while assembling a release and
-  places at `lib/<app>-<vsn>/ebin/<app>.appup`. Nothing is ever written into
-  `deps/`: that is the shared checkout, and an appup there would be one project's
-  upgrade instructions in every build that uses it.
-
-  **It writes there rather than printing, and that was the open question.** The
-  answer is in what the refusal it replaces actually said: a dependency's appup
-  was printed because there was "no source here to write", not because writing one
-  would have been wrong. `rel/appups` is that source, so the premise is gone -
-  and once a destination exists, printing is the *inconsistent* branch. D2 holds
-  either way: what comes out is source a person reviews and commits, nothing
-  generates an appup during assembly, and what assembly does is place a file
-  somebody wrote after checking that its name still describes the transition being
-  built. That check is a guarantee the project's own `appup.exs` has not got: a
-  drifted tag there is a `bad_vsn` note, while a dependency file that no longer
-  names this transition fails the build.
-
-  **A `:appup` key naming a file that does not exist is a compilation error, and
-  it is in the way of the default `--to`.** `Mix.Tasks.Compile.Appup` refuses a
-  configured-but-missing source deliberately, and the default `--to` compiles. So
-  the first appup for a project that has already set the key needs an explicit
-  `--to`, which compiles nothing; leaving the key unset until there is a file to
-  name is the other way round it.
-
-  ## Review it
-
-  The output is a draft. Run `mix castle.appup --from <spec>` against it - which
-  is the gate, and the artefact this task falls out of - and read the comments
-  before committing.
+  The default `--to` compiles the current project. If the `:appup` key names a
+  file that does not yet exist, provide an explicit `--to` baseline or leave the
+  key unset until the first source has been generated.
   """
+
   @shortdoc "Draft and merge the appup entry for a transition"
 
   use Mix.Task

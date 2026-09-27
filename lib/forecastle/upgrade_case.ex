@@ -3,25 +3,10 @@ defmodule Forecastle.UpgradeCase do
   Case template for tests that upgrade a real release from one version to the
   next.
 
-  A release that assembles is a release that builds. Whether it can be *upgraded*
-  is a different question, and the only thing that answers it is starting one
-  version, installing the next, and looking at what survived. This is the half of
-  that a project does not have to write: a directory to deploy into, and
-  `Forecastle.Deployment` aliased for the driving.
+  The template adds a per-module `:scratch` path and aliases
+  `Forecastle.Deployment`. The project supplies the releases and assertions.
 
-  **What it does not do is decide whether the upgrade worked.** That is the
-  reason this is a case template and not a `mix castle.upgrade.test` task: a task
-  would have to hardcode what "worked" means, and only the project knows. For one
-  it is a counter that kept counting, for another a socket still open or a job
-  still in flight. As a case template it composes with tags, with CI and with the
-  project's own assertions instead.
-
-  ## What a project writes
-
-  Two things have to exist before a test can run: the release that is deployed,
-  and the release it is upgraded to, carrying a relup that names the first.
-  Neither is this template's business - a project builds its own releases - and
-  the second is a single `mix release` once `upgrade_from:` names the baseline:
+  Build the target release with a relup for the deployed baseline:
 
       defp releases do
         [
@@ -32,8 +17,7 @@ defmodule Forecastle.UpgradeCase do
         ]
       end
 
-  The test then deploys that same artefact, starts it, and installs the tarball
-  the build just produced:
+  Deploy the baseline, start it, then install and commit the target:
 
       defmodule MyApp.UpgradeTest do
         use Forecastle.UpgradeCase
@@ -66,19 +50,10 @@ defmodule Forecastle.UpgradeCase do
         end
       end
 
-  `castle!/3` raises on a non-zero exit, so `unpack`, `install` and `commit`
-  failing is a failure of the setup rather than something a later assertion has
-  to notice.
-
-  ## Assert the code as well as the state, and take the version from the code
-
-  **A count that survived is not evidence that anything moved.** An appup that
-  does not mention a module leaves that module's *old* code serving calls, with
-  the new code on disk beside it, and a count is preserved by exactly that -
-  which is the failure `mix castle.appup` exists to catch, and the reason an
-  upgrade test asserting only the state would pass one. So `info/0` above
-  reports the version alongside the count, and reports it from a literal the
-  module carries:
+  `castle!/3` raises on a non-zero exit. Assert both retained state and the code
+  version serving calls. A missing appup instruction can leave old code running
+  while the release reports the new version. Compile a version tag into the
+  module under test:
 
       defmodule MyApp.Counter do
         use GenServer
@@ -91,83 +66,19 @@ defmodule Forecastle.UpgradeCase do
         def handle_call(:info, _from, state), do: {:reply, {@vsn_tag, state.count}, state}
       end
 
-  `@vsn_tag` is compiled into whichever copy of the module is executing, so an
-  old one says this process is running old code. Reading the version from
-  `Application.spec/2` or from `Deployment.version/1` instead would answer about
-  the *release*, which moves whether or not any particular module did - which is
-  why the example asserts both, and why they are different questions.
+  `Deployment.deploy!/3` accepts `rel:`, `tar:` and `ref:` baselines. Prefer the
+  shipped `tar:` artifact when available.
 
-  ## The two transitions are installed differently
+  Use `Deployment.install_supervised!/3` for `restart_emulator` transitions and
+  `castle!/3` for hot installs. The supervised form restarts the release while
+  `bin/castle install` waits for it to return.
 
-  The example above is a hot upgrade. A transition that restarts the emulator
-  needs `Forecastle.Deployment.install_supervised!/3` in place of the `install`
-  above, because nothing inside the release starts it again after the reboot -
-  `bin/start` is inert and the external supervisor owns the restart, so a test of
-  one has to *be* the supervisor. There is no call that covers both: a hot
-  upgrade never leaves its operating system process, so waiting for that process
-  to exit would be waiting for something that is not coming.
+  The scratch path lives under `_build/castle/deployments`. The template does
+  not create, clear or remove it. Register `Deployment.stop/1` with `on_exit/1`
+  for every started deployment.
 
-  It raises the way `castle!/3` does, and the failure it is raising about is
-  usually on the far side of the reboot: `bin/castle install` polls for the
-  version it installed *after* the release has come back, so a provisional
-  release that rolled back on the way up is reported there and nowhere earlier.
-  `Forecastle.Deployment.install_supervised/3` returns `{output, status}` for a
-  test that wants to assert on the status itself.
-
-  Which of the two a transition is comes from the relup, and `auto` decides it at
-  generation time. A project that wants to be sure gets to say so:
-  `mix castle.relup --hot` fails rather than degrading to a restart, which puts
-  the failure on the build instead of on an assertion much further down.
-
-  ## Baselines, and why `tar:`
-
-  `Forecastle.Deployment.deploy!/3` takes the baseline grammar
-  `Forecastle.Baseline` reads, so the release under test can come from an
-  assembled tree (`rel:`), the artefact that shipped (`tar:`) or a git ref built
-  in a worktree (`ref:`).
-
-  Prefer `tar:`, and for the same reason relup generation does: `release_handler`
-  selects a relup entry by from-version *string* and never checks it against the
-  code that is running. An upgrade tested from a baseline rebuilt today is an
-  upgrade tested from a release nobody ever deployed, which is exactly the
-  question the test was meant to settle.
-
-  ## The scratch directory
-
-  `setup_all` puts a `:scratch` directory in the context, one per test module,
-  under `_build/castle/deployments`. It is a *path*: nothing here creates it and
-  **nothing here clears it**. `Forecastle.Deployment.deploy!/3` empties its own
-  destination, so what survives in the scratch is whatever nothing redeployed -
-  which is exactly the evidence a failed upgrade left behind, and which deleting
-  the directory at either end of a run would have taken away.
-
-  Clearing it was the obvious thing to do and it is wrong in a way that comes
-  back as a passing test. The path is stable per module, so a run interrupted
-  before its `on_exit` leaves a daemon running out of this tree; a recursive
-  delete would not stop that node, and the next deployment would come up beside
-  one that still answers to the release's name - with the readiness rpc as
-  likely to reach the old system as the new. `deploy!/3` refuses a destination
-  that is still running rather than deleting underneath it, which is the same
-  question asked in the one place that knows the release's name.
-
-  Deployments are not stopped for you. A running release outlives the test that
-  started it, so `on_exit(fn -> Deployment.stop(deployment) end)` belongs beside
-  every `start!/2` - and `stop/1` tolerates a system that is not running, which
-  is what makes it safe in a teardown after a setup that died half way.
-
-  ## Not async
-
-  A deployment is a node with a name and a distribution port, and two tests
-  starting the same release at once is a name clash rather than two nodes.
-  Assembling and booting releases is slow by unit-test standards besides, so
-  these tests want a tag of their own and an opt-in run - which is what
-  `@moduletag :upgrade` in the example above is for.
-
-  **`@moduletag` and not `@tag`**, which is not a spelling preference here.
-  `setup_all` runs when *any* test in the module is selected, and `@tag` marks
-  only the test that follows it - so a module with a second, untagged test would
-  deploy and upgrade a real release in the middle of an ordinary `mix test`,
-  having been excluded on paper.
+  Mark the whole module with `@moduletag :upgrade`; these tests start named nodes
+  and should not run asynchronously or as part of the ordinary unit suite.
   """
 
   use ExUnit.CaseTemplate

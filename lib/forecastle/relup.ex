@@ -1,30 +1,11 @@
 defmodule Forecastle.Relup do
   @moduledoc """
-  Generating a relup: resolving the baselines, deciding what each transition can
-  be, asking `:systools` for the hot half, and writing the file.
+  Generates relups for `mix castle.relup` and `Forecastle.generate_relup/1`.
 
-  Two things generate relups and they must not be able to disagree about any of
-  it. `mix castle.relup` names a target that already exists and writes the relup
-  wherever it is told, which is what covers a pair of releases nobody is
-  assembling now. `Forecastle.generate_relup/1` runs between `post_assemble` and
-  `:tar` and writes it into the release being assembled, which is what removes
-  the build-generate-rebuild cycle the task used to require.
-
-  Neither of them promises that nothing is rebuilt. That is a property of the
-  baseline spec: `rel:` and `tar:` name something already built, `ref:` checks a
-  commit out and runs its build, and both callers resolve all three through
-  `Forecastle.Baseline`.
-
-  What differs between those two is where the target comes from, which baselines
-  it is against, where the file goes - or whether it goes anywhere at all, which
-  is what `mix castle.relup --dry-run` asks for - and *when* the baselines were
-  resolved. That is the whole of what `generate!/7` takes as arguments.
-  Everything else is here, once: the refusal of two baselines for one version,
-  the three strategies and how an edge is classified, the announcement, and the
-  atomic publication.
-
-  `Mix.Tasks.Castle.Relup`'s `@moduledoc` is the account of the strategies and of
-  what an operator sees, because that is where somebody goes looking for it.
+  The module resolves baselines, classifies each transition, invokes `:systools`
+  for hot transitions, rejects conflicting baselines, reports restart edges and
+  publishes the finished relup atomically. See `Mix.Tasks.Castle.Relup` for the
+  `auto`, `hot` and `restart` strategies.
   """
 
   # Elixir's own applications. `:code.lib_dir/1` resolves them, but under

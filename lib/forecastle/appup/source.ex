@@ -1,113 +1,16 @@
 defmodule Forecastle.Appup.Source do
   @moduledoc """
-  Reading and rewriting an appup **source** file - the one named by the `:appup`
-  project key, which a person reviews and commits.
+  Reads and rewrites the appup source named by the `:appup` project key.
 
-  `Forecastle.Appup` reads the compiled `<app>.appup`, which is a term.  This
-  reads the `.exs` it was compiled from, which is *arbitrary Elixir evaluated for
-  its value*, and that difference is the whole of what this module is about.
+  Appup source is arbitrary Elixir evaluated for its value. This module rewrites
+  only a pure literal whose value is determined by its AST. Computed source,
+  structs, and bitstrings that require runtime truncation are refused. Literal
+  aliases, lists, maps, tuples, binaries and uninterpolated `~c`/`~C` sigils are
+  accepted.
 
-  ## An appup source is a program, so the only safe rewrite is of one that is not
-
-  `Mix.Tasks.Compile.Appup` evaluates the file with `Code.eval_file/1` and writes
-  whatever comes back. The fixture in this repository is a `case` on an
-  environment variable; a real one might key off `Mix.env/0`, read the version
-  out of `mix.exs`, or build its instruction list with a comprehension.
-  Flattening any of those into a static term would silently discard the logic -
-  the file would still compile, still produce *an* appup, and no longer produce
-  the one the author wrote.
-
-  So a rewrite is offered only where the file's AST is a **pure literal**, and
-  refused otherwise. `Code.string_to_quoted/2` makes that decidable, which is
-  what makes the refusal exact rather than a guess about what the file looks
-  like.
-
-  **The predicate and the reader are one function, deliberately.** `to_term/1`
-  either produces the term the AST denotes or answers `:error`, and "is this a
-  pure literal?" is exactly "did `to_term/1` answer". There is no second
-  predicate that could be wider than the reader - which is the shape a
-  heuristic takes, and the shape this module exists not to have.
-
-  What counts as a literal is written out, one clause per accepted shape, and the
-  default is `:error`. That asymmetry is the same one `Forecastle.Appup.legal?/1`
-  is built on: too narrow costs a refusal with the entry printed beside it, too
-  wide costs a file rewritten to mean something else.
-
-  ## Where the accepted set stops, and why that is a rule rather than a list
-
-  Successive review rounds each found one more shape that is a literal and was
-  refused - a `<<…>>` bitstring, then a cons cell - and a list that grows one
-  round at a time is a list nobody can tell is finished. So the rule, rather than
-  the list:
-
-  > **A shape is accepted when the term it denotes is determined by the AST
-  > alone.**
-
-  That admits an alias, whose value is `Module.concat/1` of its segments; the two
-  charlist sigils, whose value is their text under a rule this module states; and
-  a cons cell, which `Macro.quoted_literal?/1` does not walk. It excludes two
-  things that look like literals and are not determined by the AST:
-
-    * **A struct.** `%Range{first: 1}` needs the struct's *compile-time
-      defaults*, which live in the module and not in the syntax tree, so nothing
-      here can produce the term without loading it. `Macro.quoted_literal?/1`
-      says `true` for one; this says no, and that difference is the rule doing
-      its job rather than a gap in it.
-    * **A bitstring segment Elixir would truncate.** `<<256>>` denotes `<<0>>` by
-      a rule of the language, not of the tree.
-
-  `appup_source_test.exs` pins the whole boundary against
-  `Macro.quoted_literal?/1` over a corpus, asserting the two agree everywhere
-  except at those exceptions, named. A new shape - or a future Elixir widening
-  its own predicate - fails that test instead of arriving as a review finding.
-
-  Two shapes are accepted that `Macro.quoted_literal?/1` refuses, and both are
-  measured rather than assumed:
-
-    * **`~c"..."` and `~C"..."`**, over a string with no interpolation and no
-      modifiers. Measured on Elixir 1.19.5: `~c"0.1.0"` parses to
-      `{:sigil_c, meta, [{:<<>>, meta, ["0.1.0"]}, []]}`, which
-      `Macro.quoted_literal?/1` answers `false` for. Refusing them would refuse
-      every appup written the way Elixir 1.15 onwards spells a charlist -
-      including every file this module writes - so the merge case would work only
-      on files nobody writes any more.
-    * a **`{:__block__, meta, [literal]}` wrapper** around each literal, which is
-      not a shape of the source at all: it is what the `:literal_encoder` option
-      produces, and it is asked for because it is the only way to get the
-      position of a `[` and `]` out of the parser. See `merge/2`.
-
-  A single-quoted `'0.1.0'` is a plain list of integers to the parser, so it is
-  a literal without needing a clause of its own.
-
-  ## The term is the compiler's, and the AST is what decides whether to write
-
-  Once the AST reads as a literal, the term is taken from `Code.eval_file/1` -
-  the same call `Mix.Tasks.Compile.Appup` makes, so what is merged into is what
-  the build will produce - and it is compared against what `to_term/1` read. A
-  disagreement is a refusal rather than a rewrite: it means one of the two is
-  wrong about the file, and neither is worth acting on.
-
-  The evaluation is safe because it happens only after the AST has been read as a
-  literal. It is never run on a file this module has refused.
-
-  ## A merge is a splice, not a re-render
-
-  The obvious implementation - evaluate, merge the term, write the term back out
-  - would take the file's comments with it, including the ones a previous run of
-  `mix castle.appup.gen` wrote to say what it could not decide. Those comments
-  are the point of the draft, so losing them on the next run would take the
-  honesty out of the tool one generation at a time.
-
-  So the new entry is inserted as *text*, immediately after the `[` that opens
-  the `up` or `dn` list, and nothing else in the file is touched: comments,
-  formatting and hand-written entries all survive byte for byte, and the printed
-  diff is exactly what was added. `insertions/2` is where the position comes
-  from, and why it is the opening bracket rather than the closing one.
-
-  A text splice has to prove it did what it meant to, so it does: the result is
-  parsed again, read as a literal again, and refused unless the term it denotes
-  is exactly the merged term that was intended. A splice that landed in the wrong
-  place cannot reach the file.
+  New entries are inserted as text so comments, formatting and existing entries
+  remain unchanged. The result is parsed again and must equal the intended
+  merged term before it can be written.
   """
 
   @typedoc "A source file that reads as a pure literal, and everything needed to rewrite it."
@@ -126,11 +29,10 @@ defmodule Forecastle.Appup.Source do
           | {:malformed, binary()}
 
   @doc """
-  Reads an appup source file and says which of the three cases it is.
+  Reads an appup source file.
 
-  See the moduledoc: `:absent` is written, `{:literal, _}` is merged into, and
-  `{:computed, _}` and `{:malformed, _}` are refused with the drafted entry
-  printed instead.
+  Returns `:absent`, a literal source that can be merged, or a computed or
+  malformed source with a reason for refusing it.
   """
   @spec read(binary()) :: read()
   def read(path) do
@@ -239,11 +141,9 @@ defmodule Forecastle.Appup.Source do
   end
 
   @doc """
-  The term an AST denotes, or `:error` if it denotes anything that has to be
-  computed.
+  Converts a literal AST to its term.
 
-  This is both the reader and the predicate - see the moduledoc for why they are
-  one function. Every accepted shape is written out and the default is `:error`.
+  Returns `:error` when evaluating the AST requires computation.
   """
   @spec to_term(Macro.t()) :: {:ok, term()} | :error
   def to_term({:__block__, _meta, [child]}), do: to_term(child)
@@ -374,13 +274,10 @@ defmodule Forecastle.Appup.Source do
   @type kind :: :project | {:dependency, atom(), binary()}
 
   @doc """
-  A whole appup source file, for an application that has none.
+  Renders a complete appup source for an application with no source file.
 
-  The header says what the file is and what the tag being a literal costs,
-  because both are things a reader of a generated file needs and neither is
-  visible from the term. A dependency's file gets a header of its own, because
-  what puts it into a release - and what refuses it once the dependency has moved
-  on - is not the `:appup` compiler and is not visible from the term either.
+  The header identifies project or dependency ownership and records the limits
+  of the generated draft.
   """
   @spec render(binary(), Forecastle.Appup.Draft.entry(), Forecastle.Appup.Draft.entry(), kind()) ::
           {:ok, binary()} | {:error, binary()}
@@ -443,11 +340,9 @@ defmodule Forecastle.Appup.Source do
   end
 
   @doc """
-  One from-version entry as source text, formatted and with its comments.
+  Renders one from-version entry with its generated comments.
 
-  This is what `merge/2` splices in and what the task prints when it refuses to
-  write, so a refusal and a write produce the same entry rather than two
-  renderings that could differ.
+  The generator uses the same text for source updates and manual-merge output.
   """
   @spec entry_text(Forecastle.Appup.Draft.entry()) :: binary()
   def entry_text(entry) do
@@ -477,15 +372,10 @@ defmodule Forecastle.Appup.Source do
   end
 
   @doc """
-  Splices entries into the `up` and `dn` lists of a literal appup source.
+  Inserts entries into the upgrade and downgrade lists of a literal source.
 
-  `additions` names a direction and the entry to add to it, and a direction may
-  be left out - which is what happens when the appup already has an entry for
-  this from-version in one list and not the other.
-
-  The result is the source with nothing else changed. See the moduledoc for why
-  this is a text splice rather than a re-render, and `verify/2` for what proves
-  it landed where it meant to.
+  A direction may be omitted when it already has a matching entry. The function
+  preserves all other source text and verifies the merged term.
   """
   @spec merge(t(), [{:up | :down, Forecastle.Appup.Draft.entry()}]) ::
           {:ok, binary()} | {:error, binary()}
@@ -656,25 +546,10 @@ defmodule Forecastle.Appup.Source do
   ## Publishing
 
   @doc """
-  Creates an appup source that was not there, and refuses to replace one that is.
+  Creates an appup source exclusively.
 
-  **Exclusive creation rather than a plain write, because the two answers are
-  different and only one of them is safe.** `Source.read/1` said the file was
-  absent, and everything since - the diff, the classification, the whole entry -
-  was drafted on that. A file that has appeared in between is somebody else's,
-  and `:file.open/2` with `:exclusive` is what refuses it in the same operation
-  that would have created it, rather than in a check before one.
-
-  **Exclusivity is not atomicity, and the file is taken away again when the write
-  after it fails.** Raised in review. `File.write/3` opens, writes and closes, and
-  an error in either of the last two - a full disk, a close that reports a
-  deferred write error - leaves the inode it created with partial contents in it,
-  which is a `.exs` the next `mix compile` will fail to evaluate. So the open is
-  done here rather than through `File.write/3`, because only the caller of
-  `:file.open/2` knows it created the file and may therefore remove it. If the
-  removal fails too, the refusal says the path may hold partial output rather
-  than saying nothing was written - a message that is wrong about the filesystem
-  is worse than one that admits it does not know.
+  Returns an error if the path already exists or cannot be written, preventing a
+  concurrent edit from being replaced.
   """
   @spec create(binary(), binary()) :: :ok | {:error, binary()}
   def create(path, text) do
@@ -717,29 +592,11 @@ defmodule Forecastle.Appup.Source do
   end
 
   @doc """
-  Replaces an appup source with the merged text, atomically, and refuses if it
-  has changed since it was read.
+  Atomically replaces a literal source with merged text.
 
-  **Two separate hazards, and neither is the other's fix.**
-
-  `File.write/2` opens for writing, which truncates: a failure part way through
-  leaves the source neither what it was nor what it was going to be, and an
-  in-memory check that the merged text is correct says nothing about that. So the
-  text goes to a staging file *in the same directory* and is renamed onto the
-  target, which is one operation - the same mechanism `Forecastle.Baseline` uses
-  to publish a cache entry and `Forecastle.Relup` to publish a relup, and for the
-  same reason. Same directory because a rename across filesystems is a copy.
-
-  The second is that the file could have been edited between being read and being
-  written, and the rename would then discard that edit without a word. Comparing
-  the bytes first turns that into a refusal. **It narrows the window rather than
-  closing it**, and there is no way to close it - POSIX has no compare-and-swap
-  on a file, and a lock protocol over somebody's working tree is not this task's
-  to invent. What makes narrowing worth doing here rather than in
-  `Forecastle.Build`, which declines the equivalent finding about reading a build
-  being raced by a rebuild, is that this one *writes*: the failure it prevents is
-  destroying an edit somebody made, and the check costs one read of a file this
-  already holds the expected contents of.
+  The function refuses a file that changed after it was read. It writes a
+  staging file beside the resolved target, preserves the file mode, and renames
+  the completed file into place. Symlink chains are followed to the source file.
   """
   @spec replace(t(), binary()) :: :ok | {:error, binary()}
   def replace(literal, text) do
@@ -865,10 +722,10 @@ defmodule Forecastle.Appup.Source do
   ## Reporting
 
   @doc """
-  A unified-ish diff of two versions of a file, as lines ready to print.
+  Returns a compact line diff suitable for terminal output.
 
-  `List.myers_difference/2` rather than a shell `diff`, which is one more thing
-  to be missing on the machine a release pipeline runs on.
+  Changed lines use `+ ` and `- ` prefixes. Unchanged context uses two spaces,
+  with omitted regions marked by `...`.
   """
   @spec diff(binary(), binary()) :: [binary()]
   def diff(old, new) do
