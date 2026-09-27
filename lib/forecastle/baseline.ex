@@ -1,146 +1,29 @@
 defmodule Forecastle.Baseline do
   @moduledoc """
-  Resolves the *baseline* a relup is generated against from the spec that names
-  it.
+  Resolves the baseline used for relup generation and appup checks.
 
-  A relup describes a transition, so generating one needs a previous release to
-  compare the new one against. That previous release can come from three places,
-  and this is the one grammar that names all three:
+  Baseline specs support three sources:
 
       rel:_build/prod/rel/my_app/releases/1.0.0/my_app   # an assembled release
-      tar:artifacts/my_app-1.0.0.tar.gz                  # a shipped artefact
+      tar:artifacts/my_app-1.0.0.tar.gz                  # a release tarball
       ref:v1.0.0                                         # a git ref, built in a worktree
 
-  A value carrying no prefix is a `rel:` path, which is what the switches meant
-  before this module existed, so nothing that worked before this needs changing.
-  The direction stays on the switch name and the source stays in the value:
-  crossing the two into separate switches would be a switch per combination.
+  A path without a prefix means `rel:`. Prefer `tar:` when the deployed artifact
+  is available. Relups select transitions by version string and cannot verify
+  that a rebuilt baseline matches the deployed code. Use `ref:` for development
+  or when no shipped artifact remains.
 
-  ## `tar:` is the recommended source, and the reason is correctness
+  Generated baselines are cached under `_build/castle/baselines`. Tar entries
+  are keyed by the copied artifact's digest. Git entries are keyed by commit,
+  resolution level, `MIX_ENV`, `MIX_TARGET`, and the Elixir and ERTS versions.
+  Work is staged and renamed into place only when complete.
 
-  `release_handler` picks a relup entry by from-version *string*. It never
-  verifies that the code actually running is the code the relup was generated
-  against. So a baseline rebuilt from source today is built with today's Elixir
-  and OTP patch releases, today's hex tarballs for anything the lock does not
-  fully pin, and today's compiler - and if the module set that comes out differs
-  at all from what is deployed, the relup's instructions miss modules. The
-  upgrade then loads some of the new code over a system still running the rest of
-  the old, which is the same stale-code failure a hand-written appup causes,
-  arrived at from the other direction.
+  A `ref:` resolution checks out a linked worktree, builds into the staging
+  directory, then removes only that worktree registration. It sets
+  `CASTLE_BASELINE` and refuses recursive baseline builds.
 
-  A relup generated against a rebuilt baseline describes a transition from a
-  release that never existed. Where the artefact that was actually shipped still
-  exists, `tar:` names it and the question does not arise.
-
-  ## `ref:` is genuinely useful and genuinely second best
-
-  It is the right answer for development, for testing an upgrade path before
-  anything ships, and for the common case where nobody kept the artefact. What it
-  must not do is pretend to be something it is not, so every `ref:` resolution
-  says out loud that the baseline was rebuilt.
-
-  Old refs also often do not build today - a yanked dependency, a deprecation
-  that became an error, a compiler that no longer accepts something. That is
-  another reason `tar:` is the answer where there is a choice, and it is why a
-  failed baseline build says which commit failed rather than only what the build
-  printed.
-
-  ## The cache
-
-  Everything this resolves that had to be produced is kept under
-  `_build/castle/baselines`, and every entry in it is **immutable and complete**:
-
-      _build/castle/baselines/
-        tar-<digest of the artefact>/         # the unpacked release
-        ref-<sha>/<build context>/            # build/ deps/ rel/ context.txt
-        .staging-<pid>-<random>/              # work in progress, never read
-
-  Nothing is ever built or unpacked in place. Work happens in a staging directory
-  and the finished thing is *renamed* into position, so an entry exists only once
-  it is whole. That is what makes "the directory is there" a safe answer to "is
-  this baseline usable?", and it is what makes an interrupted run - out of disk, a
-  killed build, a machine that went away - leave nothing behind that a later run
-  would mistake for a cache hit. Two runs resolving the same baseline at the same
-  time each build their own and the first to finish wins; the loser throws its
-  copy away, because the two are the same thing by construction.
-
-  ### What each entry is keyed on
-
-  A cache key has to name everything that could make the contents different, or
-  the cache hands back something that was produced for a different question.
-
-  **`tar:` is keyed on a digest of the artefact's bytes.** Not on its path: a
-  pipeline that writes `my_app-1.0.0.tar.gz` afresh on every build would
-  otherwise be served the first build's release for ever. The artefact is copied
-  into staging *first* and the digest taken of the copy, so the bytes that were
-  hashed are the bytes that get unpacked - hashing the path and then unpacking the
-  path is two reads of something that can change in between, and publishing B's
-  contents under A's digest is a silent wrong answer for every later run.
-
-  **`ref:` is keyed on the resolved sha and on the build context.** The sha
-  because a branch name or a moved tag has to get a fresh entry rather than a
-  stale hit, and `^{commit}` so that an annotated tag keys on the commit rather
-  than on the tag object. The build context because the same commit built two ways
-  is two different baselines: `MIX_ENV`, `MIX_TARGET`, the Elixir version and the
-  ERTS version all change what comes out, and a cache that ignored them would hand
-  a `dev` build to a `prod` caller, or modules compiled by last month's Elixir to
-  a relup being generated against this month's. That last one matters more here
-  than in an ordinary build cache, because drift between the baseline's toolchain
-  and the target's is the whole reason `tar:` is the recommended source.
-
-  Each entry carries a `context.txt` recording what it was built with, so what is
-  in the cache can be read rather than inferred from a digest.
-
-  ### The worktree
-
-  The commit is checked out into a linked worktree inside the staging directory,
-  beside — rather than around — the artefacts: staging holds `src/` and `out/`,
-  and only `out/` is ever published. `MIX_BUILD_ROOT`, `MIX_DEPS_PATH` and the
-  release's `--path` all point into `out/`, so removing the worktree keeps the
-  build, and a removal that *fails* cannot put a checkout inside a published
-  entry. The worktree is not taken out of what gets renamed into the cache; it
-  was never in it.
-
-  Under `_build` rather than anywhere in the tracked tree, which is the same
-  lesson `Forecastle.Fixture` records: a second copy of the project inside the
-  project gets picked up by the formatter and by `mix test`, and its `mix.exs`
-  gets found by anything that walks the tree looking for one.
-
-  A worktree registration whose directory has gone - a killed run, a deleted
-  `_build` - is cleaned up, but only ever one this module made. `git worktree
-  prune` is not used: it operates on every worktree in the repository, and a
-  relup task has no business deregistering somebody's checkout that happens to be
-  on an unmounted disk today.
-
-  ### Recursion
-
-  Building an old commit runs *its* `mix.exs`, and in a project using Castle that
-  calls `Castle.customize/1`, which may itself want to generate a relup - and so
-  resolve a baseline, and so build another commit. `CASTLE_BASELINE` is set to the
-  sha being built for the duration of that build, and a `ref:` resolution that
-  finds it already set refuses rather than recursing.
-
-  It is deliberately a refusal rather than a depth limit. There is no build in
-  which resolving a baseline *of a baseline* is the right thing to do, so a run
-  that asks for one is misconfigured, and saying so beats quietly generating a
-  relup against something nobody asked for.
-
-  ## Two levels
-
-  An appup coverage check needs only the compiled modules, which `mix compile`
-  produces; a relup needs an assembled release, which costs a `mix release` on
-  top. That is a large difference on a real project, so `resolve!/2` takes the
-  level and does the smaller thing where the smaller thing is enough.
-
-  The level only changes what `ref:` does. `rel:` and `tar:` name a release that
-  has already been built, so both levels resolve to the same thing.
-
-  The level is part of a `ref:` entry's key, so the two do not share a cache
-  entry and a project that wants both pays for both. An earlier revision shared
-  one entry between them and let a release satisfy a later compile, which is true
-  of the artefacts but not of the guarantee: the shared entry had to be mutated in
-  place to grow from one level to the other, and a directory that is still being
-  written to cannot also be the signal that it is finished.
+  `:compile` resolution builds only compiled modules. `:release` assembles the
+  complete release. The distinction affects only `ref:` sources.
   """
 
   # The two shapes of compiled-module directory this can hand back, because they
@@ -220,21 +103,16 @@ defmodule Forecastle.Baseline do
   @object_id ~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/
 
   @doc """
-  Whether the value carries a source prefix.
-
-  True for `rel:`, `tar:` and `ref:`, and true for anything else shaped like a
-  prefix, so that a mistyped one is recognisable as a spec rather than read as a
-  path. Used where a switch takes a path and never a spec, so that giving it one
-  is answered rather than resolved.
+  Returns whether a string begins with a recognised baseline scheme.
   """
   @spec spec?(binary()) :: boolean()
   def spec?(value) when is_binary(value), do: Regex.match?(@scheme, value)
 
   @doc """
-  Splits a spec into its source and its value, without touching the filesystem.
+  Parses a baseline spec into its source and value.
 
-  A value with no prefix is a `rel:` path. Raises on a prefix that names no
-  source, and on a spec with nothing after the prefix.
+  A path without a prefix is treated as `rel:`. Empty values and unknown schemes
+  raise `Mix.Error`.
   """
   @spec parse!(binary()) :: {source(), binary()}
   def parse!(""), do: Mix.raise("a baseline spec cannot be empty: there is nothing to resolve.")
@@ -270,14 +148,10 @@ defmodule Forecastle.Baseline do
   defp present!(value, _spec), do: value
 
   @doc """
-  Resolves a spec to a baseline on disk, building it if that is what the source
-  means.
+  Resolves a baseline spec at compile or release level.
 
-  `:release` assembles a release where one has to be built; `:compile` stops at
-  compiled modules. Only `ref:` is affected by the level - the other two sources
-  name something that was built already.
-
-  Raises with an actionable message on anything it cannot resolve.
+  `rel:` and `tar:` return an existing release. `ref:` builds the revision at
+  the requested level and caches the result.
   """
   @spec resolve!(binary(), level()) :: t()
   def resolve!(spec, level) when is_binary(spec) and level in [:compile, :release] do

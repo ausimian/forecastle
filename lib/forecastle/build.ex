@@ -1,79 +1,18 @@
 defmodule Forecastle.Build do
   @moduledoc """
-  Reading one build of an application, and diffing two of them.
+  Reads application builds and compares their modules.
 
-  A build here is a *library directory* - `_build/<env>/lib` for a compiled
-  project, `lib` for an assembled release - together with the one application
-  inside it a question is being asked about. `Forecastle.Baseline` turns a spec
-  into the directory; this turns the directory into an answer about an
-  application: which version it is, which modules it holds, what the `.app`
-  resource says its inventory is, and which modules differ between two of them.
+  A build is the library directory from a compiled project or assembled release.
+  The module reads application versions, BEAM files, `.app` inventories,
+  behaviours and exports for `mix castle.appup` and `mix castle.appup.gen`.
 
-  **It exists once for the same reason `Forecastle.Appup` does.**
-  `mix castle.appup` asks whether the committed appup covers the modules that
-  moved and `mix castle.appup.gen` drafts the instructions for them, and the two
-  must not be able to disagree about *which* modules moved: a generator that
-  drafted from one diff while the check gated on another would produce output
-  that fails the check, or worse, output that passes a check computed
-  differently from the upgrade. So the reading and the diffing live here, once,
-  and both tasks go through them.
+  Invalid library paths, incomplete application directories and broken entries
+  are errors. An application absent from one valid build remains a meaningful
+  add or remove result.
 
-  ## Absence is a meaningful answer, which makes a spurious absence the worst
-  ## bug this can have
-
-  An application in one build and not the other is a *note*, not a gap:
-  `:systools` covers that with `add_application` / `remove_application` and
-  neither needs an appup. So anything that makes an application merely *look*
-  absent exits zero having compared nothing, and that is the one answer a gate
-  must never give.
-
-  Every refusal in this module is there because that failure was reached, and
-  most of them were reached in this tree rather than imagined:
-
-    * a library directory that cannot be read - a mistyped `--from`, where every
-      application looked added and the run announced full coverage.
-    * a library directory that *can* be read and is not one. `rel:/nope/x`
-      resolves to `/lib`, which exists on Linux and does not on macOS, so the
-      same nonsense spec refused on one platform and passed on the other.
-    * an application directory with no `ebin`, which is an incomplete build
-      rather than an application the transition removed.
-    * an entry named for the application that is not a directory - a regular
-      file, or a symlink with nothing at the end of it - where nothing else in
-      the library directory is.
-
-  Each is refused **by name** rather than read as an absence.
-
-  ## Change detection is `:beam_lib.md5/1` *and* the persisted attributes
-
-  A digest of the file bytes is useless here. `Mix.Release.strip_beam/2` rebuilds
-  every beam in a release from `@additional_chunks ++
-  :beam_lib.significant_chunks()`, so a release's copy of a module is a different
-  sequence of bytes from the `_build` copy of identical code - measured on Elixir
-  1.19.5 / OTP 28, where the chunk list goes from `AtU8 Code StrT ImpT ExpT FunT
-  LitT LocT Attr CInf Dbgi Docs ExCk Line Type` to `Attr Line Type AtU8 Code StrT
-  ImpT ExpT FunT LitT`. A byte digest reports every module in a release as
-  changed; the md5 is stable across that stripping, which is what lets a baseline
-  name a stripped release while the target is an unstripped `_build`.
-
-  The md5 alone is not enough either, and `:beam_lib`'s own documentation says
-  why: it covers the code, and "compilation date and other attributes are not
-  included". Measured - two modules differing only in an explicit `@vsn`, or in
-  an attribute registered with `Module.register_attribute(persist: true)`, have
-  the same md5. Those attributes are loaded with the module and readable through
-  `module_info/1`, and an explicit `@vsn` is exactly the sort of thing
-  hot-upgrade code carries, so reporting such a module as unchanged was a false
-  pass.
-
-  Pairing them costs nothing in the other direction. `Attr` is one of the chunks
-  stripping keeps, and the *decoded* attribute list is identical before and after
-  it while the bytes are not. Documentation is not in `Attr`, so a `@moduledoc`
-  change still moves nothing, and a module with no explicit `@vsn` is given the
-  md5 itself as its `vsn`, so for ordinary code the pair moves exactly when the
-  code does.
-
-  The `Attr` chunk is also where `behaviours/2` reads from, which is the whole of
-  what `mix castle.appup.gen` classifies on - so the fingerprint and the
-  classification come out of one read of one file rather than two.
+  Module fingerprints combine `:beam_lib.md5/1` with persisted attributes. This
+  ignores changes caused only by BEAM stripping or documentation while retaining
+  explicit `@vsn` and other persisted-attribute changes.
   """
 
   alias Forecastle.Baseline
@@ -109,13 +48,7 @@ defmodule Forecastle.Build do
   @type fingerprint :: {binary(), keyword()}
 
   @doc """
-  Resolves a baseline spec and reads the library directory it names.
-
-  `:compile` rather than `:release` is what both callers want: they read compiled
-  modules and the appup beside them, and never a `.rel`. For `rel:` and `tar:`
-  the level changes nothing - they name something already built - but for `ref:`
-  it is the difference between a `mix compile` and a `mix release` of an old
-  commit.
+  Resolves a baseline and reads its library directory at the requested level.
   """
   @spec resolve!(binary(), Baseline.level()) :: t()
   def resolve!(spec, level) do
@@ -125,18 +58,7 @@ defmodule Forecastle.Build do
   end
 
   @doc """
-  The current build: `_build/<target_><env>/lib`, compiled first.
-
-  **The compile happens here rather than in a task's `@requirements`, which is to
-  say only when the current build is the thing being read.** A check run against
-  beams that do not reflect the source is a wrong answer rather than a stale one,
-  so a default target has to compile. But `@requirements` runs before `run/1` and
-  therefore before anyone has looked at the arguments, which made a comparison of
-  two artefacts - `--from tar:a --to tar:b`, both of them built elsewhere and
-  neither of them this checkout - wait for a compile of a checkout it was not
-  going to read, and *fail* if that checkout does not compile. A read-only
-  comparison of two things that already exist should not need the working tree to
-  be in a fit state.
+  Compiles and reads the current project's library directory.
   """
   @spec current!() :: t()
   def current! do
@@ -186,10 +108,10 @@ defmodule Forecastle.Build do
   # an empty one is not a build - and no directory that is merely nearby does.
   # The one check that cannot be fooled by a path being resolvable.
   @doc """
-  Reads a library directory, refusing anything that is not one.
+  Reads a build library directory.
 
-  `describe` is how the build is named in every refusal that follows, so it
-  should read as a noun phrase: `"the current build"`, or the spec that named it.
+  Raises unless the path contains at least one application directory with an
+  `ebin` subdirectory. `describe` is used in diagnostics.
   """
   @spec build(binary(), binary()) :: t()
   def build(describe, lib_dir) do
@@ -225,14 +147,10 @@ defmodule Forecastle.Build do
   end
 
   @doc """
-  The `ebin` of one application in one build, or `nil` if it is not in it.
+  Returns an application's `ebin` directory, or `nil` when it is absent.
 
-  `<app>` for a Mix build and `<app>-<vsn>` for a release, which is the only
-  thing `Forecastle.Baseline` promises about the layout. `nil` means the
-  application really is not in this build - which is a claim worth making only
-  because `build/2` established that the library directory itself is there, and
-  only because nothing in it claimed to be this application. See `app_dirs/2`
-  for the second half of that.
+  The function supports Mix and release layouts, verifies the `.app` resource,
+  and rejects ambiguous or incomplete application entries.
   """
   @spec ebin(t(), atom()) :: binary() | nil
   def ebin(build, app) do
@@ -393,12 +311,10 @@ defmodule Forecastle.Build do
   end
 
   @doc """
-  One side of the comparison: the version an appup entry is keyed by, the beams
-  on disk, and the `.app` resource's own module list.
+  Reads one application side of a comparison.
 
-  The last two are different things and both are needed - the beams are what
-  *moved*, and the inventory is what `:systools` can *resolve*. See
-  `app_resource!/2`.
+  The result includes the application version, `.app` module inventory, BEAM
+  fingerprints, exports, and source paths.
   """
   @spec side!(binary(), atom()) :: side()
   def side!(ebin, app) do
@@ -418,12 +334,7 @@ defmodule Forecastle.Build do
   end
 
   @doc """
-  The whole of the diff between two module maps, in terms of the direction's own
-  old and new builds.
-
-  Sorted, so that an answer is stable between runs and between machines -
-  `File.ls/1` answers in whatever order the filesystem hands back, and the maps
-  these are built from have no order of their own either.
+  Returns sorted lists of changed, added and removed modules.
   """
   @spec moved(%{module() => fingerprint()}, %{module() => fingerprint()}) ::
           {[module()], [module()], [module()]}
@@ -438,23 +349,10 @@ defmodule Forecastle.Build do
   end
 
   @doc """
-  The OTP behaviours a module declares, read from the `Attr` chunk.
+  Returns OTP behaviours declared in a module's persisted attributes.
 
-  **This is the only signal `mix castle.appup.gen` classifies on, and reading it
-  here is what makes it one read of one file rather than two.** The attribute
-  half of the fingerprint is already the decoded attribute list, so the
-  behaviours come out of the same bytes the change detection compared.
-
-  **Both attribute spellings are read, and that is measured rather than
-  defensive.** The Erlang compiler preserves the spelling the source used:
-  `-behaviour(gen_server).` is stored under `behaviour` and
-  `-behavior(gen_server).` under `behavior` - measured on OTP 28.3, where the
-  two compile to `[behaviour: [:gen_server]]` and `[behavior: [:gen_server]]`
-  respectively. Elixir's `@behaviour` always produces the British spelling, so
-  the American one only turns up in Erlang sources - which is exactly where a
-  dependency's `gen_server` is likely to live.
-
-  A module absent from the build, or one whose beam declares none, answers `[]`.
+  Both `behaviour` and `behavior` attribute spellings are recognised. Missing
+  modules or attributes return an empty list.
   """
   @spec behaviours(side(), module()) :: [atom()]
   def behaviours(side, module) do
@@ -472,28 +370,10 @@ defmodule Forecastle.Build do
   end
 
   @doc """
-  Whether a module exports a function, read from the beam's `ExpT` chunk.
+  Returns whether a module exports a function.
 
-  **This is not a classification signal and must never become one.**
-  `design/upgrade-tooling.md` §3.2 is explicit that `code_change/3` being
-  *exported* says nothing: Elixir injects an overridable one into every
-  `use GenServer` module, and the injected one cannot be told from a hand-written
-  one at a release's beams. Which instruction a module needs is decided by
-  `behaviours/2` and by nothing else.
-
-  What an *absent* export decides is a different question, and that one is
-  answerable. `code_change/3` is an optional callback of `gen_server` and
-  `gen_event`, and `code_change/4` of `gen_statem` and `gen_fsm`, so a module can
-  legitimately declare the behaviour and export neither - `@behaviour GenServer`
-  without `use`, or any Erlang callback module. Measured on OTP 28:
-  `sys:change_code/4` on such a process answers
-  `{error, {'EXIT', {undef, [{Mod, code_change, ...}]}}}`, and
-  `release_handler_1:change_code/5` matches `ok = sys:change_code(...)`, so the
-  install fails. `mix castle.appup.gen` reports that beside the instruction it
-  drafted rather than choosing a different one.
-
-  A module absent from the build, or one whose beam has no export table, answers
-  `false`.
+  This supports draft warnings about missing callbacks; behaviour attributes,
+  not exports, determine the drafted instruction.
   """
   @spec exports?(side(), module(), atom(), arity()) :: boolean()
   def exports?(side, module, name, arity) do
@@ -595,36 +475,11 @@ defmodule Forecastle.Build do
   end
 
   @doc """
-  The version, the `modules` inventory and whether `:systools` would accept the
-  inventory, out of an application resource file.
+  Reads an application's version and module inventory from its `.app` file.
 
-  Two things come out of the `.app` resource, and both are needed.
-
-  The **version** an appup entry is keyed by is the application's own, and at
-  `:compile` level there is no `.rel` to read it out of and the directory name
-  does not carry it either. This file is where it is, in both layouts.
-
-  The **modules list** is what `systools_rc` means by "every module of the
-  application": `#application.modules` comes from here, so it is what an
-  `add_application` or a `restart_application` expands over, and it is what
-  `get_lib/2` resolves object code through. It is deliberately *not* assumed to
-  agree with the beams in `ebin`.
-
-  A missing or malformed list is read as an **empty** one, and that is not what
-  `:systools` makes of it: `systools_make:check_item/2` ends in
-  `throw({missing_param, Item})`, and a `modules` value that is not a list of
-  atoms is a `bad_param`. Validating a `.app` is that function's job and it does
-  it when a release or a relup is built; a second, weaker copy of it here could
-  only disagree with the first, which is the very failure `Forecastle.Appup`
-  exists to prevent for appups.
-
-  Reading it as empty is the conservative direction rather than the convenient
-  one, which is what makes leaving it to `:systools` safe. An empty inventory
-  resolves nothing, so every module that moved is reported as unresolvable and an
-  application-level instruction covers nothing beyond what it names by hand -
-  strictly more findings and a non-zero exit, never fewer. A malformed resource
-  cannot buy a clean bill of health. The third element of the answer is what lets
-  a caller say so directly rather than leaving it to be inferred.
+  The boolean result records whether the inventory is a valid list of atoms. A
+  missing or malformed inventory becomes empty so coverage checks fail safely;
+  relup generation remains responsible for full `.app` validation.
   """
   @spec app_resource!(binary(), atom()) :: {binary(), MapSet.t(module()), boolean()}
   def app_resource!(file, app) do

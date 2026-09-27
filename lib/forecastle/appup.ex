@@ -1,159 +1,26 @@
 defmodule Forecastle.Appup do
   @moduledoc """
-  Reading appup files, and asking them the questions `systools` asks of them.
+  Reads appups and applies OTP's entry-selection and instruction semantics.
 
-  An appup is read in two places here, for two different questions.
-  `mix castle.relup`'s `auto` strategy asks whether an appup covers a particular
-  transition *at all*, because an application the project does not own whose
-  version moved with nothing to cover the move makes that edge a restart.
-  `mix castle.appup` asks what the entry it finds actually *does*, because an
-  entry that exists and mentions half the modules that changed is the failure
-  that check exists for.
+  `mix castle.relup` uses this module to decide whether an appup covers a
+  transition. `mix castle.appup` uses it to check what the selected entry loads
+  and removes.
 
-  Both are questions about one file, keyed by one from-version, and the two must
-  not be able to disagree: a check that pronounced an appup adequate while
-  `auto` restarted the same edge - or the reverse - would be worse than no check
-  at all. So the reading and the matching live here, once, and both callers go
-  through them.
+  From-version charlists match exactly. Binary keys are regular expressions,
+  selected through `:systools_relup.appup_search_for_version/2`.
 
-  ## Matching a from-version is `systools_relup`'s job
+  `script/2` expands short instructions and splices one level of list fragments
+  in the same order as `:systools`. Coverage credits only legal instructions:
 
-  `appup_search_for_version/2` is what `systools` and `release_handler` both
-  select an entry with, and it is not a string comparison. A from-version given
-  as a charlist matches by term equality; one given as a **binary** is a regular
-  expression, run against the from-version with
-  `re:run(BaseVsn, Vsn, [unicode, {capture, first, list}])` and accepted only on
-  `{match, [BaseVsn]}` - so the whole match has to be the from-version, and a
-  prefix regex does not match a longer version.
+  - `update`, `load_module`, `add_module` and `load` load a module.
+  - `delete_module` and `remove` remove a module.
+  - `add_application`, `remove_application` and `restart_application` affect the
+    modules listed in the corresponding `.app` resources.
 
-  The function is exported for reuse ("Used by `release_handler:find_script/4`.
-  Also used by kernel, stdlib and sasl tests"), so it is called here rather than
-  reimplemented. Verified against OTP 28.3, `sasl-4.3`.
-
-  ## A script element may itself be a list
-
-  `systools_rc:expand_script/1` expands each instruction's short form into its
-  long one, and it has a second effect that `appup(4)` does not document: a
-  script element that is a *list* is spliced into the script. So
-  `[[restart_emulator]]` is a script that restarts the emulator, and `:systools`
-  accepts it.
-
-  **The two effects are exclusive, and the order is the whole of it.** A list
-  element matches no clause of the expansion, so it is spliced *instead of* being
-  expanded and its members are never passed back through. That is why the same
-  instruction can be legal at the top level and illegal one list deeper:
-  `[{load_module, m}]` passes the syntax check, `[[{load_module, m}]]` is a
-  `{bad_instruction, {load_module, m}}`. Splicing first and expanding afterwards
-  is a different function, and the difference is a false pass.
-
-  `script/2` therefore does what `expand_script/1` does, in that order, and every
-  question here is asked of its result. It matters in both directions - a nested
-  `delete_module` is an instruction that turns a coverage into a gap, so missing
-  one failed *silently* - and it happens exactly once, since `:systools` refuses
-  two levels of nesting as readily as it accepts one. See `expand/1` for the
-  measurements.
-
-  ## An instruction is credited only once its whole shape is legal
-
-  Recognising an instruction by its head and the position of its module is a
-  false *pass*, which is the one answer a gate must never give.
-  `{restart_application, App, Anything}` is not an instruction -
-  `systools_rc:check_syntax/1` refuses it as a `bad_instruction` and the edge
-  produces no relup at all - but read by leading elements alone it looked like a
-  whole-application instruction and covered the entire inventory.
-
-  So `effects/4` and `named/2` credit nothing until `legal?/1` says the shape is
-  one `:systools` accepts, and `refused/1` hands the rest back for a caller to
-  report. `legal?/1` is `check_op/1` and nothing more, which is exact rather than
-  approximate for the reason above: `check_syntax/1` runs on the expanded script,
-  `script/2` produces the expanded script, so the same vocabulary applies to a
-  top-level instruction and to a fragment member without either of them carrying
-  a note about where it came from. It is deliberately allowed to be *narrower*
-  than `:systools`: too narrow costs a false gap with the instruction printed
-  beside it, too wide costs a false pass.
-
-  ## What an instruction covers, and of what
-
-  Four high-level instructions name one module, and in every arity `appup(4)`
-  allows the module is the **second element** of the tuple. That is not an
-  assumption: `systools_rc:expand_script/1` expands every short form into the long
-  one and leaves `Mod` where it was, and `normalize_instrs/1` does the same for
-  the two `update` forms it has left.
-
-  **They do not all do the same thing, and asking only whether a module is
-  "mentioned" gets the dangerous case backwards.** Measured in
-  `systools_rc:translate_dep_to_low/3` and `translate_add_module_instrs/2`:
-
-    * `update` and `load_module` become `{load, {Mod, …}}` plus a
-      `load_object_code` for it, and `add_module` is rewritten into a
-      `load_module` first. All three put the new code into the system, so all
-      three cover a module whose code **changed** or that was **added**.
-    * `delete_module` becomes `{remove, {Mod, …}}` and `{purge, [Mod]}`, and
-      **nothing loads it**. It covers a module that was **removed** - and a
-      changed module named only by a `delete_module` is not covered at all. It
-      is deleted, which is worse than being left stale.
-
-  So coverage is asked per *effect*: `:load` for a module that has to arrive,
-  `:removal` for one that has to go. A model that treated the four alike
-  reported a `delete_module` on a changed module as covered and exited zero.
-
-  **The `load` and `remove` those translate into can also be written by hand, and
-  they count too.** `check_op/1` accepts both in an appup - measured: an appup
-  script of `[{load_module, M, …}, {remove, {M, …}}]` is translated to a `load`
-  followed by a `remove`, and `release_handler_1` implements the second with
-  `code:purge/1` and `code:delete/1`, so `M` is loaded and then made unavailable.
-  Ignoring them was wrong in both directions: a low-level `remove` undoing a
-  covered load was a false pass, and a removal expressed as one rather than as a
-  `delete_module` was a false gap. They are the one pair whose module sits inside
-  a tuple rather than at the second element, which is what `subject/1` is for.
-
-  `DepMods` is deliberately not coverage either. It is the last element of most
-  of those instructions and names modules the instruction's own module depends
-  on, which `systools_rc` uses only to order the script - a module appearing
-  only in somebody else's `DepMods` list is never loaded, and counting it would
-  turn the exact question this module answers into a substring search. The same
-  goes for `{apply, {M, F, A}}`: naming a module in a function call says nothing
-  about loading it.
-
-  Three instructions are about a whole application, and they split along the
-  same line. Measured in `systools_rc:translate_application_instrs/3`:
-  `add_application` expands to an `add_module` per module of the new application
-  (`:load` only); `remove_application` to a `remove` per module of the old one
-  (`:removal` only); and `restart_application` to both - every old module
-  removed and purged, every new one added.
-
-  **"Every module" there is the `.app` resource's `modules` list, not the beams
-  on disk**, because that is what `#application.modules` holds - and the two can
-  differ. So `effects/4` takes the inventories rather than assuming them: see its
-  documentation for what that costs a build whose `.app` and `ebin` disagree.
-
-  `restart_application` being *both*, in that order, is also why the question is
-  "what state does the script leave this module in" rather than "which sets is it
-  in". Order settles it; two sets need a rule about which to subtract, and any
-  such rule is blind to a load followed by a removal.
-
-  ## Which scripts need no module coverage at all
-
-  An edge that ends by restarting the emulator needs none: module-level
-  instructions are moot when the code is going to be loaded from scratch by a
-  new VM.
-
-  Which edges those are is `systools_rc:sort_emulator_restart/3`'s answer rather
-  than a reading of the appup's own ordering, and the two differ. Measured
-  against OTP 28.3, `sasl-4.3`:
-
-    * `restart_emulator` is filtered out of the script wherever the appup put it
-      and appended to the end. So its **position in the appup does not matter**,
-      and a check that looked at the last instruction would miss an appup that
-      wrote it first.
-    * `restart_new_emulator` in a **downgrade** script is removed and a plain
-      `restart_emulator` appended in its place. So a two-stage instruction on
-      the way down is a one-stage restart, and needs no coverage either.
-    * `restart_new_emulator` in an **upgrade** script is hoisted to the front,
-      before the point of no return: the emulator is replaced and the rest of
-      the relup then runs on the way up, so the module instructions still
-      matter. It is also the transition Castle does not support at all - see
-      `mix castle.relup`, which refuses it.
+  Dependency-order lists and `apply` instructions do not load code. An edge that
+  ends with `restart_emulator` needs no module coverage because the new VM loads
+  the release from disk. An upgrade using `restart_new_emulator` still runs the
+  remaining relup after the emulator restart and is rejected by Forecastle.
   """
 
   # The instructions that name one module, split by what they do to it. `Mod` is
@@ -232,13 +99,11 @@ defmodule Forecastle.Appup do
   end
 
   @doc """
-  The applications the project is taken to own the appups for: its own, plus
-  every child of an umbrella.
+  Returns the applications whose appups the project owns.
 
-  Everything else in a release is something whose upgrade instructions, if it
-  has any, were written for somebody else's transitions. `mix castle.relup` uses
-  that to decide which moved applications can make an edge a restart;
-  `mix castle.appup` uses it as the default set of applications to check.
+  The list contains the current application and all umbrella children. Relup
+  generation uses it to distinguish owned applications from dependencies, and
+  `mix castle.appup` uses it as the default application set.
   """
   @spec project_apps() :: [atom()]
   def project_apps do
@@ -254,9 +119,8 @@ defmodule Forecastle.Appup do
   @doc """
   Reads an appup file.
 
-  Returns `{:error, phrase}` rather than raising, because both callers have
-  something of their own to say about a missing or unreadable appup and the
-  phrase is the middle of that sentence rather than the whole of it.
+  Returns `{:error, phrase}` for a missing, unreadable or malformed file so the
+  caller can place the reason in its own diagnostic.
   """
   @spec read(Path.t()) :: {:ok, t()} | {:error, binary()}
   def read(file) do
@@ -276,39 +140,28 @@ defmodule Forecastle.Appup do
   end
 
   @doc """
-  One of an appup's two instruction lists.
+  Returns the upgrade or downgrade entries from an appup.
 
-  They are independent: a from-version present in one need not be present in the
-  other, so every question about an appup is a question about a direction.
+  The two directions are independent.
   """
   @spec entries(t(), direction()) :: [entry()]
   def entries({_appup_vsn, up, _down}, :up), do: up
   def entries({_appup_vsn, _up, down}, :down), do: down
 
   @doc """
-  The version the appup says it belongs to.
+  Returns the version named by the appup.
 
-  `systools_relup` compares this against the application's own version and warns
-  `bad_vsn` when they differ - it does *not* refuse, and it still uses the entry
-  it found, which is why this is exposed rather than checked here.
+  `:systools_relup` warns with `bad_vsn` when it differs from the application
+  version, but still uses matching entries.
   """
   @spec vsn(t()) :: charlist()
   def vsn({appup_vsn, _up, _down}), do: appup_vsn
 
   @doc """
-  The first entry key `script/2` could not match with, or `nil`.
+  Returns the first binary entry key that is not a valid regular expression.
 
-  **A from-version given as a binary is a regular expression, and
-  `appup_search_for_version/2` *raises* on one it cannot compile** - measured on
-  OTP 28.3, where `"0\\\\.1\\\\.["` comes back as an `ArgumentError` out of
-  `re:run/3` rather than as an answer. Every question asked of an appup here goes
-  through `script/2`, so a caller that has not asked this first meets that
-  exception in the middle of whatever it was doing, naming nothing.
-
-  It lives beside `script/2` because it is a fact about that same call, and it is
-  asked with the option that call runs under - so the two cannot disagree about
-  which keys are usable, which is the whole reason the reading lives in one
-  module.
+  Binary from-version keys are regexes. OTP raises while selecting an entry when
+  one cannot be compiled, so callers should check before calling `script/2`.
   """
   @spec uncompilable_key([entry()]) :: binary() | nil
   def uncompilable_key(entries) do
@@ -325,19 +178,10 @@ defmodule Forecastle.Appup do
   defp uncompilable?(_entry), do: false
 
   @doc """
-  The script for a from-version, selected the way `systools_relup` selects it,
-  and expanded the way `systools_rc` expands it.
+  Selects and expands the script for a from-version using OTP semantics.
 
-  `:error` means no entry matched, which is what `:systools.make_relup/4` fails
-  on outright. A script that is not a list is handed back untouched, because
-  what a caller has to say about one is not something this can decide - see
-  `mix castle.appup`, which reports it.
-
-  The expansion is the second half of the journey from the appup file to a
-  question about instructions, and it is done here so that it is done exactly
-  once, and so that what comes out is the script `check_syntax/1` would see -
-  which is what makes `legal?/1` able to be `check_op/1` exactly. See the
-  moduledoc.
+  Returns `:error` when no entry matches. Malformed scripts that are not lists
+  are returned unchanged for the caller to report.
   """
   @spec script([entry()], binary()) :: {:ok, [term()]} | :error
   def script(entries, from_vsn) do
@@ -355,57 +199,17 @@ defmodule Forecastle.Appup do
   end
 
   @doc """
-  What the script leaves each module in: `:load` if its code ends up in the
-  running system, `:removal` if it ends up out of it, or `{:conflict, …}` where
-  that is not answerable without knowing an order this task cannot know.
+  Returns the final load or removal effect for each module touched by a script.
 
-  **The order instructions run in is deliberately not modelled, and that is the
-  answer to five review rounds of getting it wrong rather than a gap in this
-  one.** Reading the script as two sets could not tell a load from a load undone
-  by a later removal. Reading it as a sequence in source order was wrong too,
-  because `systools_rc` reorders: measured on OTP 28.3, `sasl-4.3`,
-  `[{update, dict, …, [lists]}, {remove, {lists, …}}, {update, lists, …}]` is
-  accepted and translated to `[{load, lists}, {load, dict}, {remove, lists}]` -
-  the dependency-connected updates are hoisted *past* the independent low-level
-  `remove`, so `lists` ends up removed where source order says it ends up loaded.
-  Modelling that faithfully means building `translate_dependent_instrs/4`'s
-  digraph, which is reimplementing the thing this module exists to avoid
-  reimplementing.
+  A result is `:load`, `:removal`, or `{:conflict, instructions}` when load and
+  removal effects disagree. The function does not guess the order after
+  `:systools` reorders dependency-connected instructions. Repeated effects that
+  agree retain that effect. A single `restart_application` leaves modules in
+  the target inventory loaded.
 
-  So the question is asked only where order cannot change the answer:
-
-    * a module with exactly **one** effect in the script has that effect,
-      whatever order anything runs in. This is the overwhelmingly common case -
-      an ordinary appup names each module once.
-    * a module whose effects all **agree** has that effect. Loading a module
-      twice still leaves it loaded.
-    * a module whose effects **disagree** is a `{:conflict, instructions}`, and
-      the caller reports it rather than resolving it. Every measured script of
-      that shape is one an author needs to be told about: it is either refused
-      outright as a `muldef_module` (see `multiply_defined/3`) or it turns on a
-      translation order that is not visible in the file.
-
-  The one exception is measured rather than assumed: a `restart_application` is
-  *itself* a removal of every old module and a load of every new one, and
-  `translate_application_instrs/3` emits them in that order within the one
-  instruction - verified to come out as `remove, remove, purge, load, load` in
-  both directions. So where a module's only effects come from a single
-  `restart_application`, the answer is `:load`.
-
-  `load_inventory` and `removal_inventory` are the application's **`.app` module
-  lists** - the *new* side's and the *old* side's respectively - because that is
-  what an application-level instruction expands over.
-  `translate_application_instrs/3` reads `#application.modules`, which comes from
-  the `.app` resource, so a beam sitting in `ebin` that the `.app` does not name
-  is not touched by a `restart_application`. An earlier version of this treated
-  one as covering everything, which reported exactly that module as covered while
-  a successful upgrade left its old copy loaded. `Mix.Tasks.Compile.App` fills
-  `:modules` in with `Keyword.put_new_lazy/3`, so a project supplying its own list
-  in `application/0` keeps it, which is how an ordinary build reaches the
-  mismatch.
-
-  A module named only in another instruction's `DepMods`, or only inside an
-  `{apply, {M, F, A}}`, is in neither state - it is not in the map at all.
+  `load_inventory` and `removal_inventory` are the target and source module
+  lists from their `.app` resources. Application-level instructions use these
+  inventories rather than every BEAM file in `ebin`.
   """
   @spec effects([term()], atom(), Enumerable.t(module()), Enumerable.t(module())) ::
           %{module() => resolution()}
@@ -433,16 +237,10 @@ defmodule Forecastle.Appup do
   end
 
   @doc """
-  The modules a script names outright for one effect, without the expansion an
-  application-level instruction implies.
+  Returns modules named directly by instructions with the requested effect.
 
-  This is what a report can say something *about*. "You named a module that did
-  not change" is a remark about what somebody wrote, and an `add_application`
-  names no module at all - so expanding it here would turn every unchanged module
-  in the application into a remark about a leftover that nobody left.
-
-  `effects/4` is the question to ask about a *gap*; this one is for the notes
-  beside it.
+  Application-level instructions are not expanded. Use `effects/4` when checking
+  coverage across a complete application.
   """
   @spec named([term()], effect()) :: MapSet.t(module())
   def named(script, effect) when effect in [:load, :removal] do
@@ -453,12 +251,10 @@ defmodule Forecastle.Appup do
   end
 
   @doc """
-  Whether this edge ends with the emulator being restarted, and so needs no
-  module-level coverage.
+  Returns whether an edge ends by restarting the emulator.
 
-  The direction matters: a `restart_new_emulator` on the way down is rewritten
-  into a trailing `restart_emulator`, while on the way up it is the two-stage
-  transition and the rest of the relup still runs. See the moduledoc.
+  A downgrade containing `restart_new_emulator` becomes a trailing
+  `restart_emulator`; an upgrade remains a two-stage transition.
   """
   @spec restarts_emulator?([term()], direction()) :: boolean()
   def restarts_emulator?(script, direction) do
@@ -467,10 +263,7 @@ defmodule Forecastle.Appup do
   end
 
   @doc """
-  Whether this edge asks for the two-stage emulator restart Castle does not
-  support.
-
-  Only ever true on the way up: see `restarts_emulator?/2`.
+  Returns whether an upgrade requests unsupported `restart_new_emulator`.
   """
   @spec two_stage_restart?([term()], direction()) :: boolean()
   def two_stage_restart?(script, direction) do
@@ -478,39 +271,11 @@ defmodule Forecastle.Appup do
   end
 
   @doc """
-  The instructions in a script that `:systools` will refuse, among those this
-  module reasons about.
+  Returns instructions in this module's vocabulary that OTP will reject.
 
-  **This exists because recognising an instruction by its head and the position
-  of its module was a false *pass*, which is the one answer a gate must never
-  give.** `{restart_application, App, Anything}` is not an instruction:
-  `systools_rc:check_syntax/1` refuses it as a `bad_instruction` and no relup is
-  produced for the edge at all. Read by leading elements alone it looked like a
-  whole-application instruction, so it covered the entire inventory and the check
-  reported that every module was covered - of an appup that cannot be used.
-
-  So `effects/4` and `named/2` credit an instruction only once its whole shape is
-  one `:systools` accepts, and this is the other half of that: the instructions
-  they declined to credit, for a caller to report. An unrecognised instruction
-  covering nothing is the conservative direction on its own, but silently
-  covering nothing is not enough - a reader told that a module is uncovered needs
-  to know that the instruction naming it is the reason.
-
-  Only the instructions in this module's own vocabulary are judged. `{apply, …}`,
-  `point_of_no_return`, `{load_object_code, …}` and the rest are legal, name no
-  module here whatever their shape, and were never credited with anything - so
-  saying something about their shape would be a claim outside what this module
-  is for, and `:systools` makes it anyway.
-
-  **An element that is still a *list* after `expand/1` is refused too, and it has
-  to be judged here because nothing else looks at it.** `expand_script/1` splices
-  one level, so a script written two levels deep leaves a list sitting where an
-  instruction should be, and `check_op/1` has no clause for one: measured,
-  `[[[[restart_emulator]]]]` fails with `{bad_instruction, [restart_emulator]}`.
-  Skipping it because it is not a tuple was a false pass with a nasty shape - the
-  `restart_emulator` inside is invisible to `restarts_emulator?/2` as well, so an
-  appup whose other instructions happened to cover everything exited zero on an
-  edge that produces no relup at all.
+  Coverage functions ignore malformed instructions. This function returns them
+  for diagnostics. It also reports list fragments left after one expansion
+  level, which OTP treats as bad instructions.
   """
   @spec refused([term()]) :: [term()]
   def refused(script) do
@@ -526,25 +291,10 @@ defmodule Forecastle.Appup do
   defp refused?(_instruction), do: false
 
   @doc """
-  The instructions this module reasons about that sit *before* an explicit
-  `point_of_no_return`, where `systools_rc` will not have them.
+  Returns module instructions placed before `point_of_no_return`.
 
-  `split_script/1` cuts the script at the marker and `check_script/2` allows only
-  `load_object_code` and `apply` in the first half, throwing
-  `bad_op_before_point_of_no_return` for anything else - measured on OTP 28.3:
-  `[{update, M, …}, point_of_no_return]` is refused, `[point_of_no_return,
-  {update, M, …}]` and `[{apply, …}, point_of_no_return, {update, M, …}]` are
-  fine.
-
-  A script with no marker of its own is entirely "after" it, which is where
-  module instructions belong, so nothing is reported for one - and that is the
-  overwhelmingly common case, since the marker is a relup-script feature that an
-  appup rarely spells out.
-
-  This is positional rather than per-instruction, which is why it is separate
-  from `refused/1`: the instruction is perfectly legal, it is only in the wrong
-  half. `effects/4` still credits it, deliberately - it says what the instruction
-  *does*, and the caller reports that the edge will not be built at all.
+  OTP permits only `load_object_code` and `apply` before this marker. A script
+  without the marker returns an empty list.
   """
   @spec misplaced([term()]) :: [term()]
   def misplaced(script) do
@@ -562,35 +312,12 @@ defmodule Forecastle.Appup do
   defp ours_instruction?(_instruction), do: false
 
   @doc """
-  The modules that more than one dependency-ordered instruction defines, which
-  `:systools` refuses as `muldef_module`.
+  Returns modules defined by more than one dependency-ordered instruction.
 
-  **This is the other way a script `:systools` will not accept can look complete,
-  and unlike a bad instruction it is reachable by an appup somebody might
-  plausibly write.** `systools_rc` builds a digraph of the instructions that carry
-  `DepMods` and throws `{muldef_module, Mod}` when a module has more than one
-  vertex in it, so no relup is produced at all - while asking only what state the
-  script leaves each module in says "covered" and exits zero.
-
-  What counts as a vertex is measured (OTP 28.3, `sasl-4.3`) rather than read off
-  the instruction list, because the application-level instructions contribute
-  through their expansion and only *half* of each one does:
-
-    * `update`, `load_module`, `add_module` and `delete_module` each contribute
-      the module they name. So `update` with `load_module`, or `update` with
-      `delete_module`, on one module is a `muldef_module`.
-    * `add_application` and `restart_application` contribute **every module of
-      the new inventory**, because `translate_application_instrs/3` expands them
-      to an `add_module` apiece and `translate_add_module_instrs/2` rewrites that
-      into a `load_module`. Hence `{restart_application, App}` beside an explicit
-      `{update, M, …}` for one of `App`'s own modules is refused - which is the
-      case worth catching, since restarting an application and special-casing one
-      of its modules is a reasonable-looking thing to write.
-    * `remove_application`'s half contributes **nothing**: it expands straight to
-      the low-level `remove` and `purge`, which carry no `DepMods` and are not in
-      the graph. Nor are a hand-written `load` or `remove` - measured,
-      `[{update, M, …}, {remove, {M, …}}]` is accepted, which is exactly why
-      `effects/4` has to order that pair rather than refuse it.
+  OTP rejects these as `muldef_module`. Module-level load and delete instructions
+  contribute one definition. `add_application` and `restart_application`
+  contribute every module in the target inventory. Low-level `load` and
+  `remove` instructions do not contribute dependency-graph vertices.
   """
   @spec multiply_defined([term()], atom(), Enumerable.t(module())) :: [module()]
   def multiply_defined(script, app, load_inventory) do
@@ -618,25 +345,10 @@ defmodule Forecastle.Appup do
   end
 
   @doc """
-  The `remove_application` instructions naming the application whose appup this
-  is, which `:systools` refuses as `removed_application_present`.
+  Returns `remove_application` instructions for the application owning the appup.
 
-  **In the situation this module is asked about, such an instruction is *always*
-  refused, which is what makes reporting it exact rather than a guess.**
-  `translate_application_instrs/3` throws `removed_application_present` when the
-  application named is still in the release being moved *to* - and an appup is
-  only consulted for an application present in both builds, since one missing from
-  either is an `add_application` or a `remove_application` that `:systools`
-  supplies itself and that no appup covers. Measured in both directions on OTP
-  28.3: refused when the application is present in the target, accepted only when
-  it is absent, which is the case this never sees.
-
-  So it covers nothing - `effects/4` credits it with no removal at all - and it is
-  handed back here for a caller to report. Crediting it was a false pass with a
-  sharp edge: an application whose last module was removed has an empty target
-  inventory, so this one instruction appeared to cover the only removal there was,
-  raised no deleted-but-present finding, and let the run exit zero on an edge
-  `make_relup` cannot build.
+  OTP rejects such an instruction while the application remains in the target
+  release.
   """
   @spec self_removals([term()], atom()) :: [term()]
   def self_removals(script, app) do

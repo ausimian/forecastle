@@ -1,102 +1,22 @@
 defmodule Forecastle.Appup.Draft do
   @moduledoc """
-  What instruction each module that moved needs, and what has to be said beside
-  it rather than decided for it.
+  Drafts appup instructions for modules that changed between two builds.
 
-  This is the half of `mix castle.appup.gen` that turns a diff of two builds into
-  a script. It decides *which modules moved* - which is tedious and error-prone
-  for a person and entirely mechanical - and it refuses to pretend it has decided
-  *what happens to the state*, which only the author knows.
-  `design/upgrade-tooling.md` §3.3 and §3.4 in ausimian/castle are where the line
-  between those two is drawn.
+  The draft uses BEAM behaviour attributes to choose an instruction:
 
-  ## The signal is the behaviour, and `code_change/3` is not one
-
-  Behaviours are read from the beam's `Attr` chunk - by `Forecastle.Build`, out
-  of the same read that fingerprinted the module - and that is the only signal.
-  `{:update, M}` (soft) is the unsafe alternative, since it does not call
-  `code_change/3` at all and so leaves a state that did need migrating alone,
-  silently - and nothing here emits it.
-
-  **§3.3's "`{:advanced, []}` is safe whether or not a `code_change/3` was
-  written" holds for `use GenServer` and for nothing else, and that was found in
-  review.** `code_change/3` is in `gen_server`'s and `gen_event`'s
-  `-optional_callbacks`, and `code_change/4` in `gen_statem`'s and `gen_fsm`'s,
-  so `@behaviour GenServer` without `use`, and every Erlang callback module, can
-  declare the behaviour and export neither. Measured on OTP 28, `sys:change_code/4`
-  on such a process answers `{error, {'EXIT', {undef, …}}}` and
-  `release_handler_1` matches `ok = sys:change_code(…)`, so the install fails.
-  The instruction is unchanged for it - see `callback/3` for why neither
-  alternative is better - and the draft says so beside it.
-
-  | Signal in `Attr` | Instruction |
+  | Module | Instruction |
   | --- | --- |
-  | `Supervisor` / `:supervisor` | `{:update, M, :supervisor}` |
-  | `GenServer` / `:gen_server` / `:gen_statem` / `:gen_event` / `:gen_fsm` | `{:update, M, {:advanced, []}}` |
-  | anything else | `{:load_module, M}` |
-  | absent from the old build | `{:add_module, M}` |
-  | absent from the new build | `{:delete_module, M}` |
+  | Supervisor | `{:update, module, :supervisor}` |
+  | GenServer, `:gen_server`, `:gen_statem`, `:gen_event` or `:gen_fsm` | `{:update, module, {:advanced, []}}` |
+  | Other changed module | `{:load_module, module}` |
+  | Added module | `{:add_module, module}` |
+  | Removed module | `{:delete_module, module}` |
 
-  **Do not classify on `code_change/3` being exported, and the reason is
-  measured.** Elixir 1.19.5's `gen_server.ex:953` injects an overridable
-  `@doc false def code_change(_old, state, _extra), do: {:ok, state}`, so
-  **every** `use GenServer` module exports it and its presence says nothing. Nor
-  can the injected default be told from a hand-written one at a release's beams:
-  distinguishing them would need the `Docs` chunk (`:hidden` versus `:none`) or
-  the abstract code, and `Mix.Release.strip_beam/2` removes both.
-
-  Both attribute spellings are handled, and both are measured rather than
-  assumed: Elixir modules carry `behaviour: [GenServer]`, Erlang ones
-  `behaviour: [:gen_server]`, and an Erlang module written `-behavior(...)`
-  carries the American spelling as its attribute *key*. See
-  `Forecastle.Build.behaviours/2`.
-
-  **A module carrying more than one behaviour is classified by the first row of
-  the table that matches, and supervisor wins.** That is reachable in ordinary
-  code - measured on Elixir 1.19.5, a module that is `use GenServer` and
-  `@behaviour Supervisor` compiles to `behaviour: [GenServer, Supervisor]` - and
-  choosing the supervisor instruction is the conservative direction: it is the
-  one whose `init/1` is re-read, and a supervisor upgraded as a plain
-  `gen_server` would have its child specs left alone silently. The comment beside
-  the instruction names every behaviour found, so the choice is visible rather
-  than implied.
-
-  ## What it says rather than decides
-
-  Every instruction is drafted with the comment lines that go beside it, because
-  a draft that hides its uncertainty is worse than no draft. Four things can
-  never be derived here:
-
-    * **The `Extra` term is always `[]`.** Nothing can derive it. It is what
-      `code_change/3` receives as its third argument, and only the author knows
-      what the migration needs.
-    * **`{:update, M, :supervisor}` re-reads `init/1` and reconciles child
-      *specs*.** It does not upgrade the children; those need their own
-      instructions.
-    * **`update` only reaches processes found through the supervision tree.** A
-      process nobody supervises keeps its old code, silently, and the appup will
-      look as though it covered it.
-    * **Ordering is stable, not correct.** `add_module` comes before the modules
-      that use it and `delete_module` after, which is the part that is decidable.
-      `DepMods` *between* changed modules is derivable from import tables and is
-      not computed, so nothing here orders two changed modules against each
-      other.
-
-  Three more are said where they apply rather than always, and each is a fact
-  about *this* module rather than a property of the table:
-
-    * an instruction naming a module the new side's `.app` does not list cannot
-      resolve object code and fails the whole relup with `no_such_module` - see
-      `annotate/4`.
-    * an advanced update on a module that exports no `code_change` fails the
-      install with `undef` - see `callback/3`.
-    * a module whose behaviour *role* differs between the two builds is drafted
-      for what it becomes, while the process running now was started by the old
-      code - see `role_change/3`.
-
-  All three still draft the instruction. Refusing an entry over one module would
-  take the other twenty with it, and leaving an instruction out silently is the
-  §1.1 failure this tooling exists to catch, arriving from the other direction.
+  Supervisor classification takes precedence when a module declares several
+  behaviours. The draft comments on decisions that require review, including
+  the `Extra` value, missing `code_change` callbacks, changed behaviour roles,
+  unsupervised processes, child upgrades, module ordering, and modules absent
+  from the application's `.app` resource.
   """
 
   alias Forecastle.Build
@@ -119,17 +39,10 @@ defmodule Forecastle.Appup.Draft do
   @advanced [GenServer, :gen_server, :gen_statem, :gen_event, :gen_fsm]
 
   @doc """
-  The entry for one direction of one transition.
+  Drafts one from-version entry from two application builds.
 
-  `old` and `new` are the two sides in the order the *direction* runs in: for an
-  upgrade the baseline is old and the target is new; for a downgrade they are the
-  other way round. `from_vsn` is the baseline's version either way, because an
-  appup's `dn` list is keyed by the version being downgraded *to*.
-
-  A changed module is classified on the behaviours of the side being moved **to**,
-  which is the code that will be running afterwards and whose `code_change/3`
-  `release_handler` calls. The same side's `.app` inventory is what says whether
-  the instruction can resolve object code at all - see `annotate/4`.
+  The result contains stable instructions and review comments for changed,
+  added and removed modules.
   """
   @spec entry(binary(), Build.side(), Build.side()) :: entry()
   def entry(from_vsn, old, new) do

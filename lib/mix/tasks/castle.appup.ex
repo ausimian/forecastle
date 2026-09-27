@@ -1,220 +1,56 @@
 defmodule Mix.Tasks.Castle.Appup do
   @moduledoc """
-  Report how an application's appup covers the modules that changed.
-
-  This task is provided by `Forecastle`, Castle's build-time half, and named for
-  `Castle` because that is the package a project depends on.
+  Checks appup coverage against the modules that changed between two builds.
 
       mix castle.appup --from <spec> [--to <spec>] [--app <app>]...
 
-  It is read-only: it writes no appup, no relup and nothing into any release. It
-  exits non-zero when a module that moved is covered by no instruction, which is
-  what makes it usable as a release-pipeline gate.
+  The task is read-only and exits non-zero when it finds a coverage error. Use it
+  as a release-pipeline check. `mix castle.appup.gen` accepts the same build and
+  application options and drafts missing entries.
 
-  `mix castle.appup.gen` takes the same arguments and the same diff and drafts
-  the instructions this reports the absence of. This is the gate; that is a draft
-  you review.
+  ## Builds
 
-  ## The failure it exists to catch
-
-  `Mix.Tasks.Compile.Appup` never sees a second version of the application, so
-  it cannot tell whether the instructions it compiles are *right*. Nothing
-  downstream closes that gap either. `:systools.make_relup/4` fails when an
-  appup has no **entry** for the from-version being upgraded from - but it does
-  not, and cannot, notice that an entry is **incomplete**.
-
-  If modules `A` and `B` both changed and the appup mentions only `A`,
-  `make_relup/4` produces a relup, the upgrade succeeds, `release_handler` swaps
-  the code path, and `B` is still the version that was loaded before, serving
-  calls, because nothing named it and nothing purged it. New code sits on disk,
-  reachable, unused. The upgrade reports success, and the code silently changes
-  underneath the system on the next restart, which nobody was upgrading.
-
-  That failure is invisible to the compiler, to `:systools`, to `--hot` and at
-  install time. This is where it becomes visible.
-  `Forecastle.UpgradeTest` pins that it really happens.
-
-  ## What it does not answer
-
-  **It asks whether the appup names everything that moved. It does not ask
-  whether the resulting script is one `systools_rc` will accept.** Those are
-  different questions, and only the first needs help.
-
-  `:systools.make_relup/4` *does* fail on a malformed script - loudly, and at the
-  moment a relup is generated, which `mix castle.relup` does anyway. What it
-  cannot see is an entry that is **incomplete**, which is the failure above. So
-  script validity is deliberately somebody else's job: a project that runs this
-  check and never generates a relup has verified its *coverage*, not its
-  validity.
-
-  Some invalid scripts are reported here anyway, because an instruction
-  `:systools` will not accept covers nothing, and crediting one would overstate
-  coverage. Those are cases this catches on the way to answering its own
-  question, and not a promise that it catches every such script. It is not a
-  substitute for `make_relup/4` and does not try to be one.
-
-  ## Naming the two builds
-
-  `--from` is a *baseline spec*: the same grammar `mix castle.relup` takes on
-  its from-switches, naming an assembled release, a shipped artefact or a git
-  ref. `Forecastle.Baseline` documents what each source costs.
+  `--from` is required. `--to` defaults to the current compiled build. Both
+  switches accept a baseline spec:
 
       mix castle.appup --from rel:_build/prod/rel/my_app/releases/1.0.0/my_app
       mix castle.appup --from tar:artifacts/my_app-1.0.0.tar.gz
       mix castle.appup --from ref:1.0.0
 
-  `--to` defaults to **the current build** rather than to an assembled release,
-  so the everyday question - *what has changed since 1.0.0, and does my appup
-  cover it?* - costs a `mix compile` and nothing more. Give it a spec to compare
-  two things that already exist, and then nothing is compiled at all: a
-  comparison of two artefacts does not need this working tree to be in a state
-  that builds.
+  A path without a prefix means `rel:`. Prefer `tar:` when the shipped artifact
+  is available. A rebuilt baseline may differ from the deployed release.
 
-  Both are resolved at `Forecastle.Baseline`'s `:compile` level, so a `ref:`
-  baseline is compiled rather than assembled. That is the whole reason the level
-  exists.
+  Repeat `--app` to select applications. The default is the current project and
+  its umbrella children. Name a dependency explicitly to check its appup.
 
-  ## What it reports
+  ## Results
 
-  Per application, and per direction, because an appup's `up` and `dn` lists are
-  independent and a from-version present in one need not be present in the
-  other:
+  Upgrade and downgrade directions are checked separately. The task reports:
 
-    * **changed or added, and no instruction *loads* it** - the failure above.
-      `update`, `load_module`, `add_module` and the low-level `load` load;
-      `delete_module` and the low-level `remove` do not, so a changed module
-      left in either of those states is a gap and not a coverage.
-    * **removed, and no instruction *deletes* it** - a missing `delete_module`.
-    * **both loaded and removed by the same edge** - which of the two wins turns
-      on the order `systools_rc` translates them into, and that is not the order
-      they are written in: it hoists dependency-connected instructions past
-      independent ones. Reported rather than resolved, because guessing it has
-      been measured wrong in both directions. `Forecastle.Appup.effects/4` sets
-      out why.
-    * **defined by more than one instruction** - `systools_rc` builds a
-      dependency graph of the instructions carrying `DepMods` and refuses a
-      module with more than one vertex in it as `muldef_module`, so the edge
-      produces no relup at all. An application-level instruction counts, through
-      its expansion, so a `restart_application` beside an explicit `update` of
-      one of that application's own modules is refused.
-    * **deleted while still in the target build** - the mirror of the first, and
-      worse than a stale module: `systools_rc` turns `delete_module` into a
-      `remove` and a `purge` with no load, so the upgrade takes away code the
-      release still has. `Forecastle.Appup` sets out where that split comes from.
-    * **moved but not in the `.app`'s `modules` list** - a beam in `ebin` that
-      the application resource does not name. `systools_rc:get_lib/2` resolves
-      object code through that list and throws when no application in the release
-      has the module, so *no* instruction can carry it and the appup is not where
-      the problem is. Reported instead of a coverage gap, since it is the more
-      fundamental fact.
-    * **an instruction `:systools` will not accept** - reported as a gap, and
-      credited with covering nothing. `systools_rc:check_syntax/1` refuses a
-      shape outside its vocabulary as a `bad_instruction` before it translates
-      anything, so the edge produces no relup at all. Reading such an
-      instruction by its head alone was a false *pass*:
-      `{restart_application, App, Anything}` looked like a whole-application
-      instruction and covered the entire inventory of an appup that cannot be
-      used.
-    * **no entry at all for the from-version** - reported as a gap too, since
-      every module that moved is then covered by nothing. This is the coarse
-      failure rather than the subtle one: `:systools.make_relup/4` refuses such
-      an edge outright, so an appup that deliberately offers no downgrade path
-      is reported here as the same answer arriving earlier.
-    * **mentioned but unchanged** - reported, and *not* a gap. It is usually a
-      leftover naming the wrong module, and where it is, the module that really
-      did change is covered by nothing and fails the check on its own account.
-      An instruction that loads a module whose code is identical is inert, so
-      failing a pipeline for one would be refusing a build for something that
-      cannot go wrong.
-    * **the application's version did not move** - a gap when anything else did.
-      `:systools` compares application versions and consults no appup for one
-      that did not change, so no instruction anywhere could carry that code.
+  - a changed or added module that no instruction loads;
+  - a removed module that no instruction deletes;
+  - a module that an edge both loads and removes;
+  - duplicate instructions for one module;
+  - a module deleted while still present in the target;
+  - a changed module absent from the application's `.app` inventory;
+  - invalid instructions or a missing entry for the from-version;
+  - code changes without an application version change.
 
-  An edge that ends by restarting the emulator needs no module-level coverage at
-  all, and nothing is reported about one: the code is going to be loaded from
-  scratch by a new VM. `Forecastle.Appup` documents which edges those are, which
-  is `systools_rc`'s answer rather than a reading of the appup's own ordering.
+  An instruction for an unchanged module is reported but does not fail the run.
+  An edge that restarts the emulator needs no module-level coverage.
 
-  **That exemption is per application, and it is sound in the direction it
-  fires rather than complete.** `:systools` merges every application's script
-  for one relup edge before `systools_rc:sort_emulator_restart/3` runs, so a
-  restart named in *this* application's own entry really does restart the edge
-  that entry belongs to - the exemption never lets a dangerous appup through.
-  What it cannot see is a restart supplied by an application it was not asked
-  about, or one `:systools` inserts for an ERTS change: there is no release here
-  to read either out of, and at `:compile` level there is no `.rel` at all.
-  Applications named in one invocation need not even be in one release, and each
-  is checked against its own from-version rather than against a release version.
-  Where a restart does come from elsewhere, this reports coverage gaps on an
-  edge that would have restarted - the conservative direction - and
-  `mix castle.relup` is what decides restarts properly, having both `.rel` files
-  to do it with.
+  This task checks coverage. Relup generation determines whether `:systools`
+  accepts the complete script. An invalid instruction is credited with no
+  coverage, but a successful check does not guarantee that a relup will build.
 
-  **The same boundary, in its other form: an instruction is credited only to the
-  application whose appup it is in.** `:systools` merges every application's
-  script before translating it and resolves each module through the whole
-  application list, so an instruction in *A*'s appup that names a module of *B*
-  really does load it. This reports that module as a gap under *B* anyway, and
-  says under *A* only that the module it names is in neither build of *A* and
-  may belong to another application.
+  Module fingerprints combine the BEAM md5 with persisted attributes. This
+  ignores stripping and documentation changes while retaining explicit `@vsn`
+  changes.
 
-  That is the conservative direction of the same limit, and crediting it would
-  need what this task has not got. Whether `:systools` consults *A*'s appup for
-  this edge at all depends on whether *A*'s own version moved, and which
-  applications share an edge is a fact about a release: `--app` may name two
-  applications that are in no release together, each is checked against its own
-  from-version, and at `:compile` level there is no `.rel` to settle it from. So
-  the answer here is per application, and an appup that reaches across
-  applications is reported rather than resolved.
-
-  ## What is refused rather than reported
-
-  An application that is in one build and not the other is a note: `:systools`
-  covers both with `add_application` and `remove_application` and neither needs
-  an appup. That makes *absence* a meaningful answer, which in turn makes
-  anything that produces a spurious absence far more dangerous than an ordinary
-  error - it exits zero. So each of these is refused by name instead of being
-  read as an application this transition adds or removes:
-
-    * a library directory that cannot be read
-    * a library directory that can be read and is not one
-    * an application directory with no `ebin` in it
-    * an entry that is named for the application and is not a directory - a
-      regular file, or a symlink with nothing at the end of it - where nothing
-      else in the library directory is
-
-  `Forecastle.Build` is where each of those lives, and where the failure each of
-  them was reached through is recorded.
-
-  ## Which applications
-
-  `--app` may be given more than once. It defaults to the project's own
-  applications plus any umbrella children - the same set `mix castle.relup`
-  treats as the ones this project owns the appups for. Naming a dependency
-  explicitly is how a dependency's appup gets checked.
-
-  ## Change detection
-
-  A module's fingerprint is `:beam_lib.md5/1` **and** its persisted attributes,
-  and **not** a digest of the file bytes. `Forecastle.Build` is where that is
-  read and why - a byte digest reports every module in a stripped release as
-  changed, and the md5 alone misses an explicit `@vsn`. The same module is what
-  `mix castle.appup.gen` diffs with, so the check and the generator cannot
-  disagree about which modules moved.
-
-  ## Compare like with like
-
-  Nothing here can tell a change in the code from a change in how it was built.
-  Two builds made with different `MIX_ENV`s, different Elixir versions or
-  different dependency resolutions differ in modules that nobody edited, and
-  this will report every one of them. That is the same drift `Forecastle.Baseline`
-  recommends `tar:` to avoid: the artefact that shipped is the honest baseline.
-
-  ## Not part of `mix precommit`
-
-  It needs a baseline, and `precommit` has not got one. This is a
-  release-pipeline gate.
+  The task requires a baseline, so it belongs in the release pipeline rather
+  than `mix precommit`.
   """
+
   @shortdoc "Report how an appup covers the modules that changed"
 
   use Mix.Task

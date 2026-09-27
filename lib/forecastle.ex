@@ -1,6 +1,9 @@
 defmodule Forecastle do
   @moduledoc """
-  Documentation for `Forecastle`.
+  Build-time integration for Castle-managed Elixir releases.
+
+  `steps/1` adds Forecastle's hooks to a Mix release. Most projects call it
+  through `Castle.customize/1`.
   """
 
   alias Forecastle.Appup.Dep
@@ -203,28 +206,13 @@ defmodule Forecastle do
   @doc """
   Refuses a build whose `:upgrade_from` is not the one `pre_assemble/1` resolved.
 
-  `steps/1` places this last, after every step of the project's own, and
-  `generate_relup/1` makes the same check for itself. `pre_assemble/1` settles
-  the option and resolves the baselines, and what a release asks for is not
-  re-read afterwards: a change made later can be too late for a relup to be
-  generated from it, or too late for the one generated to be packaged, and which
-  of those it would have been is not something a refusal here can tell.
+  `steps/1` places this check after all project steps. `generate_relup/1` also
+  checks before using the option. Define or compute baselines in `mix.exs`, or in
+  a step before `:assemble`, so `pre_assemble/1` can resolve them.
 
-  Baselines worked out at build time go in a step placed *before* `:assemble`
-  instead. `steps/1` adds nothing in front of the project's own pre-assembly
-  steps, so what such a step sets is resolved and honoured exactly as a value
-  written in `mix.exs` would be.
-
-  A release that never touches `:upgrade_from` after pre-assembly is unaffected,
-  and so is one that never sets it at all.
-
-  This compares against the record `pre_assemble/1` leaves behind, so a release
-  naming baselines with no record beside them is refused as well — not because
-  they are known to be different, but because nothing here can tell whether they
-  are. A step that rewrites the keyword list it is handed keeps that record,
-  while one that replaces the release options with a fresh list would otherwise
-  make the option it set invisible to the check by the same move that set it. A
-  release naming no baselines is left alone either way.
+  The function also rejects a release that names baselines after losing the
+  record left by `pre_assemble/1`. A custom step should update the option list it
+  receives instead of replacing the list.
   """
   # [#40](https://github.com/ausimian/forecastle/issues/40) is where this was
   # decided.
@@ -489,47 +477,19 @@ defmodule Forecastle do
   @doc """
   Generates this release's relup, from the `:upgrade_from` release option.
 
-  Runs after `post_assemble/1` and immediately before `:tar`, which is the one
-  point in a build where everything `:systools` needs exists: `version_path` is
-  there, `<name>.rel` has been written, and `lib/` is populated. So the relup is
-  generated for the release being assembled and written straight into its version
-  path, and the build-generate-rebuild cycle `mix castle.relup` used to require
-  disappears.
+  `steps/1` places generation after release customisation and immediately before
+  `:tar`. An explicitly placed generator keeps its position. A project with a
+  custom packaging step must place generation after all release changes and
+  immediately before packaging.
 
-  `steps/1` places it *last* of the steps that shape the release - after any
-  function step of the project's own - so that the relup describes the tree that
-  is packaged rather than the tree as it was partway through building it. A
-  project that placed this step itself keeps its own placement instead, and gets
-  no second one: a project packing its own archive has to put generation in
-  front of the step that packs, and that is the arrangement, not a mistake to
-  correct. Placed *after* `:tar`, where the relup could never be packaged, it is
-  refused rather than honoured or doubled - but only where the release asks for a
-  relup at all, which `refuse_unpackaged_relup/1` is what decides.
+  `:upgrade_from` is a list of `rel:`, `tar:` or `ref:` baseline specs. The
+  function generates both upgrade and downgrade directions for each baseline
+  with the `auto` strategy. See `Forecastle.Baseline` for the grammar.
 
-  `:upgrade_from` is a list of baseline specs - `rel:`, `tar:` or `ref:`, the
-  grammar `Forecastle.Baseline` documents - naming the releases this one can be
-  upgraded from. Every one of them gets both directions, which is what
-  `mix castle.relup --fromto` does: a relup that cannot be rolled back is not
-  much of an upgrade plan. The strategy is `auto`, which is the task's default
-  too; `mix castle.relup` is still where a build that has to insist on `--hot`
-  or `--restart` goes.
-
-  **Without the option this step does nothing at all**, deliberately and
-  documentedly: a release that says nothing about upgrading is assembled exactly
-  as it was before this existed. An `upgrade_from: []` is not that case - it is a
-  build asking for an upgrade plan and naming nothing to generate one against -
-  and it is refused rather than folded into the same silence.
-
-  A hand-written `relup` in the project root and `:upgrade_from` together are
-  refused rather than ordered by precedence, in `pre_assemble/1` where the
-  refusal costs no build, and here as well so that this step is right on its own.
-
-  **`:upgrade_from` is settled by `pre_assemble/1`**, and a step that changes it
-  after that is refused rather than honoured, wherever in the pipeline it sits.
-  A change made after this step is too late for a relup to be generated from it;
-  one made before it was re-resolved here, and is refused for one rule rather
-  than two. Compute the baselines in a step placed before `:assemble` instead,
-  which runs before the option is settled.
+  Omitting `:upgrade_from` skips generation. An empty value, a project-root
+  `relup` supplied with the option, or a change after `pre_assemble/1` is an
+  error. Use `mix castle.relup` for separate directions or the `--hot` and
+  `--restart` strategies.
   """
   @spec generate_relup(Mix.Release.t()) :: Mix.Release.t()
   def generate_relup(%Mix.Release{} = release) do
