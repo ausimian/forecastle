@@ -314,6 +314,19 @@ defmodule Forecastle.RestartUpgradeTest do
       assert booted.start_output =~ "overriding HEART_BEAT_TIMEOUT=[11] with 65535"
     end
 
+    test "keeps the helper quiet when the system heart comes from vm.args",
+         %{booted: booted} do
+      # The first start has no releases/RELEASES, so env.sh boots a short-lived
+      # VM to create it before the daemon starts. This deployment's -heart comes
+      # from vm.args, which the helper is not passed, so its orderly exit must not
+      # look like the daemon stopped. Forecastle's own delayed flag is covered by
+      # HeartBootstrapTest; this is the other supported quiet source.
+      refute booted.start_output =~ "heart_beat_kill_pid"
+      refute booted.start_output =~ "heart_beat_timeout"
+      refute booted.start_output =~ "Erlang has closed"
+      refute booted.start_output =~ "Would reboot"
+    end
+
     test "says nothing on a start that inherited none of them", %{restarted: restarted} do
       # The ordinary deployment, which is every one that does not set these. A
       # warning on every start is a warning nobody reads, and the heart

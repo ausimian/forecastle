@@ -177,6 +177,24 @@ defmodule Forecastle.AssemblyTest do
       assert env_sh =~ ~s([ ! -f "$RELEASE_ROOT/releases/RELEASES" ])
     end
 
+    test "creates RELEASES before adding Forecastle's heart flag", %{env_sh: env_sh} do
+      # The short-lived VM that creates RELEASES is part of the first start, but
+      # it is not the system being started and has no release_handler to satisfy.
+      # Giving it Forecastle's -heart makes an orderly helper exit print
+      # "Erlang has closed" and "Would reboot" from the daemon command while the
+      # real daemon goes on running. The inherited heart settings are defanged
+      # first, so a deployment that supplied its own flag is still safe; only
+      # Forecastle's flag waits until the helper has returned.
+      {safe_heart, _} = :binary.match(env_sh, "unset HEART_COMMAND")
+      {bootstrap, _} = :binary.match(env_sh, ~s|--eval "Castle.make_releases()"|)
+
+      {added_heart, _} =
+        :binary.match(env_sh, ~s(ELIXIR_ERL_OPTIONS:+$ELIXIR_ERL_OPTIONS }-heart))
+
+      assert safe_heart < bootstrap
+      assert bootstrap < added_heart
+    end
+
     test "does not change directory to do it", %{env_sh: env_sh} do
       # Castle derives the releases directory from code:root_dir(), the root
       # release_handler resolves its own paths against, so the call needs no

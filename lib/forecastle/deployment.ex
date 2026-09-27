@@ -509,14 +509,14 @@ defmodule Forecastle.Deployment do
   start itself failed, so a caller that ignores the return value still gets that.
 
   **The launcher is given a deadline, and that is not belt-and-braces.** A boot
-  that hangs is a real failure mode here - two `-heart` flags leave
-  `heart:check_start_heart/0` with no clause for `{ok, [[], []]}` and the node
-  never finishes starting, having printed nothing - and it hangs *inside*
-  `daemon` rather than after it, because `env.sh` runs a preboot VM synchronously
-  on a first start and that VM inherits the same options. `System.cmd/3` has no
-  deadline of its own and `setup_all` has no ExUnit timeout, so without this a
-  regression in the `-heart` guard stops the suite for as long as whatever is
-  running it will wait. Measured, by putting the guard back the way it was.
+  that hangs is a real failure mode here. If the `-heart` guard misses a flag in
+  `vm.args`, the first-start helper returns, Forecastle adds another flag, and
+  the system VM hangs inside `daemon`: `heart:check_start_heart/0` has no clause
+  for `{ok, [[], []]}`. The helper does not receive `vm.args`. Environment-wide
+  flags such as `ELIXIR_ERL_OPTIONS` are different; they reach both VMs.
+  `System.cmd/3` has no deadline of its own and `setup_all` has no ExUnit timeout,
+  so without this a regression in the guard stops the suite for as long as
+  whatever is running it will wait. Measured by putting the old guard back.
 
   **What the deadline does is fail the test, and that is all it does.** Nothing
   here can reach the operating system process behind `System.cmd/3` - closing
