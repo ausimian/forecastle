@@ -1,0 +1,22 @@
+#!/bin/sh
+# Castle releases are externally supervised: the supervisor owns restarting, and
+# it is the only thing that starts this release. This script exists so that
+# nothing else does.
+#
+# release_handler composes "$ROOT/bin/start <data file>" and installs it as
+# heart's temporary reboot command while preparing any transition that restarts
+# the emulator (prepare_restart_new_emulator/7, which both restart instructions
+# go through). $ROOT is code:root_dir(), which on a Mix release that brought its
+# own ERTS is the release root, and the path is the unchecked default -
+# {no_check, filename:join([Root, "bin", "start"])} - so nothing configures it
+# and nothing verifies it either.
+#
+# heart really does run it. Measured on OTP 28.3: on init:reboot() with
+# HEART_COMMAND unset, and again on a heart-beat time-out, where HEART_NO_KILL
+# means the old VM is still alive. Starting the release here would therefore risk
+# two live nodes, which is exactly what setting HEART_NO_KILL asks for. Doing
+# nothing is the whole point.
+#
+# The version to boot is selected by the env.sh fragment on the next start, from
+# the pair of markers release_handler and Castle leave behind.
+exit 0

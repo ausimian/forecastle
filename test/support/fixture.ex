@@ -18,12 +18,7 @@ defmodule Forecastle.Fixture do
   @source Path.join(@root, "test/fixtures/sample")
   @workspace Path.join(@root, "_build/fixtures/sample")
 
-  # Mix variables that would otherwise leak from the parent test run into the
-  # fixture build and silently redirect its output, and release variables that
-  # would leak into a launcher the tests invoke.
-  @scrubbed ~w(MIX_BUILD_PATH MIX_BUILD_ROOT MIX_DEPS_PATH MIX_TARGET MIX_QUIET
-               MIX_DEBUG ERL_LIBS ELIXIR_ERL_OPTIONS RELEASE_ROOT RELEASE_NAME
-               RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP)
+  alias Forecastle.Deployment
 
   def start_link(_opts \\ []) do
     Agent.start_link(fn -> nil end, name: __MODULE__)
@@ -39,7 +34,16 @@ defmodule Forecastle.Fixture do
 
   @doc "Runs `mix` in the workspace, raising on failure."
   def mix!(args, env \\ []) do
-    cmd!(System.find_executable("mix") || "mix", args, env)
+    cmd!(mix_executable(), args, env)
+  end
+
+  @doc """
+  Runs `mix` in the workspace, returning `{output, status}`.
+
+  For the cases where a non-zero exit is the thing under test.
+  """
+  def mix(args, env \\ []) do
+    cmd(mix_executable(), args, env)
   end
 
   @doc "Runs a command in the workspace, raising on a non-zero exit."
@@ -63,6 +67,8 @@ defmodule Forecastle.Fixture do
     System.cmd(exe, args, opts)
   end
 
+  defp mix_executable, do: System.find_executable("mix") || "mix"
+
   defp ensure_prepared(nil) do
     File.mkdir_p!(@workspace)
     File.cp_r!(@source, @workspace)
@@ -84,7 +90,18 @@ defmodule Forecastle.Fixture do
 
   defp ensure_prepared(workspace), do: {workspace, workspace}
 
+  # The variables that leak from the test run into a fixture build, and from
+  # there into every release these suites start, are the shipped harness's list:
+  # a project running an upgrade test has exactly the same problem with them, and
+  # keeping a second copy here is how the two drift. See
+  # `Forecastle.Deployment.scrubbed_env/1` for what is in it and why.
+  #
+  # The two set afterwards are this fixture's own: `MIX_ENV` because the fixture
+  # is assembled in `prod`, and `FORECASTLE_PATH` because its `mix.exs` takes the
+  # Forecastle under test from there. `extra` comes last, so a suite that wants a
+  # scrubbed variable set - which is how `Forecastle.RestartUpgradeTest` gives a
+  # release a hostile environment to boot in - simply names it.
   defp env(extra) do
-    Enum.map(@scrubbed, &{&1, nil}) ++ [{"MIX_ENV", "prod"}, {"FORECASTLE_PATH", @root}] ++ extra
+    Deployment.scrubbed_env([{"MIX_ENV", "prod"}, {"FORECASTLE_PATH", @root}] ++ extra)
   end
 end
