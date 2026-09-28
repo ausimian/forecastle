@@ -25,12 +25,20 @@ jobs:
     - name: Restore dependencies cache
       uses: actions/cache@v5
       with:
+        # The fixture workspaces and the baseline and deployment scratch under
+        # _build/castle are left out. The suite deletes and rebuilds every
+        # release it assembles, so all a cached workspace saves is a git clone
+        # and a small compile, and with one workspace per test worker (see
+        # `mix test.parallel`) they add up to gigabytes of release trees.
+        # `v2` retires the entries that still hold them.
         path: |
           deps
           _build
-        key: ${{ runner.os }}-${{ runner.arch }}-mix-precommit-${{ hashFiles('**/mix.lock') }}
+          !_build/fixtures
+          !_build/castle
+        key: ${{ runner.os }}-${{ runner.arch }}-mix-v2-precommit-${{ hashFiles('**/mix.lock') }}
         restore-keys: |
-          ${{ runner.os }}-${{ runner.arch }}-mix-precommit-
+          ${{ runner.os }}-${{ runner.arch }}-mix-v2-precommit-
 
     - name: Install dependencies
       run: mix deps.get
@@ -71,12 +79,15 @@ jobs:
     - name: Restore dependencies cache
       uses: actions/cache@v5
       with:
+        # See the precommit job for what is left out, and why.
         path: |
           deps
           _build
-        key: ${{ runner.os }}-${{ runner.arch }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
+          !_build/fixtures
+          !_build/castle
+        key: ${{ runner.os }}-${{ runner.arch }}-mix-v2-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
         restore-keys: |
-          ${{ runner.os }}-${{ runner.arch }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-
+          ${{ runner.os }}-${{ runner.arch }}-mix-v2-${{ matrix.elixir }}-${{ matrix.otp }}-
 
     - name: Install dependencies
       run: mix deps.get
@@ -88,4 +99,9 @@ jobs:
       # Includes the end-to-end suite, which boots a release and hot-upgrades
       # it. That is the path most sensitive to Elixir and OTP release tooling,
       # so it is worth running on every cell of the matrix.
-      run: mix test --include e2e
+      #
+      # `test.parallel` rather than `test`: nearly every suite is synchronous,
+      # so a plain `mix test` uses one core of the runner. This runs the files
+      # across one `mix test` per core, each with its own fixture workspace.
+      # See test/support/mix/tasks/test.parallel.ex.
+      run: mix test.parallel --include e2e

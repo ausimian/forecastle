@@ -3142,14 +3142,14 @@ them `deploy` becoming `deploy.root`.
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it, and which ships no appup of its own when `SAMPLE_DEP_APPUP=none` |
-| `test/support` | The workspace the fixture is built in, the case template for tests that assemble it, and `mix castle.relup` between two of them. Everything here knows the sample by name, which is why none of it is in `lib` |
+| `test/support` | The workspace the fixture is built in, the case template for tests that assemble it, `mix castle.relup` between two of them, and `mix test.parallel`. Everything here knows the sample by name, which is why none of it is in `lib` |
 
 ## Working on this project
 
 - Run `mix precommit` before committing. It is the single validation gate —
   `compile --warnings-as-errors`, `deps.unlock --unused`, `format`,
-  `credo --strict`, `test --include e2e`. Do not run the individual checks
-  piecemeal.
+  `credo --strict`, `test.parallel --include e2e`. Do not run the individual
+  checks piecemeal.
 - **`mix precommit` green does not mean CI green, and the gap is structural
   rather than bad luck.** `mix.exs` allows `~> 1.18` and the CI matrix runs
   1.18, 1.19 and 1.20, while `mix precommit` runs whatever Elixir is on the
@@ -3164,8 +3164,8 @@ them `deploy` becoming `deploy.root`.
 
   This note used to say that the matrix cells run a plain `mix test` and so
   catch no warning at all. They do not: every cell of the `test` job runs
-  `mix compile --warnings-as-errors` before its `mix test --include e2e`, and
-  has since the workflow was added. The remedy above is unchanged — what a
+  `mix compile --warnings-as-errors` before its tests, and has since the
+  workflow was added. The remedy above is unchanged — what a
   1.20 cell catches, it catches after a push rather than before one.
 - **CI failing on one OS and not the other is a signal, not flakiness.** Two
   instances now: bsdtar and GNU tar disagree about hard links, and `/lib` is a
@@ -3213,6 +3213,50 @@ directory to start from a clean slate.
 The `:e2e` suite is excluded by default and included by `mix precommit`. Run it
 on its own with `mix test --include e2e`. It needs no epmd daemon: the fixture
 configures distribution without one.
+
+### Running the suite in parallel
+
+**CI and `mix precommit` run `mix test.parallel --include e2e`, not `mix test`**
+([#54](https://github.com/ausimian/forecastle/issues/54)). Nearly all of the
+suite is synchronous. The assembling suites share one fixture workspace and the
+`:e2e` suites boot what it produces, so a plain `mix test` ran them one module
+at a time on one core, and 98–99% of every CI cell's time was sync. Measured
+before changing anything, sequentially on a 4-core machine: 11m21s, of which
+about 300s was 74 `mix release` runs at about 5s each. About 3.5s of each is
+`:tar` gzipping the release with its ERTS. About 165s more was roughly 180
+single `mix castle.*` invocations at about a second each. `mix test.parallel`
+over the same 748 tests took 4m20s.
+
+It runs one `mix test <file>` at a time per worker, a worker per core, taking
+files from one queue largest first. **What makes that sound is that workers
+share nothing**: each carries its own `MIX_TEST_PARTITION`, and
+`Forecastle.Fixture` turns that into a workspace of its own
+(`_build/fixtures/sample-<n>`) and a distribution port of its own
+(`SAMPLE_EPMD_PORT`, which the fixture's `vm.args` reads at assembly time). The
+fixture runs without epmd, so every node listens on the one port, and two
+workers booting on it at once would collide or answer each other's probes.
+Within a worker the files run one after another in one workspace, which is the
+same as a plain `mix test` except for the order the files come in.
+
+**So anything a suite shares across modules has to be keyed by partition.**
+Today that is the fixture workspace and the port. Everything else is already
+per module or per OS process: `Forecastle.UpgradeCase`'s scratch directory and
+ExUnit's `@tag :tmp_dir` are named for the module, `bin/castle`'s test trees
+carry the OS pid, and `_build/fixtures/baselines` and
+`_build/fixtures/deployments` each belong to one file, which only one worker
+runs. The baseline cache under `_build/castle/baselines` is shared, and that is
+safe because its entries are published by rename. A new suite that writes a
+stable path outside those has to key it too, or it will fail only when two
+workers happen to reach it at once.
+
+Mix's own `--partitions` was tried first and dropped. It assigns files
+round-robin up front, which here left one partition running for twice as long
+as another (176s to 348s). The queue finished at 259s, against 247s for 988
+worker-seconds split evenly four ways. File size is only a rough proxy for
+duration (`assembly_relup_test.exs` is mid-sized and one of the slowest), but a
+queue absorbs most of that, because a worker that drew fast files goes back for
+more. If the tail grows, order by recorded durations before reaching for
+anything cleverer.
 
 `restart_upgrade_test.exs` is the hot suite's opposite where it counts —
 `refute provisional.os_pid == booted.os_pid` against the hot suite's
