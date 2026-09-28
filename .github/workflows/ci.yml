@@ -65,6 +65,16 @@ jobs:
           # Elixir 1.19 supports Erlang/OTP 26-28
           - elixir: '1.19'
             otp: '29'
+          # macOS runs only the newest Elixir, against every OTP it supports.
+          # GitHub runs at most five macOS jobs at once, so a sixth queued
+          # until one finished and added a whole job to every run. What
+          # macOS catches is the platform (bsdtar, /tmp behind a symlink, no
+          # /lib), which the Elixir version does not change; the older Elixirs
+          # are still covered on ubuntu.
+          - os: macos-15
+            elixir: '1.18'
+          - os: macos-15
+            elixir: '1.19'
 
     steps:
     - name: Checkout code

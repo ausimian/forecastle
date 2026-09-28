@@ -3425,5 +3425,14 @@ Nothing here is the place for either.
 
 Forecastle manipulates `Mix.Release` internals and the layout Mix generates, so
 it is sensitive to changes in Elixir's release tooling. The CI matrix runs the
-whole suite, `:e2e` included, across Elixir 1.18–1.20 and OTP 27–29 to catch
-that early.
+whole suite, `:e2e` included, across Elixir 1.18–1.20 and OTP 27–29 on ubuntu
+to catch that early.
+
+macOS runs Elixir 1.20 only, against OTP 27, 28 and 29. GitHub runs at most
+five macOS jobs at once, and the full matrix had six, so one always queued
+until another finished and a run took about 22 minutes where its slowest job
+took 13. What the macOS cells are for is the platform (bsdtar against GNU tar,
+`/tmp` behind a symlink, no `/lib`; see *Working on this project*), and that
+does not vary with the Elixir version. The older Elixirs are exercised on
+ubuntu. Adding a macOS cell back means dropping another, or accepting the
+queue.
