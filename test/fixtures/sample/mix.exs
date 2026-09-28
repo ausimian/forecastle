@@ -33,11 +33,11 @@ defmodule Sample.MixProject do
       # have merged, so it is back on the integration branch - and it had to move
       # before that issue branch was deleted, which nothing enforces.
       #
-      # It is on `feature/upgrade-tooling` for the duration of castle#32, for the
-      # same reason: the tooling changes both halves at once, and this suite is
-      # what exercises them together. Back to `release/1.0.0` when that tree
-      # merges - the same unenforced step as last time.
-      {:castle, github: "ausimian/castle", branch: "feature/upgrade-tooling"},
+      # It was on `feature/upgrade-tooling` for the duration of castle#32, for
+      # the same reason: the tooling changed both halves at once, and this suite
+      # is what exercises them together. That tree has merged, so it is back on
+      # the integration branch, moved before `feature/upgrade-tooling` is deleted.
+      {:castle, github: "ausimian/castle", branch: "release/1.0.0"},
       # `runtime: false`, which is how Castle declares it and therefore how a
       # consumer gets it: Forecastle is build-time support, so it is compiled and
       # on the code path for `mix release` and for the project's own tests, and it
