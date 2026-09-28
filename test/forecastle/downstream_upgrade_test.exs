@@ -66,8 +66,13 @@ defmodule Forecastle.DownstreamUpgradeTest do
       )
 
     # The upgrade test itself starts here, and everything from this line down is
-    # shipped API.
-    deployment = Deployment.deploy!("tar:#{shipped}", Path.join(scratch, "deploy"))
+    # shipped API. `:boot_timeout` is a documented option; only the value is the
+    # fixture's (see `Forecastle.ReleaseCase.boot_timeout/0`).
+    deployment =
+      Deployment.deploy!("tar:#{shipped}", Path.join(scratch, "deploy"),
+        boot_timeout: boot_timeout()
+      )
+
     on_exit(fn -> Deployment.stop(deployment) end)
 
     Deployment.start!(deployment)

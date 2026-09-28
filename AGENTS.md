@@ -3258,6 +3258,27 @@ queue absorbs most of that, because a worker that drew fast files goes back for
 more. If the tail grows, order by recorded durations before reaching for
 anything cleverer.
 
+**Contention is what the first CI run on this found, twice, and neither was a
+flake.** Four workers on four cores, or three on macOS, make everything slower
+and every race wider:
+
+- **Every `printf` that writes into a pipe in `bin/castle` and the `env.sh`
+  fragment discards its own standard error.** The suites that stub `od` or
+  `awk` with a program that exits at once assert standard error exactly, and
+  the BEAM ignores SIGPIPE, which its children inherit. So whenever the stub
+  exited before `printf` wrote, dash added `printf: printf: I/O error` to the
+  stream. That had always been possible, and under load it happened in about
+  one run in three. The pipe's status is its reader's either way, which is what
+  the scripts check. Measured by running those two files under CPU load before
+  and after.
+- **The fixture's deployments get a 60s boot deadline**,
+  `Forecastle.ReleaseCase.boot_timeout/0`, where the harness default is 20s.
+  A first boot on a loaded macOS runner missed 20s, and a missed deadline
+  stops nothing: the late node held that worker's port and failed the other
+  two `:e2e` suites queued behind it. Do not "fix" that cascade by clearing
+  ports or killing nodes from the harness; see *The upgrade harness* for why
+  the deadlines stop nothing.
+
 `restart_upgrade_test.exs` is the hot suite's opposite where it counts —
 `refute provisional.os_pid == booted.os_pid` against the hot suite's
 `assert installed.os_pid == booted.os_pid` — and it has one thing no other suite

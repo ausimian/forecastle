@@ -103,10 +103,27 @@ defmodule Forecastle.ReleaseCase do
   asserts `releases/RELEASES` landed in the release anyway, and it passes a
   *relative* `RELEASE_VM_ARGS` that only resolves if nothing changed directory on
   the way to starting the VM.
+
+  `boot_timeout:` is `boot_timeout/0` rather than the harness's 20s default;
+  see there.
   """
   def deployment(root) do
-    Deployment.new(root, "sample", cd: Fixture.workspace())
+    Deployment.new(root, "sample", cd: Fixture.workspace(), boot_timeout: boot_timeout())
   end
+
+  @doc """
+  How long a fixture release is given to answer an rpc after it is started.
+
+  `mix test.parallel` runs the `:e2e` suites beside suites that are busy
+  assembling, and on a loaded 3-core macOS runner a first boot - the RELEASES
+  helper VM, the heart probe and then the node itself - took longer than the
+  harness's 20s default. A boot that misses the deadline fails its suite without
+  stopping the node, which then holds the worker's distribution port and fails
+  every later `:e2e` suite in that worker too. So the budget is set here, which
+  is where `Forecastle.Deployment` says a slow release's deadline belongs. It
+  bounds a boot that is slow; one that is stuck still fails, a minute later.
+  """
+  def boot_timeout, do: 60_000
 
   @doc """
   Generates a relup between two assembled releases, into the workspace.

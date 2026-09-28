@@ -57,10 +57,18 @@ castle_controls=$(printf '\001\002\003\004\005\006\007\010\011\012\013\014\015\0
 # bytes can never become active output. POSIX od and awk work bytewise whatever
 # locale the release inherited. Failure is reported to the caller, which must
 # substitute the fixed `<unprintable>` label rather than losing its diagnostic.
+#
+# Every `printf` in this script that writes into a pipe discards its own
+# standard error. The pipe's status is its reader's, which is what is checked;
+# but a reader that exits before reading everything - an `od` or `awk` that is
+# broken, or a `grep -q` that has its answer - leaves `printf` writing to a
+# closed pipe. Where SIGPIPE is ignored, as it is under anything the BEAM
+# starts, that is an `I/O error` line on the caller's stream, saying nothing the
+# reader's status does not and appearing or not by timing alone.
 castle_safe_display () {
-  castle_bytes=$(printf '%s' "$1" | od -An -tx1 -v) || return 1
+  castle_bytes=$(printf '%s' "$1" 2>/dev/null | od -An -tx1 -v) || return 1
 
-  printf '%s\n' "$castle_bytes" |
+  printf '%s\n' "$castle_bytes" 2>/dev/null |
     awk '
       function nibble(c) {
         return index("0123456789abcdef", tolower(c)) - 1
@@ -96,9 +104,9 @@ castle_terminal_safe () {
     *["$castle_controls"]*) return 1 ;;
   esac
 
-  castle_bytes=$(printf '%s' "$1" | od -An -tx1 -v) || return 2
+  castle_bytes=$(printf '%s' "$1" 2>/dev/null | od -An -tx1 -v) || return 2
 
-  castle_safety=$(printf '%s\n' "$castle_bytes" |
+  castle_safety=$(printf '%s\n' "$castle_bytes" 2>/dev/null |
     awk '
       function nibble(c) {
         return index("0123456789abcdef", tolower(c)) - 1
@@ -174,11 +182,11 @@ CASTLE_TMP="${RELEASE_TMP:-$RELEASE_ROOT/tmp}"
 lost_connection_line='--rpc-eval : RPC failed with reason :noconnection'
 
 launcher_lost_connection () {
-  printf '%s\n' "$1" | grep -Fqx -e "$lost_connection_line"
+  printf '%s\n' "$1" 2>/dev/null | grep -Fqx -e "$lost_connection_line"
 }
 
 without_lost_connection_lines () {
-  printf '%s\n' "$1" | grep -Fvx -e "$lost_connection_line" || true
+  printf '%s\n' "$1" 2>/dev/null | grep -Fvx -e "$lost_connection_line" || true
 }
 
 # Versions reach the running node as Elixir source, inside a ~s() sigil, so a
@@ -674,7 +682,7 @@ case $1 in
       # the expression appends its record after Castle has returned. Parse even
       # when the launcher exits non-zero: the record proves the remote outcome.
       commit_parse_status=0
-      commit_match=$(printf '%s\n' "$commit_output" |
+      commit_match=$(printf '%s\n' "$commit_output" 2>/dev/null |
         awk -v done="$commit_done_record" -v nothing="$nothing_to_commit_record" '
           $0 == done { line = NR; result = "done" }
           $0 == nothing { line = NR; result = "nothing" }
@@ -725,16 +733,16 @@ case $1 in
           commit_launcher_output=""
 
           if [ "$commit_status" -eq 0 ]; then
-            commit_human=$(printf '%s\n' "$commit_output" |
+            commit_human=$(printf '%s\n' "$commit_output" 2>/dev/null |
               awk -v skip="$commit_record_line" 'NR != skip { print }') ||
               commit_output_unavailable="yes"
           else
-            commit_human=$(printf '%s\n' "$commit_output" |
+            commit_human=$(printf '%s\n' "$commit_output" 2>/dev/null |
               awk -v skip="$commit_record_line" 'NR < skip { print }') ||
               commit_output_unavailable="yes"
 
             if [ -z "$commit_output_unavailable" ]; then
-              commit_launcher_output=$(printf '%s\n' "$commit_output" |
+              commit_launcher_output=$(printf '%s\n' "$commit_output" 2>/dev/null |
                 awk -v skip="$commit_record_line" 'NR > skip { print }') ||
                 commit_output_unavailable="yes"
             fi
