@@ -18,9 +18,9 @@ defmodule Forecastle.Relup do
   @restart_instructions [:restart_emulator, :restart_new_emulator]
 
   @typedoc """
-  Which upgrade strategy every transition in the relup is generated under.
+  The upgrade strategy for every transition in the relup.
 
-  See `Mix.Tasks.Castle.Relup` for what each of them means.
+  See `Mix.Tasks.Castle.Relup`.
   """
   @type strategy :: :auto | :hot | :restart
 

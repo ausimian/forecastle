@@ -24,8 +24,7 @@ defmodule Forecastle.Appup.Dep do
   alias Forecastle.Appup
 
   @typedoc """
-  One application's appup, read and encoded, ready to be written into the
-  assembled release.
+  An application's merged appup, encoded and ready to write into the release.
   """
   @type placement :: %{
           app: atom(),

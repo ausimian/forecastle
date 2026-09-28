@@ -405,7 +405,7 @@ defmodule Forecastle.AppupSourceTest do
       assert text =~ "# Sample.Counter: behaviour GenServer."
       assert text =~ "# Ordering is stable, not correct."
       assert text =~ "# No module moved."
-      assert text =~ "Nothing can derive it."
+      assert text =~ "passes [] as Extra"
     end
 
     test "says what places a dependency's file, which nothing about the term does" do
@@ -415,10 +415,10 @@ defmodule Forecastle.AppupSourceTest do
       # dependency has moved on.
       {:ok, text} = Source.render("1.4.2", @up, @down, {:dependency, :jason, "1.4.2"})
 
-      assert text =~ "an application this project does not own"
-      assert text =~ "nothing writes it into deps/"
+      assert text =~ "a dependency this project does"
+      assert text =~ "Forecastle never writes to deps/"
       assert text =~ "lib/jason-1.4.2/ebin/jason.appup"
-      refute text =~ "The version tag below is a literal"
+      refute text =~ "The version tag is fixed"
     end
   end
 

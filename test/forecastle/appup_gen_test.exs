@@ -108,10 +108,10 @@ defmodule Forecastle.AppupGenTest do
       # The four things §3.4 says the generator must say rather than decide. A
       # draft that hides its uncertainty is worse than no draft, so these are
       # asserted on the file rather than left to the moduledoc.
-      assert source =~ "Nothing can derive it."
+      assert source =~ "passes [] as Extra"
       assert source =~ "Extra = []"
       assert source =~ "supervision tree"
-      assert source =~ "Ordering is stable, not correct"
+      assert source =~ "ordered by dependency"
     end
   end
 
@@ -325,10 +325,10 @@ defmodule Forecastle.AppupGenTest do
       assert output =~ "lib/sample_dep-#{@to}/ebin/sample_dep.appup"
       assert output =~ "refuses it once sample_dep is no longer #{@to} there"
 
-      assert source =~ "an application this project does not own"
-      assert source =~ "nothing writes it into deps/"
+      assert source =~ "a dependency this project does"
+      assert source =~ "Forecastle never writes to deps/"
       assert source =~ "lib/sample_dep-#{@to}/ebin/sample_dep.appup"
-      assert source =~ "refuses it once"
+      assert source =~ "The build fails once the release no longer"
 
       # And nothing was written into the dependency's own checkout or its build,
       # which is the failure the location exists to avoid rather than a detail of
@@ -580,8 +580,8 @@ defmodule Forecastle.AppupGenTest do
       source = File.read!(generated())
 
       assert output =~ "1 appup written"
-      assert source =~ "No module moved between these two builds"
-      assert source =~ "make_relup/4 refuses an edge that has none"
+      assert source =~ "No modules changed between these builds"
+      assert source =~ "relup generation fails for a from-version with no entry"
 
       assert Code.eval_file(generated()) ==
                {{~c"0.1.2", [{to_charlist(@to), []}], [{to_charlist(@to), []}]}, []}

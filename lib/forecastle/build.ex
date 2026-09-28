@@ -18,11 +18,9 @@ defmodule Forecastle.Build do
   alias Forecastle.Baseline
 
   @typedoc """
-  One side of a comparison, before an application has been picked out of it.
+  A build's library directory, read once.
 
-  `describe` is how the build is named in a refusal, `lib_dir` the library
-  directory, and `entries` its listing - taken once, because every discovery
-  below is a question about that list rather than a glob over the path. See
+  `describe` names the build in diagnostics and `entries` lists `lib_dir`. See
   `build/2`.
   """
   @type t :: %{describe: binary(), lib_dir: binary(), entries: [binary()]}
@@ -30,9 +28,9 @@ defmodule Forecastle.Build do
   @typedoc """
   One application in one build.
 
-  `vsn` and `inventory` come from the `.app` resource, `modules` from the beams
-  in `ebin`. The last two are different things and both are needed: the beams are
-  what *moved*, and the inventory is what `:systools` can *resolve*.
+  `vsn` and `inventory` come from the `.app` resource; `modules` comes from the
+  BEAM files in `ebin`. The BEAM files show what changed, and the inventory is
+  what `:systools` can resolve.
   """
   @type side :: %{
           vsn: binary(),
@@ -44,7 +42,7 @@ defmodule Forecastle.Build do
           resource: binary()
         }
 
-  @typedoc "What a module is compared on: its code, and the attributes the md5 does not cover."
+  @typedoc "A module's BEAM md5 and persisted attributes, which the md5 does not cover."
   @type fingerprint :: {binary(), keyword()}
 
   @doc """

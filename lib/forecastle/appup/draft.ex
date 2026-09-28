@@ -21,14 +21,13 @@ defmodule Forecastle.Appup.Draft do
 
   alias Forecastle.Build
 
-  @typedoc "An instruction, and the comment lines that belong above it in the source."
+  @typedoc "An instruction and the comment lines rendered above it."
   @type annotated :: {tuple(), [binary()]}
 
   @typedoc """
-  One from-version entry, ready to be rendered.
+  One from-version entry, ready to render.
 
-  `preamble` is what has to be said about the entry as a whole rather than about
-  any one instruction in it.
+  `preamble` holds comments about the entry as a whole.
   """
   @type entry :: %{from_vsn: binary(), preamble: [binary()], instructions: [annotated()]}
 
@@ -41,8 +40,8 @@ defmodule Forecastle.Appup.Draft do
   @doc """
   Drafts one from-version entry from two application builds.
 
-  The result contains stable instructions and review comments for changed,
-  added and removed modules.
+  The result has instructions in a stable order, with review comments, for
+  changed, added and removed modules.
   """
   @spec entry(binary(), Build.side(), Build.side()) :: entry()
   def entry(from_vsn, old, new) do
@@ -63,7 +62,7 @@ defmodule Forecastle.Appup.Draft do
   defp added(module, new) do
     annotate(
       {:add_module, module},
-      ["#{inspect(module)} is in the new build and not in the old one."],
+      para("#{inspect(module)}: added by this transition."),
       module,
       new
     )
@@ -71,11 +70,10 @@ defmodule Forecastle.Appup.Draft do
 
   defp removed(module) do
     {{:delete_module, module},
-     [
-       "#{inspect(module)} is in the old build and not in the new one. systools_rc turns this",
-       "into a remove and a purge and loads nothing, so it must not name a module the new",
-       "build still has."
-     ]}
+     para(
+       "#{inspect(module)}: removed by this transition. delete_module purges the module " <>
+         "and loads nothing, so never use it for a module the target build still has."
+     )}
   end
 
   defp changed(module, old, new) do
@@ -200,13 +198,13 @@ defmodule Forecastle.Appup.Draft do
 
   defp missing_callback(module, behaviours, missing) do
     [
-      "",
-      "#{inspect(module)} exports NO #{callbacks(missing)}, which the OLD build's",
-      "#{list(behaviours)} calls and makes optional. sys:change_code is handled by the",
-      "behaviour the running process was started under - the old code's - and invoked on",
-      "the module just loaded, so this is asked of the new build's exports. Without it the",
-      "install fails with undef. Elixir's `use GenServer` injects one; @behaviour alone and",
-      "Erlang callback modules do not."
+      ""
+      | para(
+          "WARNING: #{inspect(module)} does not export #{callbacks(missing)}, so the " <>
+            "install will fail with undef. The running process was started under " <>
+            "#{list(behaviours)}, which calls it on the target code. `use GenServer` " <>
+            "defines a default; `@behaviour` alone and Erlang modules do not."
+        )
     ]
   end
 
@@ -246,13 +244,14 @@ defmodule Forecastle.Appup.Draft do
     else
       [
         "",
-        "#{inspect(module)} changed behaviour role between the two builds:",
+        "WARNING: #{inspect(module)} changed behaviour role in this transition:",
         "  was: #{phrase(was)}",
-        "  now: #{phrase(now)}",
-        "The instruction above is for what it becomes, but the process running now was",
-        "started by the old code and an instruction only swaps code under it. What that",
-        "process should become is yours to decide; nothing here can."
-      ]
+        "  now: #{phrase(now)}"
+      ] ++
+        para(
+          "The instruction suits the target code, but the running process was started " <>
+            "by the current code. Decide what should happen to that process."
+        )
     end
   end
 
@@ -265,7 +264,7 @@ defmodule Forecastle.Appup.Draft do
   end
 
   defp phrase(:supervisor), do: "a supervisor"
-  defp phrase(:plain), do: "neither a supervisor nor a process with migratable state"
+  defp phrase(:plain), do: "a module with no supervisor or process behaviour"
 
   defp phrase({:advanced, arities}) do
     "a process with migratable state, through #{callbacks(arities)}"
@@ -300,31 +299,33 @@ defmodule Forecastle.Appup.Draft do
       {instruction,
        comments ++
          [
-           "#{inspect(module)} is NOT in the modules list of the new build's .app, so",
-           "systools_rc:get_lib/2 cannot resolve object code for it and make_relup/4 will",
-           "fail with no_such_module. The fix is that list, not this instruction."
+           ""
+           | para(
+               "WARNING: #{inspect(module)} is missing from the modules list in the target " <>
+                 "build's .app, so relup generation will fail with no_such_module. Fix the " <>
+                 ".app, not this instruction."
+             )
          ]}
     end
   end
 
   defp supervisor_comment(module, match, behaviours) do
-    [
-      "#{inspect(module)}: #{signal(match, behaviours)}",
-      "This re-reads init/1 and reconciles the child *specs*. It does not upgrade the",
-      "children - those need instructions of their own."
-    ]
+    para(
+      "#{inspect(module)}: #{signal(match, behaviours)} The update re-runs init/1 and updates the " <>
+        "child specs. The children themselves are not upgraded; give them their own " <>
+        "instructions."
+    )
   end
 
   # Deliberately says nothing about whether a `code_change` is there: it cannot
   # tell a hand-written one from Elixir's injected identity, which is §3.2, and
   # `callback/3` is what says the one thing about it that *is* decidable.
   defp advanced_comment(module, matches, behaviours) do
-    [
-      "#{inspect(module)}: #{signal(hd(matches), behaviours)}",
-      "The process is suspended and #{callbacks(arities(matches))} is called with Extra = [].",
-      "Nothing can derive Extra: what a migration needs is the author's to choose, and [] is",
-      "what a draft can say."
-    ] ++ ambiguous(module, matches)
+    para(
+      "#{inspect(module)}: #{signal(hd(matches), behaviours)} The update suspends the process and " <>
+        "calls #{callbacks(arities(matches))} with Extra = []. Replace [] if the " <>
+        "migration needs data."
+    ) ++ ambiguous(module, matches)
   end
 
   defp callbacks([arity]), do: "code_change/#{arity}"
@@ -342,11 +343,12 @@ defmodule Forecastle.Appup.Draft do
 
   defp ambiguous(module, matches) do
     [
-      "",
-      "#{inspect(module)} declares more than one behaviour that migrates state:",
-      "#{list(matches)}. Which one drives the running process is not visible in a beam -",
-      "release_handler asks the process, so the callback that gets called is whichever its",
-      "behaviour module requires."
+      ""
+      | para(
+          "#{inspect(module)} declares more than one behaviour that migrates state: " <>
+            "#{list(matches)}. The running process's behaviour decides which callback " <>
+            "is called, and the beam does not say which that is."
+        )
     ]
   end
 
@@ -357,19 +359,15 @@ defmodule Forecastle.Appup.Draft do
   # know about - `GenStage`, or anything else out of a library - it is not
   # enough, and only the author can say so.
   defp plain_comment(module, []) do
-    [
-      "#{inspect(module)}: its Attr chunk declares no behaviour, so its code is swapped",
-      "with nothing suspended and no state migrated."
-    ]
+    para("#{inspect(module)}: no behaviour. The code is replaced without suspending anything.")
   end
 
   defp plain_comment(module, behaviours) do
-    [
-      "#{inspect(module)}: declares #{list(behaviours)}, none of which is a behaviour whose",
-      "state release_handler migrates, so its code is swapped with nothing suspended and",
-      "no state migrated. If this module holds state that has to change shape, a",
-      "load_module is not enough and only you can say what it needs instead."
-    ]
+    para(
+      "#{inspect(module)}: #{noun(behaviours)} #{list(behaviours)}. release_handler " <>
+        "migrates no state for it, so the code is replaced without suspending anything. " <>
+        "If the module holds state that changes shape, load_module is not enough."
+    )
   end
 
   # Which behaviour decided it, and what else the module declares. Naming the
@@ -378,8 +376,11 @@ defmodule Forecastle.Appup.Draft do
   defp signal(match, [_only]), do: "behaviour #{inspect(match)}."
 
   defp signal(match, behaviours) do
-    "declares #{list(behaviours)}; classified on #{inspect(match)}."
+    "behaviours #{list(behaviours)}; drafted as #{inspect(match)}."
   end
+
+  defp noun([_only]), do: "behaviour"
+  defp noun(_behaviours), do: "behaviours"
 
   defp list(behaviours), do: Enum.map_join(behaviours, ", ", &inspect/1)
 
@@ -387,11 +388,10 @@ defmodule Forecastle.Appup.Draft do
   # so that an entry with one instruction in it does not carry a paragraph about
   # an ordering that cannot arise.
   defp preamble([], _new) do
-    [
-      "No module moved between these two builds. The entry is here because :systools",
-      "selects one by from-version and make_relup/4 refuses an edge that has none - an",
-      "empty script is the instruction that nothing has to be loaded, not an omission."
-    ]
+    para(
+      "No modules changed between these builds. The empty entry is still required: " <>
+        "relup generation fails for a from-version with no entry."
+    )
   end
 
   defp preamble(instructions, new) do
@@ -411,11 +411,10 @@ defmodule Forecastle.Appup.Draft do
   # bad_param before it builds anything, and `mix castle.appup` reports it as a
   # gap for the same reason.
   defp unlisted(%{listed?: false}) do
-    [
-      "The new build's .app has no modules list :systools will accept - it is missing, or",
-      "it is not a list of atoms. systools_rc resolves object code through that list, so no",
-      "instruction below can be carried until the resource is fixed."
-    ]
+    para(
+      "WARNING: the target build's .app has no usable modules list (it is missing, or " <>
+        "not a list of atoms). No instruction below will work until the .app is fixed."
+    )
   end
 
   defp unlisted(_new), do: []
@@ -423,20 +422,38 @@ defmodule Forecastle.Appup.Draft do
   defp supervision(false), do: []
 
   defp supervision(true) do
-    [
-      "update only reaches processes found through the supervision tree. A process nobody",
-      "supervises keeps its old code, silently, and this entry will look as though it",
-      "covered it."
-    ]
+    para(
+      "An update only reaches processes in the supervision tree. An unsupervised " <>
+        "process keeps running the old code."
+    )
   end
 
   defp ordering(false), do: []
 
   defp ordering(true) do
-    [
-      "Ordering is stable, not correct: add_module comes first and delete_module last,",
-      "which is the decidable part. DepMods between changed modules is not computed, so",
-      "nothing here orders two changed modules against each other."
-    ]
+    para(
+      "add_module comes first and delete_module last, but changed modules are not " <>
+        "ordered by dependency. Reorder them, or add DepMods, where one depends on " <>
+        "another."
+    )
+  end
+
+  # Comment text is written as paragraphs and wrapped here, so that lines stay
+  # even whatever length the interpolated module names are.
+  @width 80
+
+  defp para(text) do
+    text
+    |> String.split(" ")
+    |> Enum.reduce([], fn
+      word, [] ->
+        [word]
+
+      word, [line | rest] ->
+        if String.length(line) + 1 + String.length(word) > @width,
+          do: [word, line | rest],
+          else: [line <> " " <> word | rest]
+    end)
+    |> Enum.reverse()
   end
 end

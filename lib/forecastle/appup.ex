@@ -55,41 +55,36 @@ defmodule Forecastle.Appup do
             @removal_instructions ++ @load_applications ++ @removal_applications
         )
 
-  @typedoc "An appup term: the application version it belongs to, and its two instruction lists."
+  @typedoc "An appup term: the application version and its upgrade and downgrade entries."
   @type t :: {charlist(), [entry()], [entry()]}
 
-  @typedoc "One from-version and the script that goes with it."
+  @typedoc "A from-version and its script."
   @type entry :: {charlist() | binary(), [term()]}
 
-  @typedoc "Which of an appup's two independent lists a question is about."
+  @typedoc "The upgrade or downgrade list of an appup."
   @type direction :: :up | :down
 
   @typedoc """
   What an instruction does to a module.
 
-  `:load` puts new code into the running system; `:removal` takes code out. A
-  module that changed or was added needs the first, one that was removed needs
-  the second, and no instruction does both.
+  Changed and added modules need `:load`; removed modules need `:removal`. No
+  instruction does both.
   """
   @type effect :: :load | :removal
 
   @typedoc """
-  What `effects/4` could settle about one module.
+  The effect of a script on one module.
 
-  An effect where order cannot change the answer, and the instructions involved
-  where it can - which the caller reports rather than resolving. See `effects/4`
-  for why the ordering is deliberately not modelled.
+  `{:conflict, instructions}` means the instructions disagree and the outcome
+  depends on an order that `effects/4` does not model.
   """
   @type resolution :: effect() | {:conflict, [term()]}
 
   @doc """
-  Makes `:sasl`'s build-time modules available.
+  Makes `:systools` and `:systools_relup` available.
 
-  Elixir prunes unused OTP applications from the build's code path, which would
-  otherwise leave `:systools` - and `:systools_relup`, which answers whether an
-  appup covers a transition - unavailable in projects that do not already depend
-  on `:sasl`. Every caller here needs one or the other, and a missing module
-  looks the same either way, so it is asked for once.
+  Elixir prunes unused OTP applications from the build's code path, so these
+  `:sasl` modules are missing in projects that do not depend on `:sasl`.
   """
   @spec ensure_systools!() :: :ok
   def ensure_systools! do

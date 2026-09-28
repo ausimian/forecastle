@@ -26,15 +26,13 @@ defmodule Forecastle.Deployment do
   defstruct [:root, :name, :cd, env: [], boot_timeout: 20_000]
 
   @typedoc """
-  Environment for a command, in the shape `System.cmd/3` takes it: a `nil` value
-  unsets the variable rather than setting it to an empty string.
+  Command environment in `System.cmd/3` form. A `nil` value unsets the variable.
   """
   @type env :: [{binary(), binary() | nil}]
 
   @typedoc """
-  A release tree, the name of the release inside it, the directory commands are
-  run from, the environment every one of them carries, and how long the release
-  is given to answer after it has been started.
+  A release tree: its root, release name, command working directory, command
+  environment and boot timeout in milliseconds.
   """
   @type t :: %__MODULE__{
           root: Path.t(),

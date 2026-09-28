@@ -70,7 +70,7 @@ defmodule Forecastle.AppupDraftTest do
 
       assert text =~ "GenServer"
       assert text =~ "Supervisor"
-      assert text =~ "classified on"
+      assert text =~ "drafted as"
     end
 
     test "an added module is an add_module whatever it implements" do
@@ -162,7 +162,7 @@ defmodule Forecastle.AppupDraftTest do
 
       text = Enum.join(comments, " ")
 
-      assert text =~ "exports NO code_change/3"
+      assert text =~ "does not export code_change/3"
       assert text =~ "undef"
     end
 
@@ -170,7 +170,7 @@ defmodule Forecastle.AppupDraftTest do
       assert [{{:update, Mod, {:advanced, []}}, comments}] =
                instructions(changed(Mod, behaviour: [GenServer]))
 
-      refute Enum.join(comments, " ") =~ "exports NO"
+      refute Enum.join(comments, " ") =~ "does not export"
     end
 
     test "asks for arity 4 where the behaviour calls code_change/4" do
@@ -183,7 +183,7 @@ defmodule Forecastle.AppupDraftTest do
 
       assert [{{:update, Mod, {:advanced, []}}, comments}] = instructions({old, new})
 
-      assert Enum.join(comments, " ") =~ "exports NO code_change/4"
+      assert Enum.join(comments, " ") =~ "does not export code_change/4"
     end
 
     test "asks for every arity the module's behaviours need, not just the first" do
@@ -201,8 +201,8 @@ defmodule Forecastle.AppupDraftTest do
 
       text = Enum.join(comments, " ")
 
-      assert text =~ "exports NO code_change/3"
-      refute text =~ "exports NO code_change/4"
+      assert text =~ "does not export code_change/3"
+      refute text =~ "does not export code_change/4"
 
       # And the ambiguity itself is said, because nothing in a beam says which
       # behaviour drives the process.
@@ -223,8 +223,8 @@ defmodule Forecastle.AppupDraftTest do
 
       text = Enum.join(comments, " ")
 
-      assert text =~ "exports NO code_change/3"
-      refute text =~ "exports NO code_change/4"
+      assert text =~ "does not export code_change/3"
+      refute text =~ "does not export code_change/4"
     end
 
     test "asks a supervisor destination for the old behaviour's callback" do
@@ -240,7 +240,7 @@ defmodule Forecastle.AppupDraftTest do
 
       assert [{{:update, Mod, :supervisor}, comments}] = instructions({old, new})
 
-      assert Enum.join(comments, " ") =~ "exports NO code_change/3"
+      assert Enum.join(comments, " ") =~ "does not export code_change/3"
     end
 
     test "asks nothing where no process is running the module under a behaviour" do
@@ -257,7 +257,7 @@ defmodule Forecastle.AppupDraftTest do
       for from <- [plain, supervisor] do
         assert [{{:update, Mod, {:advanced, []}}, comments}] = instructions({from, genserver})
 
-        refute Enum.join(comments, " ") =~ "exports NO"
+        refute Enum.join(comments, " ") =~ "does not export"
       end
     end
 
@@ -269,7 +269,7 @@ defmodule Forecastle.AppupDraftTest do
 
       assert [{{:update, Mod, :supervisor}, comments}] = instructions({old, new})
 
-      refute Enum.join(comments, " ") =~ "exports NO"
+      refute Enum.join(comments, " ") =~ "does not export"
     end
   end
 
@@ -298,8 +298,8 @@ defmodule Forecastle.AppupDraftTest do
           {elem(instruction, 1), Enum.join(comments, " ")}
         end)
 
-      assert notes[Probe.Real.Declared] =~ "exports NO code_change/3"
-      refute notes[Probe.Real.Injected] =~ "exports NO code_change"
+      assert notes[Probe.Real.Declared] =~ "does not export code_change/3"
+      refute notes[Probe.Real.Injected] =~ "does not export code_change"
     end
 
     # Two modules that differ only in how they come by `code_change/3`: one
@@ -363,10 +363,10 @@ defmodule Forecastle.AppupDraftTest do
       assert [{{:load_module, Mod}, up}] = instructions({genserver, plain})
       assert [{{:update, Mod, {:advanced, []}}, down}] = instructions({plain, genserver})
 
-      assert Enum.join(up, " ") =~ "changed behaviour role between the two builds"
+      assert Enum.join(up, " ") =~ "changed behaviour role in this transition"
       assert Enum.join(up, " ") =~ "was: a process with migratable state"
       assert Enum.join(down, " ") =~ "now: a process with migratable state"
-      assert Enum.join(up, " ") =~ "yours to decide"
+      assert Enum.join(up, " ") =~ "Decide what should happen to that process"
     end
 
     test "a change of callback contract within the advanced row is a role change" do
@@ -382,7 +382,7 @@ defmodule Forecastle.AppupDraftTest do
 
       text = Enum.join(comments, " ")
 
-      assert text =~ "changed behaviour role between the two builds"
+      assert text =~ "changed behaviour role in this transition"
       assert text =~ "was: a process with migratable state, through code_change/3"
       assert text =~ "now: a process with migratable state, through code_change/4"
     end
@@ -436,15 +436,15 @@ defmodule Forecastle.AppupDraftTest do
       text = Enum.join(comments, " ")
 
       assert text =~ "Extra = []"
-      assert text =~ "Nothing can derive Extra"
+      assert text =~ "Replace [] if the migration needs data"
     end
 
     test "a supervisor update says it reconciles specs and does not upgrade the children" do
       [{_instruction, comments}] = instructions(changed(Mod, behaviour: [Supervisor]))
       text = Enum.join(comments, " ")
 
-      assert text =~ "child *specs*"
-      assert text =~ "does not upgrade the"
+      assert text =~ "updates the child specs"
+      assert text =~ "children themselves are not"
     end
 
     test "an entry with an update says update only reaches supervised processes" do
@@ -463,7 +463,7 @@ defmodule Forecastle.AppupDraftTest do
       new = side(%{A => {"b", []}, B => {"a", []}})
       entry = Draft.entry(@from, old, new)
 
-      assert Enum.join(entry.preamble, " ") =~ "Ordering is stable, not correct"
+      assert Enum.join(entry.preamble, " ") =~ "ordered by dependency"
       assert Enum.join(entry.preamble, " ") =~ "DepMods"
     end
 
@@ -502,7 +502,7 @@ defmodule Forecastle.AppupDraftTest do
 
       text = Enum.join(comments, " ")
 
-      assert text =~ "NOT in the modules list"
+      assert text =~ "missing from the modules list"
       assert text =~ "no_such_module"
     end
 
@@ -521,10 +521,10 @@ defmodule Forecastle.AppupDraftTest do
       new = unlisted(%{A => {"b", []}, B => {"b", []}})
       entry = Draft.entry(@from, old, new)
 
-      assert Enum.join(entry.preamble, " ") =~ "no modules list :systools will accept"
+      assert Enum.join(entry.preamble, " ") =~ "has no usable modules list"
 
       for {_instruction, comments} <- entry.instructions do
-        refute Enum.join(comments, " ") =~ "NOT in the modules list"
+        refute Enum.join(comments, " ") =~ "missing from the modules list"
       end
     end
 
@@ -551,8 +551,8 @@ defmodule Forecastle.AppupDraftTest do
 
       text = Enum.join(entry.preamble, " ")
 
-      assert text =~ "No module moved"
-      assert text =~ "make_relup/4 refuses an edge that has none"
+      assert text =~ "No modules changed"
+      assert text =~ "relup generation fails for a from-version with no entry"
     end
   end
 
