@@ -32,7 +32,7 @@ defmodule Forecastle.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test]
+      preferred_envs: [precommit: :test, "test.parallel": :test]
     ]
   end
 
@@ -55,7 +55,7 @@ defmodule Forecastle.MixProject do
         "deps.unlock --unused",
         "format",
         "credo --strict",
-        "test --include e2e"
+        "test.parallel --include e2e"
       ]
     ]
   end
