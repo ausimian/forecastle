@@ -47,10 +47,14 @@ defmodule Forecastle.AssemblyRelupTest do
   setup_all do
     from = assemble!(into: "assembly-relup-from", vsn: @from)
 
+    # Built requiring a relup, which it carries, so that every assertion about
+    # this release is also the evidence that a satisfied `relup: :required`
+    # assembles exactly as it would without the option.
     {generated, output} =
       assemble_with!(
         "assembly-relup-to",
-        "tar:" <> Path.join(from, "sample-#{@from}.tar.gz")
+        "tar:" <> Path.join(from, "sample-#{@from}.tar.gz"),
+        required()
       )
 
     {:ok, from: from, generated: generated, output: output}
@@ -212,6 +216,33 @@ defmodule Forecastle.AssemblyRelupTest do
       # without `--overwrite` declines to overwrite, and that retry then exits 0
       # having assembled nothing at all.
       refute File.exists?(path), "a refused option left a partial release behind"
+    end
+
+    test "relup: :required on a release that names no baselines" do
+      # #56: a release that ships hot upgrades, built without `upgrade_from:`.
+      # Absence alone assembles that cleanly and it looks exactly like a good
+      # release until it is installed, so the requirement refuses it - and here,
+      # before `:assemble`, so that there is no archive for a pipeline to ship.
+      {output, path} = assemble_failure!("assembly-relup-required", nil, required())
+
+      assert output =~ "relup: :required"
+      assert output =~ "upgrade_from: is not set"
+      refute File.exists?(path), "a refused requirement left a partial release behind"
+    end
+
+    test "relup: :required beside a hand-written relup and no baselines" do
+      # The requirement means a relup generated from baselines. A project-root
+      # relup is the build most likely to believe it already has one, so it is
+      # refused too, and named.
+      relup = Path.join(Fixture.workspace(), "relup")
+      on_exit(fn -> File.rm(relup) end)
+      File.write!(relup, ~s({"#{@to}", [], []}.\n))
+
+      {output, path} = assemble_failure!("assembly-relup-required-hand", nil, required())
+
+      assert output =~ "relup: :required"
+      assert output =~ relup
+      refute File.exists?(path)
     end
 
     test "a single spec written as a string rather than a list" do
@@ -561,7 +592,7 @@ defmodule Forecastle.AssemblyRelupTest do
     Path.join(version_dir, "sample")
   end
 
-  defp assemble_with!(into, specs, extra_env \\ []) do
+  defp assemble_with!(into, specs, extra_env) do
     workspace = Fixture.workspace()
     path = Path.join(workspace, into)
 
@@ -629,6 +660,8 @@ defmodule Forecastle.AssemblyRelupTest do
       {"SAMPLE_UPGRADE_FROM", specs}
     ]
   end
+
+  defp required, do: [{"SAMPLE_RELUP", "required"}]
 
   defp relup_path(release, vsn \\ @to), do: Path.join([release, "releases", vsn, "relup"])
 

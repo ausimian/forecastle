@@ -213,6 +213,9 @@ defmodule Forecastle do
   The function also rejects a release that names baselines after losing the
   record left by `pre_assemble/1`. A custom step should update the option list it
   receives instead of replacing the list.
+
+  It also rejects a release that sets `relup: :required` and names no baselines,
+  which a step after `:tar` could otherwise leave behind.
   """
   # [#40](https://github.com/ausimian/forecastle/issues/40) is where this was
   # decided.
@@ -329,10 +332,17 @@ defmodule Forecastle do
   # itself, which is the `refuse_hand_written_relup!/0` shape again.
   @spec refuse_late_upgrade_from(Mix.Release.t()) :: Mix.Release.t()
   def refuse_late_upgrade_from(%Mix.Release{options: options} = release) do
-    case Keyword.fetch(options, :forecastle_upgrade_from) do
-      {:ok, staged} -> refuse_changed_upgrade_from!(release, staged)
-      :error -> refuse_unrecorded_upgrade_from!(release)
-    end
+    release =
+      case Keyword.fetch(options, :forecastle_upgrade_from) do
+        {:ok, staged} -> refuse_changed_upgrade_from!(release, staged)
+        :error -> refuse_unrecorded_upgrade_from!(release)
+      end
+
+    # The same rule for `relup: :required`, and for the same reason: a step that
+    # adds the requirement after `:tar` is a release asking, as it finally
+    # stands, for something the archive does not carry. After the comparison,
+    # so that a changed `upgrade_from:` is named as a change.
+    require_baselines!(release)
   end
 
   # `upgrade_from!/1` rather than a bare presence check, so that a release naming
@@ -457,6 +467,7 @@ defmodule Forecastle do
   # would leave the standard launcher with no configuration to boot from.
   def pre_assemble(%Mix.Release{} = release) do
     release
+    |> require_baselines!()
     |> stage_baselines()
     |> stage_relup()
     |> stage_dep_appups()
@@ -486,10 +497,11 @@ defmodule Forecastle do
   function generates both upgrade and downgrade directions for each baseline
   with the `auto` strategy. See `Forecastle.Baseline` for the grammar.
 
-  Omitting `:upgrade_from` skips generation. An empty value, a project-root
-  `relup` supplied with the option, or a change after `pre_assemble/1` is an
-  error. Use `mix castle.relup` for separate directions or the `--hot` and
-  `--restart` strategies.
+  Omitting `:upgrade_from` skips generation, unless the release also sets
+  `relup: :required`, which makes a missing `:upgrade_from` an error. An empty
+  value, a project-root `relup` supplied with the option, or a change after
+  `pre_assemble/1` is an error. Use `mix castle.relup` for separate directions or
+  the `--hot` and `--restart` strategies.
   """
   @spec generate_relup(Mix.Release.t()) :: Mix.Release.t()
   def generate_relup(%Mix.Release{} = release) do
@@ -499,7 +511,7 @@ defmodule Forecastle do
     # after `:tar` is invisible from here, whatever this reads - and it is the
     # half that answers for a release whose record has gone missing, which this
     # one deliberately does not.
-    release = compare_upgrade_from(release)
+    release = release |> compare_upgrade_from() |> require_baselines!()
 
     case upgrade_from!(release) do
       :none ->
@@ -508,7 +520,119 @@ defmodule Forecastle do
       {:baselines, specs} ->
         refuse_hand_written_relup!()
         write_generated_relup!(release, specs)
+        refuse_unwritten_relup!(release)
         release
+    end
+  end
+
+  # `relup: :required` is the answer to a release that ships hot upgrades and
+  # was built without `upgrade_from:`. Absence is a documented no-op, and the
+  # right default for a development build, so such a release assembled cleanly
+  # and looked exactly like a good one until `bin/castle install` was run against
+  # it. [#56](https://github.com/ausimian/forecastle/issues/56) is where that
+  # happened downstream: a release candidate tagged, built and published with no
+  # relup because the option was never set, and the same is reachable through a
+  # `mix.exs` that sets it conditionally and a condition that is quietly false.
+  #
+  # **It means generated from baselines, and only that.** A project-root `relup`
+  # does not satisfy it: with `upgrade_from:` the two are already refused
+  # together, and without it the requirement is unmet whatever else is lying in
+  # the project root. The message says so when there is one, since that is the
+  # build most likely to think it has a relup.
+  #
+  # Read in `pre_assemble/1`, before `:assemble` has created anything, for the
+  # reason every other check on the option is: Mix does not tidy up after a step
+  # of its own that raised, so a refusal after it leaves a version directory a
+  # corrected retry declines to overwrite. Read again in `generate_relup/1` so
+  # that the step is right on its own, which is also where a step that replaced
+  # the options before generation, dropping `upgrade_from:` along with the record
+  # of it, is still caught - for a project that asked for this, and kept asking.
+  # And read a third time in `refuse_late_upgrade_from/1`, after every step, for
+  # #40's reason: a step after `:tar` adding the requirement is visible nowhere
+  # else. One function, three call sites.
+  #
+  # **What decides it is the option, never a file.** `mix release --overwrite`
+  # does not clear a relup left by an earlier build, so "is there a relup in the
+  # version path" can be answered yes by a file nobody generated this run.
+  # `refuse_unwritten_relup!/1` asks that question only after generation, where
+  # the answer is about this build.
+  defp require_baselines!(%Mix.Release{} = release) do
+    if relup_required?(release) and upgrade_from!(release) == :none do
+      Mix.raise(
+        "the release option relup: :required asks for this build to carry a relup " <>
+          "generated from its baselines, and upgrade_from: is not set, so nothing would " <>
+          "be generated and the release would assemble without one. Name the releases " <>
+          "this one can be upgraded from in upgrade_from:, or leave relup: :required out " <>
+          "of a build that does not need a relup." <> hand_written_relup_note()
+      )
+    end
+
+    release
+  end
+
+  defp hand_written_relup_note do
+    relup = project_relup()
+
+    if File.exists?(relup) do
+      " #{relup} does not satisfy it: the requirement is for a relup generated from " <>
+        "upgrade_from:, and a hand-written one cannot be combined with that option, so " <>
+        "remove it as well."
+    else
+      ""
+    end
+  end
+
+  # The final guard the issue asked for, immediately after generation and so
+  # immediately before `:tar` wherever `steps/1` or the project put it.
+  # `Forecastle.Relup.generate!/7` publishes the relup or raises, so this is not
+  # expected to fire; it is what keeps the requirement a statement about the
+  # artefact rather than about the code path that is supposed to produce it.
+  defp refuse_unwritten_relup!(%Mix.Release{version_path: vp} = release) do
+    relup = Path.join(vp, "relup")
+
+    if relup_required?(release) and not File.regular?(relup) do
+      Mix.raise(
+        "the release option relup: :required asks for this build to carry a relup, and " <>
+          "generation finished without writing #{relup}."
+      )
+    end
+
+    :ok
+  end
+
+  # `:required` or nothing, and deliberately no second spelling of nothing. `nil`
+  # is accepted because it is what `relup: if(ci?, do: :required)` produces when
+  # the condition is false, and that is the shape the option is meant to be set
+  # in. Anything else is refused rather than read as
+  # "not required": a typo that quietly turned the check off would be this
+  # option failing in exactly the way it exists to prevent.
+  #
+  # A repeated option is refused for `upgrade_from!/1`'s reason - Mix keeps every
+  # occurrence of an option it does not recognise, and taking the first would
+  # silently discard the rest.
+  defp relup_required?(%Mix.Release{options: options}) do
+    case Keyword.get_values(options, :relup) do
+      [] ->
+        false
+
+      [nil] ->
+        false
+
+      [:required] ->
+        true
+
+      [other] ->
+        Mix.raise(
+          "the release option relup: takes :required, or nil for a build that does not " <>
+            "need a relup, but got #{inspect(other)}."
+        )
+
+      many ->
+        Mix.raise(
+          "the release option relup: was given #{length(many)} times (" <>
+            Enum.map_join(many, ", ", &inspect/1) <>
+            "), and only one of them would be used. Set it once."
+        )
     end
   end
 

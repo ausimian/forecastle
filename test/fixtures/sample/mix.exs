@@ -67,7 +67,7 @@ defmodule Sample.MixProject do
         [
           include_executables_for: executables(),
           steps: steps()
-        ] ++ configuration() ++ upgrade_from()
+        ] ++ configuration() ++ upgrade_from() ++ relup()
       end
     ]
   end
@@ -96,6 +96,17 @@ defmodule Sample.MixProject do
       "empty" -> [upgrade_from: []]
       "bare:" <> spec -> [upgrade_from: spec]
       specs -> [upgrade_from: String.split(specs, "|", trim: true)]
+    end
+  end
+
+  # Switched by the test suite so that the fixture can be assembled as a project
+  # that requires a relup. Set apart from `upgrade_from/0` because the case that
+  # matters is the requirement *without* the baselines, which that function's
+  # unset branch is the only way to produce.
+  defp relup do
+    case System.get_env("SAMPLE_RELUP") do
+      nil -> []
+      "required" -> [relup: :required]
     end
   end
 

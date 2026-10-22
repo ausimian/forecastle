@@ -85,6 +85,7 @@ Before assembly, Forecastle:
 
 - validates a project-root `relup` and rejects it when `upgrade_from:` is also
   present;
+- rejects `relup: :required` without `upgrade_from:`;
 - resolves the baselines named by `upgrade_from:`;
 - validates appup sources under `rel/appups`;
 - creates a preboot script containing `:sasl`, `:compiler`, `:elixir` and
@@ -306,12 +307,26 @@ Omitting `upgrade_from:` skips generation. Forecastle rejects an empty or
 malformed value, duplicate options, unresolved baselines, late changes, and a
 project-root `relup` supplied at the same time.
 
+A project that ships hot upgrades can require a relup with `relup: :required`.
+Forecastle then rejects a build without `upgrade_from:` before assembly, rather
+than producing a release that only fails at `bin/castle install`. A project-root
+`relup` does not satisfy the requirement. Set it conditionally so that local
+builds and `ref:` baseline builds can still leave `upgrade_from:` out:
+
+```elixir
+relup: if(System.get_env("CI") && !System.get_env("CASTLE_BASELINE"), do: :required)
+```
+
+`relup:` accepts `:required` or `nil`; any other value is an error.
+
 A failure after assembly leaves the target directory in place. Retry with
 `mix release --overwrite`.
 
 A `ref:` baseline builds that revision. Set no `upgrade_from:` while
 `CASTLE_BASELINE` is present, or Forecastle will reject the recursive baseline
-build.
+build. Leave out `relup: :required` there too: the baseline build inherits the
+environment, so a requirement keyed on `CI` alone would reject it for having no
+`upgrade_from:`.
 
 ### For an existing target
 
