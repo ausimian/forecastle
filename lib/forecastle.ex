@@ -214,7 +214,7 @@ defmodule Forecastle do
   record left by `pre_assemble/1`. A custom step should update the option list it
   receives instead of replacing the list.
 
-  It also rejects a release that sets `relup: :required` and names no baselines,
+  It also rejects a release that sets `require_relup: true` and names no baselines,
   which a step after `:tar` could otherwise leave behind.
   """
   # [#40](https://github.com/ausimian/forecastle/issues/40) is where this was
@@ -338,7 +338,7 @@ defmodule Forecastle do
         :error -> refuse_unrecorded_upgrade_from!(release)
       end
 
-    # The same rule for `relup: :required`, and for the same reason: a step that
+    # The same rule for `require_relup: true`, and for the same reason: a step that
     # adds the requirement after `:tar` is a release asking, as it finally
     # stands, for something the archive does not carry. After the comparison,
     # so that a changed `upgrade_from:` is named as a change.
@@ -498,7 +498,7 @@ defmodule Forecastle do
   with the `auto` strategy. See `Forecastle.Baseline` for the grammar.
 
   Omitting `:upgrade_from` skips generation, unless the release also sets
-  `relup: :required`, which makes a missing `:upgrade_from` an error. An empty
+  `require_relup: true`, which makes a missing `:upgrade_from` an error. An empty
   value, a project-root `relup` supplied with the option, or a change after
   `pre_assemble/1` is an error. Use `mix castle.relup` for separate directions or
   the `--hot` and `--restart` strategies.
@@ -525,7 +525,7 @@ defmodule Forecastle do
     end
   end
 
-  # `relup: :required` is the answer to a release that ships hot upgrades and
+  # `require_relup: true` is the answer to a release that ships hot upgrades and
   # was built without `upgrade_from:`. Absence is a documented no-op, and the
   # right default for a development build, so such a release assembled cleanly
   # and looked exactly like a good one until `bin/castle install` was run against
@@ -559,11 +559,11 @@ defmodule Forecastle do
   defp require_baselines!(%Mix.Release{} = release) do
     if relup_required?(release) and upgrade_from!(release) == :none do
       Mix.raise(
-        "the release option relup: :required asks for this build to carry a relup " <>
+        "the release option require_relup: true asks for this build to carry a relup " <>
           "generated from its baselines, and upgrade_from: is not set, so nothing would " <>
           "be generated and the release would assemble without one. Name the releases " <>
-          "this one can be upgraded from in upgrade_from:, or leave relup: :required out " <>
-          "of a build that does not need a relup." <> hand_written_relup_note()
+          "this one can be upgraded from in upgrade_from:, or set require_relup: false for " <>
+          "a build that does not need a relup." <> hand_written_relup_note()
       )
     end
 
@@ -592,7 +592,7 @@ defmodule Forecastle do
 
     if relup_required?(release) and not File.regular?(relup) do
       Mix.raise(
-        "the release option relup: :required asks for this build to carry a relup, and " <>
+        "the release option require_relup: true asks for this build to carry a relup, and " <>
           "generation finished without writing #{relup}."
       )
     end
@@ -600,36 +600,37 @@ defmodule Forecastle do
     :ok
   end
 
-  # `:required` or nothing, and deliberately no second spelling of nothing. `nil`
-  # is accepted because it is what `relup: if(ci?, do: :required)` produces when
-  # the condition is false, and that is the shape the option is meant to be set
-  # in. Anything else is refused rather than read as
-  # "not required": a typo that quietly turned the check off would be this
-  # option failing in exactly the way it exists to prevent.
+  # A boolean, with `nil` read as `false`: `System.get_env("CI") && ...` is
+  # `nil` when the variable is unset, and that is a natural way to write the
+  # condition. Anything else is refused rather than read as `false` - a value
+  # that quietly turned the check off would be this option failing in exactly
+  # the way it exists to prevent. It was briefly `relup: :required`, which
+  # refused the `false` that `ci? && :required` produces; a boolean has no such
+  # trap.
   #
   # A repeated option is refused for `upgrade_from!/1`'s reason - Mix keeps every
   # occurrence of an option it does not recognise, and taking the first would
   # silently discard the rest.
   defp relup_required?(%Mix.Release{options: options}) do
-    case Keyword.get_values(options, :relup) do
+    case Keyword.get_values(options, :require_relup) do
       [] ->
         false
+
+      [required] when is_boolean(required) ->
+        required
 
       [nil] ->
         false
 
-      [:required] ->
-        true
-
       [other] ->
         Mix.raise(
-          "the release option relup: takes :required, or nil for a build that does not " <>
-            "need a relup, but got #{inspect(other)}."
+          "the release option require_relup: takes true or false, but got " <>
+            "#{inspect(other)}."
         )
 
       many ->
         Mix.raise(
-          "the release option relup: was given #{length(many)} times (" <>
+          "the release option require_relup: was given #{length(many)} times (" <>
             Enum.map_join(many, ", ", &inspect/1) <>
             "), and only one of them would be used. Set it once."
         )

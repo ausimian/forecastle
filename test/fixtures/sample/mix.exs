@@ -67,7 +67,7 @@ defmodule Sample.MixProject do
         [
           include_executables_for: executables(),
           steps: steps()
-        ] ++ configuration() ++ upgrade_from() ++ relup()
+        ] ++ configuration() ++ upgrade_from() ++ require_relup()
       end
     ]
   end
@@ -103,10 +103,10 @@ defmodule Sample.MixProject do
   # that requires a relup. Set apart from `upgrade_from/0` because the case that
   # matters is the requirement *without* the baselines, which that function's
   # unset branch is the only way to produce.
-  defp relup do
-    case System.get_env("SAMPLE_RELUP") do
+  defp require_relup do
+    case System.get_env("SAMPLE_REQUIRE_RELUP") do
       nil -> []
-      "required" -> [relup: :required]
+      "true" -> [require_relup: true]
     end
   end
 

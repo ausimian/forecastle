@@ -1274,7 +1274,7 @@ coverage having compared nothing. So:
   It is a fourth answer to "what does this release name", arrived at after the
   question was settled, and it is refused at generation and again after every
   step has run. See *A late `upgrade_from:` is refused*.
-- **`relup: :required` turns the first of those into a refusal, for a project
+- **`require_relup: true` turns the first of those into a refusal, for a project
   that asks.** [#56](https://github.com/ausimian/forecastle/issues/56): absence
   is the right default for a development build, but a release that ships hot
   upgrades and was built without `upgrade_from:` looked exactly like a good one
@@ -1289,9 +1289,11 @@ coverage having compared nothing. So:
   in place, so a relup in the version path is no evidence that this build made
   one, and `refuse_unwritten_relup!/1` checks the file only after generation. A
   project-root `relup` does not satisfy it — the requirement means generated from
-  baselines. `nil` is accepted because `if(cond, do: :required)` produces it;
-  every other value, `true` and `:optional` included, is refused rather than read
-  as "not required". **No environment variable forces it on**, though #56
+  baselines. It takes a boolean, and `nil` reads as `false` because
+  `System.get_env("CI") && …` produces it; every other value is refused rather
+  than read as `false`. It was `relup: :required` before release, and that
+  refused the `false` an expression like `ci? && :required` produces — the
+  ordinary way to write the condition failed the build. **No environment variable forces it on**, though #56
   suggested one: a `ref:` baseline build inherits the environment and sets no
   `upgrade_from:` by design, so a forced requirement would refuse every such
   build, and the release definition is already a function that can read `CI`.
