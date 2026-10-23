@@ -282,6 +282,17 @@ defmodule ForecastleTest do
       assert Forecastle.refuse_late_upgrade_from(release) == release
     end
 
+    test "refuses relup: :required that a step added on a release naming no baselines" do
+      # #40's shape for the other option: a step after `:tar` adding the
+      # requirement has passed both earlier reads, and the archive it leaves
+      # behind carries no relup.
+      release = release(relup: :required, forecastle_upgrade_from: :none)
+
+      assert_raise Mix.Error, ~r/relup: :required.*upgrade_from: is not set/s, fn ->
+        Forecastle.refuse_late_upgrade_from(release)
+      end
+    end
+
     test "refuses a baseline a step added after pre-assembly, and names the remedy" do
       # The shape #40 is about: the option is resolved before `:assemble` and
       # read at generation, so one that arrives afterwards is either too late to
@@ -541,6 +552,59 @@ defmodule ForecastleTest do
         end
       end
     end
+
+    test "refuses relup: :required without upgrade_from:, before anything is assembled" do
+      # The release #56 is about: one that ships hot upgrades and was built
+      # without its baselines, which absence alone assembles cleanly. Refused
+      # here, before `:assemble`, for the reason every other check on the option
+      # is - a refusal afterwards leaves a version directory behind.
+      error =
+        assert_raise Mix.Error, fn ->
+          Forecastle.pre_assemble(release(relup: :required))
+        end
+
+      assert error.message =~ "relup: :required"
+      assert error.message =~ "upgrade_from: is not set"
+    end
+
+    test "carries relup: :required through when upgrade_from: names baselines" do
+      refute File.exists?(Path.join(File.cwd!(), "relup")),
+             "this test assumes the project has no relup of its own"
+
+      specs = ["rel:some/release/releases/1.0.0/sample"]
+      assembled = Forecastle.pre_assemble(release(relup: :required, upgrade_from: specs))
+
+      # Read again by `generate_relup/1`, so it has to survive pre-assembly.
+      assert assembled.options[:relup] == :required
+      assert assembled.options[:forecastle_upgrade_from] == {:baselines, specs}
+    end
+
+    test "reads relup: nil as not required" do
+      # What `relup: if(System.get_env("CI"), do: :required)` produces when the
+      # condition is false, which is the shape the option is meant to be set in.
+      assembled = Forecastle.pre_assemble(release(relup: nil))
+
+      assert assembled.options[:forecastle_upgrade_from] == :none
+    end
+
+    test "refuses a relup: value it does not know, rather than reading it as not required" do
+      # A typo that quietly turned the requirement off would be the option failing
+      # in exactly the way it exists to prevent. That includes the value that
+      # reads as a yes: `true` is not a spelling of `:required`.
+      for value <- [true, :requried, "required", :optional] do
+        assert_raise Mix.Error, ~r/relup: takes :required/, fn ->
+          Forecastle.pre_assemble(release(relup: value, upgrade_from: ["rel:some/sample"]))
+        end
+      end
+    end
+
+    test "refuses a second relup: rather than taking the first" do
+      # The same rule as a repeated `upgrade_from:`, for the same reason: Mix
+      # keeps every occurrence of an option it does not recognise.
+      assert_raise Mix.Error, ~r/relup: was given 2 times/, fn ->
+        Forecastle.pre_assemble(release([{:relup, nil}, {:relup, :required}]))
+      end
+    end
   end
 
   describe "generate_relup/1" do
@@ -746,11 +810,61 @@ defmodule ForecastleTest do
 
       assert File.ls!(tmp_dir) == []
     end
+
+    test "refuses relup: :required when the release names no baselines", %{tmp_dir: tmp_dir} do
+      # The second read, and the one that makes the step right on its own: a
+      # steps list without `pre_assemble/1`, or a step that replaced the options
+      # before generation and dropped `upgrade_from:` along with the record of
+      # it. Both reach here asking for a relup and naming nothing to generate
+      # one from, which absence alone would pass in silence.
+      release = release(version_path: tmp_dir, relup: :required)
+
+      assert_raise Mix.Error, ~r/relup: :required.*upgrade_from: is not set/s, fn ->
+        Forecastle.generate_relup(release)
+      end
+
+      assert File.ls!(tmp_dir) == []
+    end
+
+    test "is not satisfied by a relup already in the version path", %{tmp_dir: tmp_dir} do
+      # `mix release --overwrite` does not clear a relup an earlier build left,
+      # so a file there is no evidence that this build generated one. The option
+      # decides, not the file.
+      File.write!(Path.join(tmp_dir, "relup"), ~s({"1.2.3", [], []}.\n))
+      release = release(version_path: tmp_dir, relup: :required)
+
+      assert_raise Mix.Error, ~r/upgrade_from: is not set/, fn ->
+        Forecastle.generate_relup(release)
+      end
+    end
+
+    test "names the change rather than the requirement when a step changed the option", %{
+      tmp_dir: tmp_dir
+    } do
+      # A step that took `upgrade_from:` away but left the record behind is a
+      # change, and the change is the more specific thing to say about it: it
+      # names what the option was and where to set it.
+      release =
+        release(
+          version_path: tmp_dir,
+          relup: :required,
+          forecastle_upgrade_from: {:baselines, ["rel:some/sample"]}
+        )
+
+      assert_raise Mix.Error, ~r/changed while the build was running/, fn ->
+        Forecastle.generate_relup(release)
+      end
+    end
   end
 
   defp release(options) do
     {release_options, struct_options} =
-      Keyword.split(options, [:upgrade_from, :forecastle_baselines, :forecastle_upgrade_from])
+      Keyword.split(options, [
+        :upgrade_from,
+        :relup,
+        :forecastle_baselines,
+        :forecastle_upgrade_from
+      ])
 
     struct!(
       %Mix.Release{

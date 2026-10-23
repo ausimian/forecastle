@@ -1274,6 +1274,27 @@ coverage having compared nothing. So:
   It is a fourth answer to "what does this release name", arrived at after the
   question was settled, and it is refused at generation and again after every
   step has run. See *A late `upgrade_from:` is refused*.
+- **`relup: :required` turns the first of those into a refusal, for a project
+  that asks.** [#56](https://github.com/ausimian/forecastle/issues/56): absence
+  is the right default for a development build, but a release that ships hot
+  upgrades and was built without `upgrade_from:` looked exactly like a good one
+  until it was installed, and that reached a published release candidate
+  downstream. `require_baselines!/1` refuses the pair in `pre_assemble/1`, in
+  `generate_relup/1`, and in `refuse_late_upgrade_from/1` after every step — one
+  function, three call sites, each after the `upgrade_from:` comparison so that a
+  changed option is named as a change. The third is #40's rule applied to this
+  option: a step after `:tar` adding the requirement is visible nowhere else, and
+  two independent review rounds found it missing. **The
+  option decides, never a file**: `--overwrite` leaves an earlier build's relup
+  in place, so a relup in the version path is no evidence that this build made
+  one, and `refuse_unwritten_relup!/1` checks the file only after generation. A
+  project-root `relup` does not satisfy it — the requirement means generated from
+  baselines. `nil` is accepted because `if(cond, do: :required)` produces it;
+  every other value, `true` and `:optional` included, is refused rather than read
+  as "not required". **No environment variable forces it on**, though #56
+  suggested one: a `ref:` baseline build inherits the environment and sets no
+  `upgrade_from:` by design, so a forced requirement would refuse every such
+  build, and the release definition is already a function that can read `CI`.
 - **The target is not checked, and that is a boundary rather than a gap.** At
   this point in the steps list the target is Mix's own output, so there is
   nothing to check that `:assemble` has not already guaranteed. A hand-written
