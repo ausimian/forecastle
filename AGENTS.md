@@ -267,10 +267,11 @@ around it composes instead:
   a restart would. Forecastle ships first; the Castle half is planned for 1.2.0. A
   restart has to source the same file in the same way, and `priv/env_prefix.sh.eex`
   is that: **the canonical form, which Castle copies word for word.** Absolute,
-  or joined to `RELEASE_ROOT` (so `.` never searches `PATH`); set and empty is
-  unset; an explicit `-f`/`-r` check with a fixed message, because `.`'s own
-  wording differs between shells and Castle refuses with the same words;
-  `set -a`, `.`, `set +a`. Do not change one side without the other.
+  or joined to the version's own directory, `$RELEASE_ROOT/releases/$RELEASE_VSN`
+  (so `.` never searches `PATH`); set and empty is unset; an explicit `-f`/`-r`
+  check with a fixed message, because `.`'s own wording differs between shells
+  and Castle refuses with the same words; `set -a`, `.`, `set +a`. Do not change
+  one side without the other.
 
   It is a prefix so that the project's own `env.sh` can use what the file sets.
   It is outside the start-only gate deliberately, which is the opposite of the
@@ -280,12 +281,31 @@ around it composes instead:
   that a broken file stops those too, `bin/castle` included, which the README
   says.
 
-  The file is read twice on a provisional start — once by the version being
-  replaced, if its `env.sh` has the prefix, and again after the re-exec — and the
-  peer reads it over an environment that already holds its values. So it has to
-  be idempotent, and the README says that rather than the prefix guarding
-  against a second read: a guard is state exported across the re-exec, which the
-  provisional-version entry below forbids. The launcher-computed `RELEASE_*`
+  **A relative name is per version, and that is the point of it.** The file is an
+  input to one version's configuration, so it lives in that version's directory
+  under the release root, where its `env.sh` is: a rollback reads the file its
+  version was installed with, a refused install leaves the running version's
+  file alone, and `remove` deletes it with the directory. That is beside
+  `sys.config` only on the default layout. A deployment that moved its releases
+  directory with `RELDIR` or `{sasl, releases_dir}` keeps `sys.config` in the
+  handler's directory and the file beside `env.sh` under the root, where
+  `remove` does not reach it - the same split as the launcher's other files.
+  The deployment writes it after `unpack`; it is not in the tarball, which would
+  put secrets in a build artefact. It was joined to `RELEASE_ROOT` at first,
+  which made it one file for every version and coupled a version's
+  configuration to whatever the deployment had last written. An absolute name
+  still means that, for a deployment that wants it.
+  `RELEASE_VSN` is the version being configured in every place the file is read:
+  the launcher exports it before sourcing `env.sh`, including after the re-exec
+  into a provisional version, and Castle's peer is started with it.
+
+  A provisional start reads two files — the replaced version's, if its `env.sh`
+  has the prefix, and the provisional version's after the re-exec — and the
+  peer reads the target's over an environment that already holds the running
+  version's values. So a file has to be idempotent, a variable an earlier file
+  set survives unless this one `unset`s it, and the README says that rather than
+  the prefix guarding against a second read: a guard is state exported across
+  the re-exec, which the provisional-version entry below forbids. The launcher-computed `RELEASE_*`
   variables are not protected from the file either, as they are not from a
   project's own `env.sh`.
 

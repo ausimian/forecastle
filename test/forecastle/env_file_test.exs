@@ -25,14 +25,17 @@ defmodule Forecastle.EnvFileTest do
   setup_all do
     deploy = deployment(assemble!(into: "env-file"))
 
-    file = Path.join(deploy.root, "etc/castle.env")
+    # Where a relative name finds it: the version's own directory, as the
+    # deployment would write it after unpacking. The started-node case names the
+    # same file absolutely.
+    file = Path.join(deploy.root, "releases/0.1.0/etc/castle.env")
     File.mkdir_p!(Path.dirname(file))
     File.write!(file, @contents)
 
     {:ok, deploy: deploy}
   end
 
-  test "an eval resolves runtime.exs over the file, named relative to the release root",
+  test "an eval resolves runtime.exs over the file, named relative to the version",
        %{deploy: deploy} do
     env = [{"CASTLE_ENV_FILE", "etc/castle.env"}]
 
@@ -47,7 +50,7 @@ defmodule Forecastle.EnvFileTest do
     suffix = System.unique_integer([:positive])
 
     env = [
-      {"CASTLE_ENV_FILE", Path.join(deploy.root, "etc/castle.env")},
+      {"CASTLE_ENV_FILE", Path.join(deploy.root, "releases/0.1.0/etc/castle.env")},
       {"RELEASE_NODE", "sample_env_file_#{suffix}"}
     ]
 

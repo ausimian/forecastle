@@ -21,6 +21,10 @@ defmodule Forecastle.EnvFileScriptTest do
 
   @missing "which is not a readable file"
 
+  # The version the launcher exports before it sources env.sh, and so the
+  # directory a relative name is joined to.
+  @vsn "1.2.3"
+
   setup %{tmp_dir: root} do
     # Where the launcher's working directory is, kept apart from RELEASE_ROOT so
     # that a relative name resolved against the wrong one finds nothing - or
@@ -119,13 +123,36 @@ defmodule Forecastle.EnvFileScriptTest do
   end
 
   describe "a relative name" do
-    test "is resolved against RELEASE_ROOT", %{root: root, cwd: cwd} do
-      env_file(root, "etc/castle.env", "FROM_FILE=release-root\n")
+    test "is resolved against the version's own directory", %{root: root, cwd: cwd} do
+      env_file(version_dir(root), "etc/castle.env", "FROM_FILE=version\n")
 
       run = run(root, cwd, [{"CASTLE_ENV_FILE", "etc/castle.env"}])
 
       assert run.status == 0
-      assert run.env["FROM_FILE"] == "release-root"
+      assert run.env["FROM_FILE"] == "version"
+    end
+
+    # Each version reads its own file, which is what makes the file the
+    # version's: a rollback reads the one its version was installed with.
+    test "follows RELEASE_VSN", %{root: root, cwd: cwd} do
+      env_file(version_dir(root), "castle.env", "FROM_FILE=#{@vsn}\n")
+      env_file(Path.join(root, "releases/1.2.4"), "castle.env", "FROM_FILE=1.2.4\n")
+
+      run = run(root, cwd, [{"CASTLE_ENV_FILE", "castle.env"}, {"RELEASE_VSN", "1.2.4"}])
+
+      assert run.env["FROM_FILE"] == "1.2.4"
+    end
+
+    # It was joined to RELEASE_ROOT once, which made it one file for every
+    # version; a file left there is not read.
+    test "is not resolved against RELEASE_ROOT", %{root: root, cwd: cwd} do
+      env_file(root, "castle.env", "FROM_FILE=release-root\n")
+
+      run = run(root, cwd, [{"CASTLE_ENV_FILE", "castle.env"}])
+
+      assert run.status != 0
+      assert run.stderr =~ "#{Path.join(version_dir(root), "castle.env")}, #{@missing}"
+      refute Map.has_key?(run.env, "FROM_FILE")
     end
 
     test "is not resolved against the working directory", %{root: root, cwd: cwd} do
@@ -134,7 +161,7 @@ defmodule Forecastle.EnvFileScriptTest do
       run = run(root, cwd, [{"CASTLE_ENV_FILE", "castle.env"}])
 
       assert run.status != 0
-      assert run.stderr =~ "#{Path.join(root, "castle.env")}, #{@missing}"
+      assert run.stderr =~ "#{Path.join(version_dir(root), "castle.env")}, #{@missing}"
       refute Map.has_key?(run.env, "FROM_FILE")
     end
 
@@ -208,6 +235,8 @@ defmodule Forecastle.EnvFileScriptTest do
 
   ## The sandbox
 
+  defp version_dir(root), do: Path.join(root, "releases/#{@vsn}")
+
   defp env_file(dir, name, contents) do
     path = Path.join(dir, name)
     File.mkdir_p!(Path.dirname(path))
@@ -226,8 +255,12 @@ defmodule Forecastle.EnvFileScriptTest do
 
     File.write!(script, "set -e\n" <> prefix() <> consumer())
 
-    {empty, set} =
-      Enum.split_with([{"RELEASE_ROOT", root} | env], &(elem(&1, 1) == ""))
+    # What the launcher exports before it sources env.sh, unless the test says
+    # otherwise.
+    launcher = [{"RELEASE_ROOT", root}, {"RELEASE_VSN", @vsn}]
+    env = Enum.reject(launcher, fn {name, _} -> List.keymember?(env, name, 0) end) ++ env
+
+    {empty, set} = Enum.split_with(env, &(elem(&1, 1) == ""))
 
     assignments = Enum.map_join(empty, "", fn {name, _} -> "#{name}= " end)
 
