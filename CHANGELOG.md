@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- %% CHANGELOG_ENTRIES %% -->
 
+## 1.2.0-rc.1 - 2026-10-26
+
+### Added
+
+- `CASTLE_ENV_FILE`: a release's `env.sh` now sources the file this variable
+  names, for every launcher command and before the project's own `env.sh`
+  content. A Castle that supports the file
+  ([castle#56](https://github.com/ausimian/castle/issues/56)) reads it too when a
+  hot install or a commit resolves the target's configuration, so a hot install
+  and a restart configure the release from the same values. A relative path names
+  a file in the version's own directory, `releases/<vsn>/`, so each version is
+  configured from its own file; an absolute path names one file for every
+  version. A file that is missing, unreadable or fails stops the command. See
+  *Environment file* in the README.
+  ([forecastle#60](https://github.com/ausimian/forecastle/issues/60))
+
 ## 1.1.0 - 2026-10-23
 
 ### Added
