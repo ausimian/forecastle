@@ -1,0 +1,44 @@
+# --- Forecastle: CASTLE_ENV_FILE (generated, do not edit) ---
+#
+# Sources the file the supervisor names in CASTLE_ENV_FILE, over the environment
+# the launcher was started with, so that a restart configures this version from
+# it. A Castle that supports the file (castle#56) sources it in exactly this way
+# when a hot install or a commit resolves this version's configuration, and that
+# is what makes a hot install and a restart agree. Change the two together or
+# not at all.
+#
+# Every command, not only the ones that start the system: `eval` runs
+# runtime.exs too, and a file that sets RELEASE_COOKIE or RELEASE_NODE has to
+# reach `rpc`, `remote` and `stop`, or they cannot find the node. The consequence
+# is that a broken file stops those as well, `bin/castle` included.
+#
+# A prefix, ahead of the project's own env.sh, so that it can use what the file
+# sets. Unset or empty, nothing happens.
+#
+# A relative name is joined to RELEASE_ROOT, so the path `.` is given always has
+# a slash in it: given a bare name, `.` searches PATH rather than the directory.
+# The readability check is explicit so that the message is the same under every
+# shell, and so that Castle can refuse an install with the same words.
+#
+# The file is read twice on a start that re-execs into a provisional version,
+# and Castle's peer reads it over an environment that already holds its values,
+# so it must be idempotent: assignments and `unset`, never `PATH=$PATH:...`.
+# Nothing guards against reading it twice, because a guard would be state
+# exported across the re-exec.
+if [ -n "${CASTLE_ENV_FILE-}" ]; then
+  case $CASTLE_ENV_FILE in
+    /*) castle_env_file=$CASTLE_ENV_FILE ;;
+    *)  castle_env_file=$RELEASE_ROOT/$CASTLE_ENV_FILE ;;
+  esac
+  if ! [ -f "$castle_env_file" ] || ! [ -r "$castle_env_file" ]; then
+    printf '%s\n' "ERROR: CASTLE_ENV_FILE names $castle_env_file, which is not a readable file" >&2
+    exit 1
+  fi
+  set -a
+  . "$castle_env_file"
+  set +a
+  unset castle_env_file
+fi
+
+# --- Forecastle: end CASTLE_ENV_FILE ---
+

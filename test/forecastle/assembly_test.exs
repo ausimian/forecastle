@@ -479,7 +479,11 @@ defmodule Forecastle.AssemblyTest do
       assert env_sh =~ "can run and restart but cannot unpack or install upgrades"
       assert env_sh =~ "If the release root should be writable"
       assert env_sh =~ "restart before upgrading"
-      refute env_sh =~ ~r/^\s*exit 1\s*$/m
+
+      # Of the Castle integration only. The CASTLE_ENV_FILE prefix ahead of it
+      # does stop the launcher, deliberately, when the file it names is unusable.
+      [_, integration] = String.split(env_sh, "Forecastle: Castle integration", parts: 2)
+      refute integration =~ ~r/^\s*exit 1\s*$/m
     end
 
     test "comes after the project's own customization", %{env_sh: env_sh} do
@@ -494,6 +498,41 @@ defmodule Forecastle.AssemblyTest do
 
       assert env_sh =~ "export SAMPLE_ENV_MARKER=preserved"
       refute env_sh =~ "Castle."
+      refute env_sh =~ "CASTLE_ENV_FILE"
+    end
+  end
+
+  describe "env.sh's CASTLE_ENV_FILE prefix" do
+    # What the prefix does when it runs is `Forecastle.EnvFileScriptTest`'s; what
+    # is asserted here is where assembly put it.
+    setup %{forecastle: forecastle} do
+      {:ok, env_sh: File.read!(Path.join(forecastle, "releases/#{@vsn}/env.sh"))}
+    end
+
+    test "comes ahead of the project's own customization", %{env_sh: env_sh} do
+      {prefix, _} = :binary.match(env_sh, "Forecastle: end CASTLE_ENV_FILE")
+      {marker, _} = :binary.match(env_sh, "export SAMPLE_ENV_MARKER")
+      {castle, _} = :binary.match(env_sh, "Forecastle: Castle integration")
+
+      assert prefix < marker
+      assert marker < castle
+    end
+
+    test "leaves the project's #! line first", %{env_sh: env_sh} do
+      assert env_sh =~ ~r/\A#!\/bin\/sh\n# --- Forecastle: CASTLE_ENV_FILE /
+    end
+
+    test "is in the release once", %{env_sh: env_sh} do
+      assert length(:binary.matches(env_sh, "Forecastle: CASTLE_ENV_FILE")) == 1
+    end
+
+    test "runs for every command, outside the start-only gate", %{env_sh: env_sh} do
+      # `eval` runs runtime.exs as a start does, and a file carrying the cookie or
+      # the node name has to reach `rpc`, `remote` and `stop`.
+      {prefix, _} = :binary.match(env_sh, "Forecastle: end CASTLE_ENV_FILE")
+      {gate, _} = :binary.match(env_sh, "case $RELEASE_COMMAND in")
+
+      assert prefix < gate
     end
   end
 

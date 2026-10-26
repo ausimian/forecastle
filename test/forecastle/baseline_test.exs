@@ -240,6 +240,7 @@ defmodule Forecastle.BaselineTest do
       # candidate name on the assumption that it must be this run's - is the
       # worktree-prune mistake with a different directory.
       other = Path.join(cache_dir(), ".staging-99999-deadbeefdeadbeef")
+      on_exit(fn -> File.rm_rf!(other) end)
       File.mkdir_p!(other)
       File.write!(Path.join(other, "half-unpacked"), "")
 
@@ -266,6 +267,9 @@ defmodule Forecastle.BaselineTest do
           [{~c"nothing", to_charlist(Path.join(ctx.dir, "empty/nothing"))}],
           [:compressed]
         )
+
+      # Unpacked and published before the missing `.rel` is noticed.
+      record_digest!(empty)
 
       assert_raise Mix.Error, ~r/Is it a release tarball\?/, fn ->
         Baseline.resolve!("tar:#{empty}", :release)
@@ -578,9 +582,18 @@ defmodule Forecastle.BaselineTest do
     # it is written under the `_build` this suite is running in, and a suite that
     # leaves rubbish behind is a suite whose next run starts from somewhere
     # slightly different.
+    #
+    # **Only this suite's own entries, never the whole directory.** It is the
+    # project's `_build/castle/baselines`, which `mix test.parallel` shares
+    # between workers, and `Forecastle.DownstreamUpgradeTest` resolves a `tar:`
+    # baseline into it from another one. Clearing the directory removed that
+    # suite's staging directory, or the entry it was copying, out from under it.
     on_exit(fn ->
+      for digest <- dir |> digests() |> Enum.uniq() do
+        File.rm_rf!(Path.join(cache_dir(), "tar-" <> digest))
+      end
+
       File.rm_rf!(dir)
-      File.rm_rf!(cache_dir())
     end)
 
     {:ok, dir: dir, tree: tree, tarball: tarball}
@@ -606,6 +619,31 @@ defmodule Forecastle.BaselineTest do
           do: {to_charlist(entry), to_charlist(Path.join(tree, entry))}
 
     :ok = :erl_tar.create(to_charlist(tarball), members, [:compressed])
+
+    record_digest!(tarball)
+  end
+
+  # Every archive the cache may key an entry on, including one a test writes over
+  # its predecessor, is recorded for the teardown in `release_tarball/1` to
+  # remove.
+  defp record_digest!(tarball) do
+    File.write!(digests_file(Path.dirname(tarball)), digest(tarball) <> "\n", [:append])
+  end
+
+  defp digests_file(dir), do: Path.join(dir, "digests")
+
+  defp digests(dir) do
+    case File.read(digests_file(dir)) do
+      {:ok, contents} -> String.split(contents, "\n", trim: true)
+      {:error, :enoent} -> []
+    end
+  end
+
+  # `Forecastle.Baseline`'s key for a `tar:` entry: the SHA-256 of the archive.
+  defp digest(path) do
+    :sha256
+    |> :crypto.hash(File.read!(path))
+    |> Base.encode16(case: :lower)
   end
 
   defp cache_dir do
