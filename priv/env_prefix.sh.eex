@@ -15,20 +15,26 @@
 # A prefix, ahead of the project's own env.sh, so that it can use what the file
 # sets. Unset or empty, nothing happens.
 #
-# A relative name is joined to RELEASE_ROOT, so the path `.` is given always has
-# a slash in it: given a bare name, `.` searches PATH rather than the directory.
+# A relative name is joined to this version's own directory under the release
+# root, $RELEASE_ROOT/releases/$RELEASE_VSN, where this env.sh is - so each
+# version reads its own file, and a rollback reads the file the version it
+# returns to was installed with. An absolute name is one file for every
+# version. Either way the path `.` is given has a slash in it: given a bare
+# name, `.` searches PATH rather than the directory.
 # The readability check is explicit so that the message is the same under every
 # shell, and so that Castle can refuse an install with the same words.
 #
-# The file is read twice on a start that re-execs into a provisional version,
-# and Castle's peer reads it over an environment that already holds its values,
-# so it must be idempotent: assignments and `unset`, never `PATH=$PATH:...`.
-# Nothing guards against reading it twice, because a guard would be state
-# exported across the re-exec.
+# A start that re-execs into a provisional version reads the replaced
+# version's file and then the provisional version's over it, and Castle's peer
+# reads the target's over the running node's environment. So a variable an
+# earlier file set survives unless this one unsets it, and the file must be
+# idempotent: assignments and `unset`, never `PATH=$PATH:...`. Nothing guards
+# against a second read, because a guard would be state exported across the
+# re-exec.
 if [ -n "${CASTLE_ENV_FILE-}" ]; then
   case $CASTLE_ENV_FILE in
     /*) castle_env_file=$CASTLE_ENV_FILE ;;
-    *)  castle_env_file=$RELEASE_ROOT/$CASTLE_ENV_FILE ;;
+    *)  castle_env_file=$RELEASE_ROOT/releases/$RELEASE_VSN/$CASTLE_ENV_FILE ;;
   esac
   if ! [ -f "$castle_env_file" ] || ! [ -r "$castle_env_file" ]; then
     printf '%s\n' "ERROR: CASTLE_ENV_FILE names $castle_env_file, which is not a readable file" >&2

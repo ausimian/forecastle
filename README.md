@@ -117,23 +117,35 @@ Projects may supply `rel/env.sh.eex`. Its contents run after the
 ### Environment file
 
 A deployment whose `runtime.exs` reads environment variables can keep them in
-one file and name it in `CASTLE_ENV_FILE`. A restart then reads the file through
-`env.sh`. A Castle that supports the file
+a file per version and name it in `CASTLE_ENV_FILE`. A start then reads the
+file through `env.sh`. A Castle that supports the file
 ([castle#56](https://github.com/ausimian/castle/issues/56)) reads it too, when a
 hot install or a commit resolves the new version's configuration, so both
 configure the release from the same values. Set `CASTLE_ENV_FILE` where the
 supervisor starts the release, for example in a systemd unit or a container
-spec. Changing it requires a restart.
+spec. It stays the same from one version to the next, and changing it requires
+a restart.
+
+```ini
+# systemd unit
+Environment=CASTLE_ENV_FILE=castle.env
+```
 
 ```sh
-# /etc/myapp/castle.env
+# releases/1.4.0/castle.env, written by the deployment after unpacking 1.4.0
 DATABASE_URL=ecto://db.internal/myapp
 FEATURE_X=on
 unset LEGACY_FLAG
 ```
 
-- The path is absolute or relative to the release root. When the variable is
-  unset or empty, nothing happens.
+- A relative path names a file in the version's own directory under the
+  release root, `releases/<vsn>/`, where its `env.sh` is. Each version reads
+  its own file, so a rollback reads the file the version it returns to was
+  installed with, and removing a version removes its file. The file is not part
+  of the release tarball: whatever deploys a version writes it after
+  `bin/castle unpack` and before `bin/castle install`.
+- An absolute path names one file that every version reads. When the variable
+  is unset or empty, nothing happens.
 - The file is a shell script, run by `/bin/sh` with `set -a`, so each plain
   `KEY=value` line is exported.
 - It runs before the project's own `env.sh` content, which can use the values,
@@ -145,14 +157,15 @@ unset LEGACY_FLAG
   in the file that fails also stops it. That includes `bin/<app> stop` and every
   `bin/castle` command. A Castle that supports the file refuses an install or
   commit in the same cases.
-- To remove a variable, write `unset NAME`. That removes it at boot, even when
-  the supervisor set it, and at a hot install. Deleting the line instead leaves
-  the old value in the running node's environment, and so in the next hot
-  install, until the next restart.
-- The file can be read more than once over an environment that already holds
-  its values: a restart into a pending version reads it twice, and Castle reads
-  it over the running node's environment. So write assignments and `unset`, and
-  do not append to an existing value, as `PATH=$PATH:/opt/bin` does.
+- To remove a variable that an earlier version's file set, write `unset NAME`.
+  That removes it at boot, even when the supervisor set it, and at a hot
+  install. Leaving the line out is not enough: the running node holds the old
+  value from its own file, Castle reads the new file over the node's
+  environment, and a restart into a pending version reads the pending version's
+  file over the replaced version's. The value survives until a plain restart.
+- So a file can be read over an environment that already holds values from it,
+  or from another version's. Write assignments and `unset`, and do not append
+  to an existing value, as `PATH=$PATH:/opt/bin` does.
 - Do not set `RELEASE_ROOT`, `RELEASE_VSN`, `RELEASE_COMMAND`, `RELEASE_NAME` or
   `CASTLE_ENV_FILE` in it. The launcher has already acted on them, which is also
   true of a project's own `env.sh`.
@@ -161,6 +174,7 @@ The fragment is in releases built by this version of Forecastle onwards. Until
 the permanent version is one of those, `bin/castle` and other `rpc` commands do
 not read the file, and neither does the first pass of a restart into a pending
 version. The pending version's own `env.sh` reads it before the node boots.
+`rpc` commands, `bin/castle` among them, read the permanent version's file.
 There is no equivalent for the Windows `.bat` launcher.
 
 Forecastle does not alter runtime configuration. Mix retains control of
