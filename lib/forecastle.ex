@@ -953,13 +953,34 @@ defmodule Forecastle do
     end
   end
 
+  # The CASTLE_ENV_FILE fragment goes in front of the project's own env.sh, so
+  # that the project can use what the file sets, and the Castle integration goes
+  # after it, so that the project's settings are in place before it runs. A
+  # leading `#!` line stays first; the file is sourced, so it is only a label,
+  # but a label that is no longer on the first line is a confusing one.
   defp extend_env_script(%Mix.Release{version_path: vp} = release) do
     env_sh = Path.join(vp, "env.sh")
 
     if unix_executables?(release) and File.exists?(env_sh) do
-      File.write!(env_sh, render("env.sh.eex", release), [:append])
+      {shebang, body} = env_sh |> File.read!() |> split_shebang()
+
+      File.write!(env_sh, [
+        shebang,
+        render("env_prefix.sh.eex", release),
+        body,
+        render("env.sh.eex", release)
+      ])
     end
   end
+
+  defp split_shebang("#!" <> _ = script) do
+    case :binary.split(script, "\n") do
+      [line, body] -> {line <> "\n", body}
+      [line] -> {line <> "\n", ""}
+    end
+  end
+
+  defp split_shebang(script), do: {"", script}
 
   defp unix_executables?(%Mix.Release{} = release) do
     :unix in executables_for(release)

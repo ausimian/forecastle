@@ -10,8 +10,8 @@ defmodule Forecastle.Deployment do
   RPC expressions, and supervises one-stage emulator restarts. Tests define
   their own success criteria; see `Forecastle.UpgradeCase` for an example.
 
-  Commands unset inherited emulator flags and release-launcher defaults before
-  applying the environment supplied by the caller. This keeps the deployment
+  Commands unset inherited emulator flags, release-launcher defaults and
+  `CASTLE_ENV_FILE` before applying the environment supplied by the caller. This keeps the deployment
   independent of the shell or CI process running the test.
   """
 
@@ -101,13 +101,20 @@ defmodule Forecastle.Deployment do
   # of them announces itself. Kept as a rule rather than as a list somebody
   # remembers to extend: `Forecastle.DownstreamUpgradeTest` reads the defaults
   # out of the launcher Mix generated and requires this to cover them.
+  #
+  # `CASTLE_ENV_FILE` is the supervisor's, and names a file sourced by every
+  # launcher command (#60), so one inherited from the shell running the tests
+  # would configure the deployment from a file the test never wrote - or refuse
+  # every command if the file is not there. A test that wants one says so in
+  # `:env`.
   @scrubbed ~w(MIX_ENV MIX_BUILD_PATH MIX_BUILD_ROOT MIX_DEPS_PATH MIX_TARGET
                MIX_QUIET MIX_DEBUG ERL_LIBS ELIXIR_ERL_OPTIONS ERL_AFLAGS
                ERL_FLAGS ERL_ZFLAGS RELEASE_VM_ARGS RELEASE_REMOTE_VM_ARGS
                RELEASE_ROOT RELEASE_NAME RELEASE_PROG RELEASE_MODE
                RELEASE_DISTRIBUTION RELEASE_BOOT_SCRIPT
                RELEASE_BOOT_SCRIPT_CLEAN RELEASE_SYS_CONFIG
-               RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP)
+               RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP
+               CASTLE_ENV_FILE)
 
   @doc """
   Describes an existing release tree.
@@ -747,8 +754,8 @@ defmodule Forecastle.Deployment do
   @doc """
   Returns the environment used for deployment commands.
 
-  It unsets inherited emulator flags and Mix launcher defaults, then applies the
-  caller's entries.
+  It unsets inherited emulator flags, Mix launcher defaults and
+  `CASTLE_ENV_FILE`, then applies the caller's entries.
   """
   @spec scrubbed_env(env()) :: env()
   def scrubbed_env(extra \\ []) do

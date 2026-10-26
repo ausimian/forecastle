@@ -14,8 +14,9 @@ around `:assemble`:
   `relup` and an `upgrade_from:` option together, reads and checks the appup
   sources in `rel/appups`, and adds a `:preboot` boot script that starts
   `:sasl`, `:compiler`, `:elixir` and `:castle`.
-- **`post_assemble/1`** — writes `bin/castle` and `bin/start`, appends the Castle
-  hook to the generated `env.sh`, copies the `.rel` file and any staged `relup`
+- **`post_assemble/1`** — writes `bin/castle` and `bin/start`, puts the
+  `CASTLE_ENV_FILE` prefix at the start of the generated `env.sh` and appends the
+  Castle hook to its end, copies the `.rel` file and any staged `relup`
   into the release, and places the staged `rel/appups` sources at
   `lib/<app>-<vsn>/ebin/<app>.appup`.
 - **`generate_relup/1`** — generates this release's relup from its
@@ -258,9 +259,41 @@ around it composes instead:
   `bin/castle upgradable` asks the question on its own, for an operator who wants
   to know where a system stands without staging anything. It is a plain command
   like `releases`, gates nothing, and says nothing when the answer is yes.
+- **The `CASTLE_ENV_FILE` prefix is the one part of `env.sh` that runs for every
+  command, and it comes first.** [#60](https://github.com/ausimian/forecastle/issues/60),
+  the boot half of castle#56, under which Castle's peer sources the file a
+  supervisor names in `CASTLE_ENV_FILE` over the node's environment before it
+  resolves a target's configuration, so a hot install configures the target as
+  a restart would. Forecastle ships first; the Castle half is planned for 1.2.0. A
+  restart has to source the same file in the same way, and `priv/env_prefix.sh.eex`
+  is that: **the canonical form, which Castle copies word for word.** Absolute,
+  or joined to `RELEASE_ROOT` (so `.` never searches `PATH`); set and empty is
+  unset; an explicit `-f`/`-r` check with a fixed message, because `.`'s own
+  wording differs between shells and Castle refuses with the same words;
+  `set -a`, `.`, `set +a`. Do not change one side without the other.
+
+  It is a prefix so that the project's own `env.sh` can use what the file sets.
+  It is outside the start-only gate deliberately, which is the opposite of the
+  suffix and for a reason that does not apply to it: it consumes no marker and
+  starts nothing, and a file carrying `RELEASE_COOKIE` or `RELEASE_NODE` has to
+  reach `rpc`, `remote` and `stop`, or they cannot find the node. The cost is
+  that a broken file stops those too, `bin/castle` included, which the README
+  says.
+
+  The file is read twice on a provisional start — once by the version being
+  replaced, if its `env.sh` has the prefix, and again after the re-exec — and the
+  peer reads it over an environment that already holds its values. So it has to
+  be idempotent, and the README says that rather than the prefix guarding
+  against a second read: a guard is state exported across the re-exec, which the
+  provisional-version entry below forbids. The launcher-computed `RELEASE_*`
+  variables are not protected from the file either, as they are not from a
+  project's own `env.sh`.
+
+  `Forecastle.EnvFileScriptTest` runs it; `Forecastle.EnvFileTest` is the real
+  launcher, through `eval`, `daemon` and `rpc`.
 - The `env.sh` fragment expands no configuration and applies none of the
   launcher's defaults. It is appended, so a project's own `rel/env.sh.eex`
-  survives and runs first, and everything in it is gated on
+  survives and runs before it, and everything in it is gated on
   `$RELEASE_COMMAND` naming a command that starts the system — so an `eval`, an
   `rpc` or a `remote` reaches none of it. That gate is not tidiness: `bin/castle`
   drives every command through `rpc`, so a fragment that ran for those would
@@ -3162,6 +3195,7 @@ them `deploy` becoming `deploy.root`.
 | `lib/mix/tasks/castle.relup.ex` | `mix castle.relup` — the command line over `Forecastle.Relup`: argument handling, `--target`, `--outdir`, `--dry-run` and the strategy switches |
 | `priv/castle.sh.eex` | EEx template for `bin/castle`, the release management CLI |
 | `priv/env.sh.eex` | EEx template for the fragment appended to the release's `env.sh` |
+| `priv/env_prefix.sh.eex` | EEx template for the `CASTLE_ENV_FILE` fragment put at the start of the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it, and which ships no appup of its own when `SAMPLE_DEP_APPUP=none` |
@@ -3218,6 +3252,8 @@ directory to start from a clean slate.
 | `test/forecastle/assembly_test.exs` | The assembled tree, including `bin/<name>` being byte-identical to the launcher plain Mix produces |
 | `test/forecastle/castle_cli_test.exs` | `bin/castle` as a shell script, against a launcher stub that records its arguments |
 | `test/forecastle/env_script_test.exs` | The `env.sh` fragment as a shell script, sourced in a release-shaped directory with a launcher stub: the heart environment it leaves behind, and which provisional version each state of the two markers selects |
+| `test/forecastle/env_file_script_test.exs` | The `CASTLE_ENV_FILE` prefix as a shell script: what it exports, where a relative name resolves, `unset`, and the files it refuses |
+| `test/forecastle/env_file_test.exs` | The prefix through a real launcher: `eval` and a started node configured from the file, and a missing file stopping both. Tagged `:e2e` |
 | `test/forecastle/configuration_test.exs` | A release that names its own runtime configuration file and declares providers whose init arguments are not keyword lists — assembled, and booted through `bin/<name> eval` |
 | `test/forecastle/relup_test.exs` | `mix castle.relup` as a command, against three assembled releases: argument handling, exit status, all three upgrade strategies, and `--dry-run` against an ordinary run of the same command |
 | `test/forecastle/assembly_relup_test.exs` | The relup a single `mix release` produces from `upgrade_from:` — in the version path and in the tarball — what the option does when it names nothing, and what happens when a step of the project's changes it after the build has started |

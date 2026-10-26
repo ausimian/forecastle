@@ -690,6 +690,13 @@ defmodule Forecastle.DeploymentTest do
       assert {"MIX_ENV", nil} in Deployment.scrubbed_env()
     end
 
+    test "unsets the environment file a supervisor would name" do
+      # Every launcher command sources it, so one inherited from the shell
+      # running the tests configures the release from a file the test never
+      # wrote, or stops every command when the file is not there.
+      assert {"CASTLE_ENV_FILE", nil} in Deployment.scrubbed_env()
+    end
+
     test "unsets what would redirect the launcher to another project's args file" do
       # Sharper than an extra flag: these do not add anything, they send the
       # launcher to a different `vm.args` entirely, which presents as a bug in
