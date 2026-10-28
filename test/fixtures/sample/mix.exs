@@ -50,7 +50,20 @@ defmodule Sample.MixProject do
       # one, so that "release_handler knows its version changed" is observable
       # from outside the system. See dep/mix.exs.
       {:sample_dep, path: "dep"}
-    ]
+    ] ++ added_apps()
+  end
+
+  # Switched by the test suite so that the fixture can be assembled as a version
+  # that adds applications to the release. `:sample_a` and `:sample_c` each
+  # depend on `:sample_b`, and the three sort so that the `.rel` order starts one
+  # of the dependents too early and stops the dependency too early. See
+  # `added/sample_b/mix.exs`.
+  defp added_apps do
+    if System.get_env("SAMPLE_ADDED_APPS") == "true" do
+      for app <- [:sample_a, :sample_b, :sample_c], do: {app, path: "added/#{app}"}
+    else
+      []
+    end
   end
 
   # A `fn -> ... end` thunk, which is the shape Castle's own documentation

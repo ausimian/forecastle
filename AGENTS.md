@@ -835,6 +835,37 @@ perfectly well from an appup entry that names exactly this from-version.
 Applications merely added or removed are left to `:systools`, whose
 `add_application` and `remove_application` are hot.
 
+**`:systools` starts and stops those applications in `.rel` order, and the
+generated script is reordered after it**
+([#66](https://github.com/ausimian/forecastle/issues/66)). Verified against OTP
+28.3, `sasl-4.3`: `systools_relup` makes one `add_application` or
+`remove_application` per application in the order of the `.rel` it came from, and
+`systools_rc` sorts by dependency only between modules, never by an
+application's `applications` key. Mix writes the `.rel` with the project first
+and the rest alphabetically, so an added application could start before an added
+application it depends on. `release_handler_1:eval/2` ignores what an `apply`
+returns, so the `{error, {not_started, Dep}}` failed nothing: the install
+succeeded and the application stayed stopped until the next restart, whose boot
+script `systools_make` *does* sort by dependency. `order_applications/4` puts
+that right on the term `make_relup/4` returns, which `noexec` is what makes
+possible. Which applications move comes from the two `.rel` files, not from the
+script, and their dependencies (`applications` and `included_applications`) from
+the `.app` of the release each one is in.
+
+**The `apply`s are gathered into one block, not swapped where they stand.** The
+issue assumed every module was loaded by `point_of_no_return`; measured, it is
+not. After it, an added application's part of the script is its modules'
+`{load, ...}` followed by its `start`, application by application, and a removed
+one's is its `stop`, then `remove` and `purge` for its modules, then `unload`. A
+`start` swapped into an earlier slot runs before its own modules are loaded, and
+a `stop` swapped into a later one runs after they are gone. So the starts go
+where the last of them was and the stops where the first of them was, sorted;
+nothing else moves, and a project `apply` after the last start still runs after
+every added application has started. Applications with no dependency between
+them keep the order `:systools` gave them, and a cycle is refused.
+`Forecastle.AddedAppsUpgradeTest` asserts both the relup and a real hot install
+and downgrade.
+
 **Matching an appup from-version is `systools_relup`'s job, not a string
 compare.** Verified against OTP 28.3, `sasl-4.3`:
 
@@ -3218,6 +3249,7 @@ them `deploy` becoming `deploy.root`.
 | `priv/env_prefix.sh.eex` | EEx template for the `CASTLE_ENV_FILE` fragment put at the start of the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
+| `test/fixtures/sample/added` | Three applications a build with `SAMPLE_ADDED_APPS=true` adds to the release. `:sample_a` and `:sample_c` depend on `:sample_b`, and each records when it starts and stops |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it, and which ships no appup of its own when `SAMPLE_DEP_APPUP=none` |
 | `test/support` | The workspace the fixture is built in, the case template for tests that assemble it, `mix castle.relup` between two of them, and `mix test.parallel`. Everything here knows the sample by name, which is why none of it is in `lib` |
 
@@ -3286,6 +3318,7 @@ directory to start from a clean slate.
 | `test/forecastle/deployment_test.exs` | The shipped harness without a running system: laying a baseline out, the modes it preserves, the destinations it refuses, what it leaves the cache holding, and the environment scrub |
 | `test/forecastle/upgrade_case_test.exs` | `use Forecastle.UpgradeCase` on its own, which is how a project takes it and which every other suite here pairs with `Forecastle.ReleaseCase`: the alias, the timeout, and the scratch directory it names |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
+| `test/forecastle/added_apps_upgrade_test.exs` | A hot upgrade that adds applications and the downgrade that removes them: the order the relup starts and stops them in, and what a booted release has running after each. Tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 | `test/forecastle/downstream_upgrade_test.exs` | The upgrade test a project outside this repository writes, written that way: `upgrade_from:`, a `tar:` deployment and nothing but shipped API below the build. Tagged `:e2e` |
 
