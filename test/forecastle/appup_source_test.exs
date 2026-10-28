@@ -17,6 +17,8 @@ defmodule Forecastle.AppupSourceTest do
 
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureIO
+
   alias Forecastle.Appup.Source
 
   @moduletag :tmp_dir
@@ -46,9 +48,22 @@ defmodule Forecastle.AppupSourceTest do
     test "reads a single-quoted charlist too", ctx do
       # Deprecated spelling, and still a plain list of integers to the parser -
       # so it needs no clause of its own and must not be refused.
+      #
+      # The file's own deprecation is mentioned exactly once per charlist, by
+      # the evaluation: parsing runs with `emit_warnings: false` because it
+      # happens more than once per read. Captured so the warnings are asserted
+      # rather than printed - one at each charlist's column, and no repeats.
       path = write!(ctx, "{'0.1.1', [{'0.1.0', []}], []}\n")
 
-      assert {:literal, %{term: {~c"0.1.1", [{~c"0.1.0", []}], []}}} = Source.read(path)
+      {read, warnings} = with_io(:stderr, fn -> Source.read(path) end)
+
+      assert {:literal, %{term: {~c"0.1.1", [{~c"0.1.0", []}], []}}} = read
+
+      assert Regex.scan(~r/appup\.exs:(\d+:\d+)/, warnings, capture: :all_but_first) ==
+               [["1:2"], ["1:13"]],
+             "expected one deprecation warning per charlist, got:\n#{warnings}"
+
+      assert length(String.split(warnings, "single-quoted strings to represent charlists")) == 3
     end
 
     test "reads both charlist sigils, which differ in escape processing", ctx do
