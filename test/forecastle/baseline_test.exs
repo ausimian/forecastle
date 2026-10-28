@@ -439,7 +439,9 @@ defmodule Forecastle.BaselineTest do
       assert output =~ "a shimmed git wrote this to standard error"
 
       assert File.dir?(Path.join(field(output, "lib_dir"), "baseline_fixture/ebin"))
-      refute field(output, "lib_dir") =~ "warning"
+      # The shim's own words rather than "warning", which a checkout path can
+      # contain without anything having leaked into it.
+      refute field(output, "lib_dir") =~ "a shimmed git wrote this"
     end
 
     test "builds a project that is not at the top of its repository", ctx do
