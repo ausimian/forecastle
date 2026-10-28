@@ -481,11 +481,35 @@ defmodule Forecastle.Build do
   """
   @spec app_resource!(binary(), atom()) :: {binary(), MapSet.t(module()), boolean()}
   def app_resource!(file, app) do
+    opts = consult_resource!(file, app)
+    {inventory, listed?} = inventory(opts)
+
+    {fetch_vsn!(opts, file), inventory, listed?}
+  end
+
+  @doc false
+  # The applications an application's `.app` file says it depends on: its
+  # `applications` and its `included_applications`, in that order.
+  #
+  # `@doc false` because only `Forecastle.Relup` asks, to order the applications
+  # a relup adds and removes, and it is not something a project calls. It asks
+  # only after `:systools` has accepted the same file, so a value that is not a
+  # list of atoms is read as no dependencies rather than reported again.
+  @spec app_dependencies!(binary(), atom()) :: [atom()]
+  def app_dependencies!(file, app) do
+    opts = consult_resource!(file, app)
+
+    for key <- [:applications, :included_applications],
+        {^key, apps} when is_list(apps) <- [List.keyfind(opts, key, 0)],
+        dep <- apps,
+        is_atom(dep),
+        do: dep
+  end
+
+  defp consult_resource!(file, app) do
     case :file.consult(to_charlist(file)) do
       {:ok, [{:application, ^app, opts}]} when is_list(opts) ->
-        {inventory, listed?} = inventory(opts)
-
-        {fetch_vsn!(opts, file), inventory, listed?}
+        opts
 
       {:ok, terms} ->
         Mix.raise(

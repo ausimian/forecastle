@@ -370,7 +370,7 @@ defmodule Forecastle.Relup do
 
     plan =
       target
-      |> systools_plan!(ups, downs)
+      |> systools_plan!(froms, ups, downs)
       |> refuse_hot_restarts!()
 
     # `--hot` says nothing on success: what it promises is that every transition
@@ -457,7 +457,8 @@ defmodule Forecastle.Relup do
   # matter; what matters is that every from-version survives and that each keeps
   # the script its own direction was classified for.
   defp plan_transitions(target, froms, hot_ups, hot_downs, restart_ups, restart_downs) do
-    {vsn, up_entries, down_entries} = generated = systools_plan!(target, hot_ups, hot_downs)
+    {vsn, up_entries, down_entries} =
+      generated = systools_plan!(target, froms, hot_ups, hot_downs)
 
     plan =
       {vsn, up_entries ++ restart_entries(restart_ups, froms),
@@ -490,7 +491,11 @@ defmodule Forecastle.Relup do
   # it with the one it is about to reject; and a transition `auto` chose to
   # restart has to be merged into the same file as the ones `:systools`
   # generated, which cannot be done once `:systools` has written it.
-  defp systools_plan!(target, ups, downs) do
+  #
+  # And `noexec` is what leaves room to put right the order `:systools` starts
+  # and stops applications in, which it takes from the `.rel` rather than from
+  # their dependencies. See `order_applications/4`.
+  defp systools_plan!(target, froms, ups, downs) do
     args = [
       to_charlist(target.path),
       Enum.map(ups, &to_charlist/1),
@@ -500,7 +505,14 @@ defmodule Forecastle.Relup do
 
     # Through `apply/3`: `:sasl` is not a dependency, so `:systools` is not on
     # the code path this module is compiled against.
-    :systools |> apply(:make_relup, args) |> report()
+    {vsn, up_entries, down_entries} = :systools |> apply(:make_relup, args) |> report()
+
+    {vsn, order_applications(up_entries, :up, target, by_vsn(ups, froms)),
+     order_applications(down_entries, :down, target, by_vsn(downs, froms))}
+  end
+
+  defp by_vsn(paths, froms) do
+    Map.new(paths, &{to_charlist(froms[&1].vsn), froms[&1]})
   end
 
   defp ebin_paths(relpaths) do
@@ -538,6 +550,133 @@ defmodule Forecastle.Relup do
 
   defp format(module, fun, term) do
     module |> apply(fun, [term]) |> to_string() |> String.trim_trailing()
+  end
+
+  ## Starting and stopping applications in dependency order
+
+  # `:systools` makes one `add_application` for each application one release
+  # has and the other lacks, and one `remove_application` for each the other way
+  # round, in the order of the `.rel` they come from. Mix writes that file with
+  # the project's own applications first and the rest alphabetically, so a
+  # dependency can be started after an application that needs it - and
+  # `release_handler` ignores what an `apply` returns, so the
+  # `{error, {not_started, Dep}}` that follows fails nothing: the install
+  # succeeds and the application stays stopped until the node restarts, when the
+  # boot script, which `systools_make` does sort by dependency, starts it. A
+  # `remove_application` stops a dependency while what depends on it is still
+  # running in the same way. ([#66](https://github.com/ausimian/forecastle/issues/66))
+  #
+  # Which applications those are comes from the two `.rel` files rather than from
+  # the script, and the dependencies from the `.app` of the release each
+  # application is in: the target's for one being added on the way up, the
+  # from-release's for one being added on the way down, and the other way round
+  # for one being removed.
+  defp order_applications(entries, direction, target, froms) do
+    for {from_vsn, descr, script} <- entries do
+      {adding, removing} =
+        case direction do
+          :up -> {target, froms[from_vsn]}
+          :down -> {froms[from_vsn], target}
+        end
+
+      script =
+        script
+        |> gather_applys(:start, only_in(adding, removing), adding)
+        |> gather_applys(:stop, only_in(removing, adding), removing)
+
+      {from_vsn, descr, script}
+    end
+  end
+
+  defp only_in(release, other) do
+    for {app, _vsn} <- release.apps,
+        not Map.has_key?(other.apps, app),
+        into: MapSet.new(),
+        do: app
+  end
+
+  # The `apply`s are gathered into one block rather than swapped where they
+  # stand, because each sits beside the instructions for its own application's
+  # modules. After `point_of_no_return`, an added application's script is its
+  # modules' `load`s followed by its `start`, application by application; a
+  # removed one's is its `stop`, then its modules' `remove` and `purge`, then its
+  # `unload`. A `start` swapped into an earlier slot would run before its own
+  # modules were loaded, and a `stop` swapped into a later one after its own
+  # modules were removed.
+  #
+  # So the starts go where the last of them was, which is after every added
+  # module has been loaded, and the stops where the first of them was, which is
+  # before any removed module has gone. Nothing else moves: an instruction placed
+  # after the last start, a project's own `apply` included, still runs after
+  # every added application has started.
+  defp gather_applys(script, kind, apps, release) do
+    indexed = Enum.with_index(script)
+    {moving, staying} = Enum.split_with(indexed, &(applied_app(elem(&1, 0), kind) in apps))
+
+    case moving do
+      [_, _ | _] ->
+        {_, at} = if kind == :start, do: List.last(moving), else: hd(moving)
+        {before, rest} = Enum.split_with(staying, fn {_instr, index} -> index < at end)
+
+        moving =
+          moving
+          |> Enum.map(&elem(&1, 0))
+          |> sort_applys(kind, release)
+
+        Enum.map(before, &elem(&1, 0)) ++ moving ++ Enum.map(rest, &elem(&1, 0))
+
+      _none_or_one ->
+        script
+    end
+  end
+
+  defp applied_app({:apply, {:application, :start, [app, _type]}}, :start), do: app
+  defp applied_app({:apply, {:application, :stop, [app]}}, :stop), do: app
+  defp applied_app(_instruction, _kind), do: nil
+
+  # Starts with each application after the applications it depends on, stops
+  # with each before them. Applications with no dependency between them keep the
+  # order `:systools` gave them.
+  defp sort_applys(applys, kind, release) do
+    apps = applys |> Enum.map(&applied_app(&1, kind)) |> Enum.uniq()
+
+    deps =
+      Map.new(apps, &{&1, Enum.filter(app_dependencies(release, &1), fn dep -> dep in apps end)})
+
+    first =
+      case kind do
+        :start -> deps
+        :stop -> Map.new(apps, fn app -> {app, Enum.filter(apps, &(app in deps[&1]))} end)
+      end
+
+    rank = apps |> dependency_order(first, release) |> Enum.with_index() |> Map.new()
+
+    Enum.sort_by(applys, &rank[applied_app(&1, kind)])
+  end
+
+  defp app_dependencies(release, app) do
+    file = Path.join([lib_dir(release.path), "#{app}-#{release.apps[app]}", "ebin", "#{app}.app"])
+    Forecastle.Build.app_dependencies!(file, app)
+  end
+
+  # Each step takes the earliest application whose predecessors are all placed,
+  # which is what keeps the existing order wherever there is no dependency. A
+  # cycle leaves nothing to take; `systools_make` refuses one in a boot script.
+  defp dependency_order(pending, first, release, placed \\ [])
+
+  defp dependency_order([], _first, _release, placed), do: Enum.reverse(placed)
+
+  defp dependency_order(pending, first, release, placed) do
+    case Enum.find(pending, fn app -> Enum.all?(first[app], &(&1 in placed)) end) do
+      nil ->
+        Mix.raise(
+          "#{inspect(pending)} in #{release.file} depend on each other in a cycle, so there " <>
+            "is no order they can be started or stopped in"
+        )
+
+      app ->
+        dependency_order(List.delete(pending, app), first, release, [app | placed])
+    end
   end
 
   ## Classifying a transition
