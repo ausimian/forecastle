@@ -68,7 +68,13 @@ defmodule Forecastle.AddedAppsUpgradeTest do
 
     downgraded = %{
       started: started(deploy),
-      stops: Deployment.rpc!(deploy, "IO.inspect(:persistent_term.get(:sample_added_stops))")
+      stops: Deployment.rpc!(deploy, "IO.inspect(:persistent_term.get(:sample_added_stops))"),
+      on_path:
+        deploy
+        |> Deployment.rpc!(
+          "IO.inspect(for a <- #{inspect(@added)}, :code.where_is_file(~c\"\#{a}.app\") != :non_existing, do: a)"
+        )
+        |> Code.string_to_quoted!()
     }
 
     {:ok, up: up, down: down, installed: installed, downgraded: downgraded}
@@ -126,6 +132,12 @@ defmodule Forecastle.AddedAppsUpgradeTest do
 
     test "stops dependents before their dependency", %{downgraded: downgraded} do
       assert downgraded.stops == "[:sample_a, :sample_c, :sample_b]"
+    end
+
+    # The other direction of `Forecastle.RemovedAppsUpgradeTest`: a removal
+    # leaves nothing on the code path for an optional dependency to find.
+    test "takes them off the code path", %{downgraded: downgraded} do
+      assert downgraded.on_path == []
     end
   end
 

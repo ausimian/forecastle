@@ -579,13 +579,45 @@ defmodule Forecastle.Relup do
           :down -> {froms[from_vsn], target}
         end
 
+      removed = only_in(removing, adding)
+
       script =
         script
         |> gather_applys(:start, only_in(adding, removing), adding)
-        |> gather_applys(:stop, only_in(removing, adding), removing)
+        |> gather_applys(:stop, removed, removing)
+        |> forget_paths(removed)
 
       {from_vsn, descr, script}
     end
+  end
+
+  # Nothing `:systools` makes of a `remove_application` touches the code path:
+  # it stops the application, removes and purges its modules and unloads it, and
+  # `release_handler_1` only ever *replaces* paths, at `point_of_no_return`, for
+  # the libraries the relup loads code from. So the removed application's `ebin`
+  # stayed on the code path for the life of the node, and while the superseded
+  # release was still on disk its `.app` could still be found - which is how
+  # `application:ensure_all_started/1` decides an optional dependency is
+  # available, and so an application added later with an optional dependency on
+  # the removed one took it for present. A restart builds the path from the boot
+  # script and never had the problem, so a hot install and a restart disagreed.
+  #
+  # The path is deleted immediately after the unload, which is the last thing
+  # `:systools` does for that application, so nothing it does still needs it.
+  # Adding the application back - the other direction of the same transition, or
+  # a later relup - restores it: `load_object_code` records the library for
+  # `point_of_no_return`, and `code:replace_path/2` adds a path where there is
+  # none to replace. `code:del_path/1` given an atom deletes the entry for that
+  # application whatever its version, and what it returns is ignored, as
+  # `release_handler` ignores every `apply`.
+  defp forget_paths(script, apps) do
+    Enum.flat_map(script, fn
+      {:apply, {:application, :unload, [app]}} = unload ->
+        if app in apps, do: [unload, {:apply, {:code, :del_path, [app]}}], else: [unload]
+
+      instruction ->
+        [instruction]
+    end)
   end
 
   defp only_in(release, other) do

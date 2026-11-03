@@ -866,6 +866,28 @@ them keep the order `:systools` gave them, and a cycle is refused.
 `Forecastle.AddedAppsUpgradeTest` asserts both the relup and a real hot install
 and downgrade.
 
+**A removed application is taken off the code path, after its `unload`.**
+Nothing `:systools` makes of a `remove_application` touches the path, and
+`release_handler_1` only *replaces* paths, at `point_of_no_return`, for libraries
+the relup loads code from — so the removed application's `ebin` stayed on the
+path for the life of the node, and while the superseded release was on disk its
+`.app` stayed findable. That is the lookup `application:ensure_all_started/1`
+uses to decide an optional dependency is available, so a later upgrade adding an
+application with an optional dependency on the removed one took it for present,
+where a restart would not have. `forget_paths/2` puts an
+`{apply, {code, del_path, [App]}}` immediately after each removed application's
+unload. Adding it back needs nothing of ours: `load_object_code` records the
+library and `code:replace_path/2` at `point_of_no_return` adds a path where there
+is none to replace. `Forecastle.RemovedAppsUpgradeTest` removes on the way up and
+asserts the downgrade restores each path exactly once; it was run against the
+unchanged relup first and failed on the path and the `.app` lookup.
+
+One edge it changes: an application with **no modules** gets no
+`load_object_code` and so no path when it is added — which was already true of
+the first time it was ever added, and the stale path used to rescue a re-add.
+Hot-adding such an application was never reliable and is not made so here.
+That is read from `systools_rc` and `release_handler_1`, not measured.
+
 **Matching an appup from-version is `systools_relup`'s job, not a string
 compare.** Verified against OTP 28.3, `sasl-4.3`:
 
@@ -3319,6 +3341,7 @@ directory to start from a clean slate.
 | `test/forecastle/upgrade_case_test.exs` | `use Forecastle.UpgradeCase` on its own, which is how a project takes it and which every other suite here pairs with `Forecastle.ReleaseCase`: the alias, the timeout, and the scratch directory it names |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/added_apps_upgrade_test.exs` | A hot upgrade that adds applications and the downgrade that removes them: the order the relup starts and stops them in, and what a booted release has running after each. Tagged `:e2e` |
+| `test/forecastle/removed_apps_upgrade_test.exs` | The reverse: a hot upgrade that removes applications and the downgrade that adds them back, asserting on the code path and on whether each `.app` can still be found. Tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 | `test/forecastle/downstream_upgrade_test.exs` | The upgrade test a project outside this repository writes, written that way: `upgrade_from:`, a `tar:` deployment and nothing but shipped API below the build. Tagged `:e2e` |
 
