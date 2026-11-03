@@ -641,8 +641,26 @@ defmodule Forecastle.Deployment do
     end
   end
 
+  # A zombie has exited. It is a process-table entry kept until its parent
+  # collects the status, and `ps -p` lists it like any other, so asking only
+  # whether `ps` knows the pid read a node that had gone as one still running.
+  #
+  # Where that happens is not exotic. A release started with `daemon` is
+  # detached from whatever started it, so its parent is PID 1, and a container's
+  # PID 1 need not collect orphans promptly or at all: a shell, the project's own
+  # command under Docker without `--init`, or a sandbox's own process manager.
+  # Under systemd the zombie is gone before anyone looks, which is why no hosted
+  # runner showed it. Elsewhere `install_supervised/3` waited out its whole
+  # timeout for a node that had already rebooted, or, if the install answered
+  # first, reported it as never having rebooted at all.
+  #
+  # So the state is read rather than the presence, and `Z` is exited. `stat` is
+  # spelled the same way, and leads with the same letter, in procps and BSD `ps`.
   defp running?(pid) do
-    match?({_output, 0}, System.cmd("ps", ["-o", "pid=", "-p", pid], stderr_to_stdout: true))
+    case System.cmd("ps", ["-o", "stat=", "-p", pid], stderr_to_stdout: true) do
+      {stat, 0} -> not String.starts_with?(String.trim_leading(stat), "Z")
+      {_output, _status} -> false
+    end
   end
 
   @doc """

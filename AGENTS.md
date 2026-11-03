@@ -3197,6 +3197,15 @@ Three decisions in it are worth not relitigating:
   so an install that has already exited has exited about a failure and is
   holding the only account of it. Waiting on the process alone spent the whole
   timeout and then reported that a process was still running.
+- **"Running" means not a zombie, not merely present in `ps`.** `running?/1`
+  reads `ps -o stat=` and treats `Z` as exited. A daemonised node is detached, so
+  its parent is PID 1, and a container's PID 1 may collect orphans late or never;
+  `ps -p` lists a zombie like a live process, so a node that had rebooted was
+  read as still running. Hosted runners never showed it because systemd collects
+  at once. It was found in a sandbox whose PID 1 left a `sleep` uncollected for a
+  second and a half, which was enough to fail the stubbed reboot tests there.
+  `deployment_test.exs` makes a zombie whatever PID 1 is - a parent that execs a
+  `sleep` and so never waits - and asserts it is a zombie before relying on it.
 - **Relup generation is not part of the harness.** `mix castle.relup` and
   `upgrade_from:` are already public, so a project has both without this, and
   `test/support` keeps `make_relup!/3` because what it wraps is the *fixture* —

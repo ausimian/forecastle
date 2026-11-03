@@ -242,6 +242,13 @@ defmodule Forecastle.DeploymentTest do
       assert Deployment.await_exit!(pid, 50) == :ok
     end
 
+    test "counts a process that has exited and not been collected as gone" do
+      # A zombie is still in the process table, so `ps -p` lists it. Under an
+      # init that collects orphans late, a node that had already exited was
+      # waited on until the deadline.
+      assert Deployment.await_exit!(zombie_pid(), 1_000) == :ok
+    end
+
     # The linked task's crash report is the point of the case, not noise to read.
     @tag :capture_log
     test "a launcher that failed is reported as a failure, not as a hang", ctx do
@@ -328,6 +335,18 @@ defmodule Forecastle.DeploymentTest do
       # provisional release that rolled back on the way up.
       deployment =
         stubbed!(ctx.tree, transient_pid(), ~s|sleep 2\necho "1.1.0 is not running."\nexit 4\n|)
+
+      assert {output, 4} = Deployment.install_supervised(deployment, "1.1.0")
+      assert output =~ "1.1.0 is not running."
+    end
+
+    test "takes a node left as a zombie for one that has rebooted", ctx do
+      # The far side again, with the old node exited but not yet collected -
+      # which is what a daemonised release becomes where PID 1 does not collect
+      # orphans promptly. Read as still running, the install that answered first
+      # was reported as one that never rebooted.
+      deployment =
+        stubbed!(ctx.tree, zombie_pid(), ~s|sleep 2\necho "1.1.0 is not running."\nexit 4\n|)
 
       assert {output, 4} = Deployment.install_supervised(deployment, "1.1.0")
       assert output =~ "1.1.0 is not running."
@@ -821,6 +840,52 @@ defmodule Forecastle.DeploymentTest do
     {out, 0} = System.cmd("sh", ["-c", "sleep 1 >/dev/null 2>&1 & echo $!"])
 
     String.trim(out)
+  end
+
+  # A process that has exited and that nothing will collect for a while, made
+  # the same way whatever PID 1 is: its parent replaces itself with a `sleep`,
+  # which never waits for children. Both the parent's descriptors and the
+  # child's are detached, so `System.cmd/3` returns once the outer shell does.
+  #
+  # The child must not exit until the parent *has* become that `sleep`. A shell
+  # still running collects a background child that has already finished - dash
+  # and bash both do - so a child that exits first leaves no zombie at all. That
+  # was a race the first version of this lost on a CI runner and never here. So
+  # the child waits on its parent's command name; inside `( ... ) &`, `$$` is
+  # still the parent's pid. The loop is bounded so that a parent that somehow
+  # never execs does not leave it spinning.
+  #
+  # The case is only worth anything if the state really is a zombie, so that is
+  # waited for and asserted rather than assumed.
+  defp zombie_pid do
+    child =
+      ~S{(i=0; until case "$(ps -o comm= -p $$)" in *sleep) true;; *) false;; esac || } <>
+        ~S{[ $i -ge 500 ]; do i=$((i+1)); sleep 0.01; done) >/dev/null 2>&1}
+
+    {out, 0} =
+      System.cmd("sh", [
+        "-c",
+        "sh -c '#{child} & echo $!; exec sleep 10 >/dev/null 2>&1' &"
+      ])
+
+    pid = String.trim(out)
+    assert zombie?(pid, 250), "process #{pid} never became a zombie"
+    pid
+  end
+
+  defp zombie?(pid, attempts) do
+    {stat, _status} = System.cmd("ps", ["-o", "stat=", "-p", pid], stderr_to_stdout: true)
+
+    cond do
+      String.starts_with?(String.trim_leading(stat), "Z") -> true
+      attempts == 0 -> false
+      true -> retry_zombie?(pid, attempts)
+    end
+  end
+
+  defp retry_zombie?(pid, attempts) do
+    Process.sleep(20)
+    zombie?(pid, attempts - 1)
   end
 
   # Named members rather than a `cd` into the tree, because `:erl_tar.create/3`
