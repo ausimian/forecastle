@@ -882,11 +882,19 @@ is none to replace. `Forecastle.RemovedAppsUpgradeTest` removes on the way up an
 asserts the downgrade restores each path exactly once; it was run against the
 unchanged relup first and failed on the path and the `.app` lookup.
 
-One edge it changes: an application with **no modules** gets no
-`load_object_code` and so no path when it is added — which was already true of
-the first time it was ever added, and the stale path used to rescue a re-add.
-Hot-adding such an application was never reliable and is not made so here.
-That is read from `systools_rc` and `release_handler_1`, not measured.
+**And an added application with no modules is given a `load_object_code` naming
+none.** That instruction is the only way an added library reaches the list
+`point_of_no_return` sets paths for — `release_handler` starts that list from the
+libraries whose version *changed* — and `:systools` makes one only for a library it loads modules from, so an
+application with `modules: []` was added with no path, its `.app` could not be
+found, and the ignored `application:start/2` left it stopped until a restart.
+That was true of every hot add of such an application, measured with the
+fixture's `:sample_d` before `find_paths/3` existed; the stale path had only been
+masking it on a re-add. A `load_object_code` with an empty module list reads no
+files and records the library by name and version among the target's own, so
+the directory is still the one `release_handler` resolves. It goes immediately
+before `point_of_no_return`, which `:systools` always emits and before which only
+`load_object_code` and `apply` are allowed.
 
 **Matching an appup from-version is `systools_relup`'s job, not a string
 compare.** Verified against OTP 28.3, `sasl-4.3`:
@@ -3271,7 +3279,7 @@ them `deploy` becoming `deploy.root`.
 | `priv/env_prefix.sh.eex` | EEx template for the `CASTLE_ENV_FILE` fragment put at the start of the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
-| `test/fixtures/sample/added` | Three applications a build with `SAMPLE_ADDED_APPS=true` adds to the release. `:sample_a` and `:sample_c` depend on `:sample_b`, and each records when it starts and stops |
+| `test/fixtures/sample/added` | Four applications a build with `SAMPLE_ADDED_APPS=true` adds to the release. `:sample_a` and `:sample_c` depend on `:sample_b`, and each records when it starts and stops; `:sample_d` has no modules |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it, and which ships no appup of its own when `SAMPLE_DEP_APPUP=none` |
 | `test/support` | The workspace the fixture is built in, the case template for tests that assemble it, `mix castle.relup` between two of them, and `mix test.parallel`. Everything here knows the sample by name, which is why none of it is in `lib` |
 

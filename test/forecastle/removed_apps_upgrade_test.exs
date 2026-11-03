@@ -35,7 +35,8 @@ defmodule Forecastle.RemovedAppsUpgradeTest do
   # A version of its own, and so a build root of its own.
   @to "0.4.0"
 
-  @removed [:sample_a, :sample_b, :sample_c]
+  @removed [:sample_a, :sample_b, :sample_c, :sample_d]
+  @paths for app <- @removed, do: "#{app}-0.1.0"
 
   setup_all do
     # 0.1.0 is every other suite's baseline, built without the added
@@ -98,11 +99,19 @@ defmodule Forecastle.RemovedAppsUpgradeTest do
     test "deletes no path on the way down, which removes nothing", %{down: down} do
       refute Enum.any?(down, &match?({:apply, {:code, :del_path, _}}, &1))
     end
+
+    test "names the module-less application in a load_object_code on the way down",
+         %{down: down} do
+      ponr = Enum.find_index(down, &(&1 == :point_of_no_return))
+      index = Enum.find_index(down, &(&1 == {:load_object_code, {:sample_d, ~c"0.1.0", []}}))
+
+      assert is_integer(index) and index < ponr
+    end
   end
 
   describe "the release as booted" do
     test "has every application on its code path", %{booted: booted} do
-      assert booted.paths == ["sample_a-0.1.0", "sample_b-0.1.0", "sample_c-0.1.0"]
+      assert booted.paths == @paths
       for app <- @removed, do: assert(app in booted.started)
     end
   end
@@ -123,13 +132,13 @@ defmodule Forecastle.RemovedAppsUpgradeTest do
     # What `application:ensure_all_started/1` asks of an optional dependency,
     # and what `application:load/1` asks of any application.
     test "leaves no .app for them to be found by", %{installed: installed} do
-      assert installed.app_files == [:non_existing, :non_existing, :non_existing]
+      assert installed.app_files == [:non_existing, :non_existing, :non_existing, :non_existing]
     end
   end
 
   describe "a hot downgrade that adds them back" do
     test "puts each back on the code path, once", %{downgraded: downgraded} do
-      assert downgraded.paths == ["sample_a-0.1.0", "sample_b-0.1.0", "sample_c-0.1.0"]
+      assert downgraded.paths == @paths
     end
 
     test "finds their .app files again", %{downgraded: downgraded, root: root} do
