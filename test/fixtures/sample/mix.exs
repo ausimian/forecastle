@@ -57,10 +57,11 @@ defmodule Sample.MixProject do
   # that adds applications to the release. `:sample_a` and `:sample_c` each
   # depend on `:sample_b`, and the three sort so that the `.rel` order starts one
   # of the dependents too early and stops the dependency too early. See
-  # `added/sample_b/mix.exs`.
+  # `added/sample_b/mix.exs`. `:sample_d` has no modules at all; see
+  # `added/sample_d/mix.exs`.
   defp added_apps do
     if System.get_env("SAMPLE_ADDED_APPS") == "true" do
-      for app <- [:sample_a, :sample_b, :sample_c], do: {app, path: "added/#{app}"}
+      for app <- [:sample_a, :sample_b, :sample_c, :sample_d], do: {app, path: "added/#{app}"}
     else
       []
     end

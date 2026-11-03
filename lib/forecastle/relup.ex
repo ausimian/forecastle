@@ -579,12 +579,80 @@ defmodule Forecastle.Relup do
           :down -> {froms[from_vsn], target}
         end
 
+      added = only_in(adding, removing)
+      removed = only_in(removing, adding)
+
       script =
         script
-        |> gather_applys(:start, only_in(adding, removing), adding)
-        |> gather_applys(:stop, only_in(removing, adding), removing)
+        |> gather_applys(:start, added, adding)
+        |> gather_applys(:stop, removed, removing)
+        |> forget_paths(removed)
+        |> find_paths(added, adding)
 
       {from_vsn, descr, script}
+    end
+  end
+
+  # Nothing `:systools` makes of a `remove_application` touches the code path:
+  # it stops the application, removes and purges its modules and unloads it, and
+  # `release_handler_1` only ever *replaces* paths, at `point_of_no_return`, for
+  # the libraries the relup loads code from. So the removed application's `ebin`
+  # stayed on the code path for the life of the node, and while the superseded
+  # release was still on disk its `.app` could still be found - which is how
+  # `application:ensure_all_started/1` decides an optional dependency is
+  # available, and so an application added later with an optional dependency on
+  # the removed one took it for present. A restart builds the path from the boot
+  # script and never had the problem, so a hot install and a restart disagreed.
+  #
+  # The path is deleted immediately after the unload, which is the last thing
+  # `:systools` does for that application, so nothing it does still needs it.
+  # Adding the application back - the other direction of the same transition, or
+  # a later relup - restores it: `load_object_code` records the library for
+  # `point_of_no_return`, and `code:replace_path/2` adds a path where there is
+  # none to replace. `code:del_path/1` given an atom deletes the entry for that
+  # application whatever its version, and what it returns is ignored, as
+  # `release_handler` ignores every `apply`.
+  defp forget_paths(script, apps) do
+    Enum.flat_map(script, fn
+      {:apply, {:application, :unload, [app]}} = unload ->
+        if app in apps, do: [unload, {:apply, {:code, :del_path, [app]}}], else: [unload]
+
+      instruction ->
+        [instruction]
+    end)
+  end
+
+  # An added application gets a code path only because its library is named by a
+  # `load_object_code`: that is what puts it in the list `point_of_no_return`
+  # calls `code:replace_path/2` over, and `release_handler` adds nothing else -
+  # the libraries it starts from are the ones whose version *changed*. So an
+  # application with no modules, for which `:systools` makes no
+  # `load_object_code`, was added without a path, its `.app` could not be found,
+  # and `application:start/2` failed with an error `release_handler` ignores: the
+  # install succeeded and the application stayed stopped until the node
+  # restarted. Re-adding one taken off the path by `forget_paths/2` is the same
+  # case.
+  #
+  # A `load_object_code` naming no modules is the whole remedy. It reads no
+  # files, and it records the library - looked up by name and version among the
+  # target release's own libraries, so the directory is the one `release_handler`
+  # resolves at install time rather than anything decided here. It goes
+  # immediately before `point_of_no_return`, which is where `:systools` leaves
+  # the others: only `load_object_code` and `apply` may precede it, and
+  # `:systools` always emits one.
+  defp find_paths(script, apps, release) do
+    loaded = for {:load_object_code, {app, _vsn, _mods}} <- script, into: MapSet.new(), do: app
+
+    case Enum.reject(Enum.sort(apps), &(&1 in loaded)) do
+      [] ->
+        script
+
+      missing ->
+        loads =
+          for app <- missing, do: {:load_object_code, {app, to_charlist(release.apps[app]), []}}
+
+        {before, rest} = Enum.split_while(script, &(&1 != :point_of_no_return))
+        before ++ loads ++ rest
     end
   end
 
