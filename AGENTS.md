@@ -866,6 +866,36 @@ them keep the order `:systools` gave them, and a cycle is refused.
 `Forecastle.AddedAppsUpgradeTest` asserts both the relup and a real hot install
 and downgrade.
 
+**A removed application is taken off the code path, after its `unload`.**
+Nothing `:systools` makes of a `remove_application` touches the path, and
+`release_handler_1` only *replaces* paths, at `point_of_no_return`, for libraries
+the relup loads code from — so the removed application's `ebin` stayed on the
+path for the life of the node, and while the superseded release was on disk its
+`.app` stayed findable. That is the lookup `application:ensure_all_started/1`
+uses to decide an optional dependency is available, so a later upgrade adding an
+application with an optional dependency on the removed one took it for present,
+where a restart would not have. `forget_paths/2` puts an
+`{apply, {code, del_path, [App]}}` immediately after each removed application's
+unload. Adding it back needs nothing of ours: `load_object_code` records the
+library and `code:replace_path/2` at `point_of_no_return` adds a path where there
+is none to replace. `Forecastle.RemovedAppsUpgradeTest` removes on the way up and
+asserts the downgrade restores each path exactly once; it was run against the
+unchanged relup first and failed on the path and the `.app` lookup.
+
+**And an added application with no modules is given a `load_object_code` naming
+none.** That instruction is the only way an added library reaches the list
+`point_of_no_return` sets paths for — `release_handler` starts that list from the
+libraries whose version *changed* — and `:systools` makes one only for a library it loads modules from, so an
+application with `modules: []` was added with no path, its `.app` could not be
+found, and the ignored `application:start/2` left it stopped until a restart.
+That was true of every hot add of such an application, measured with the
+fixture's `:sample_d` before `find_paths/3` existed; the stale path had only been
+masking it on a re-add. A `load_object_code` with an empty module list reads no
+files and records the library by name and version among the target's own, so
+the directory is still the one `release_handler` resolves. It goes immediately
+before `point_of_no_return`, which `:systools` always emits and before which only
+`load_object_code` and `apply` are allowed.
+
 **Matching an appup from-version is `systools_relup`'s job, not a string
 compare.** Verified against OTP 28.3, `sasl-4.3`:
 
@@ -3249,7 +3279,7 @@ them `deploy` becoming `deploy.root`.
 | `priv/env_prefix.sh.eex` | EEx template for the `CASTLE_ENV_FILE` fragment put at the start of the release's `env.sh` |
 | `priv/start.sh.eex` | EEx template for `bin/start`, the inert program heart is handed |
 | `test/fixtures/sample` | A real application, assembled by the test suite into a real release. Its appup is deliberately incomplete — see *Appup coverage* |
-| `test/fixtures/sample/added` | Three applications a build with `SAMPLE_ADDED_APPS=true` adds to the release. `:sample_a` and `:sample_c` depend on `:sample_b`, and each records when it starts and stops |
+| `test/fixtures/sample/added` | Four applications a build with `SAMPLE_ADDED_APPS=true` adds to the release. `:sample_a` and `:sample_c` depend on `:sample_b`, and each records when it starts and stops; `:sample_d` has no modules |
 | `test/fixtures/sample/dep` | An application the relup never mentions, whose version moves with the sample's unless `SAMPLE_DEP_VSN` pins it, and which ships no appup of its own when `SAMPLE_DEP_APPUP=none` |
 | `test/support` | The workspace the fixture is built in, the case template for tests that assemble it, `mix castle.relup` between two of them, and `mix test.parallel`. Everything here knows the sample by name, which is why none of it is in `lib` |
 
@@ -3319,6 +3349,7 @@ directory to start from a clean slate.
 | `test/forecastle/upgrade_case_test.exs` | `use Forecastle.UpgradeCase` on its own, which is how a project takes it and which every other suite here pairs with `Forecastle.ReleaseCase`: the alias, the timeout, and the scratch directory it names |
 | `test/forecastle/upgrade_test.exs` | Booting a release and hot-upgrading it, including the code path of an application the relup does not load and the module the appup does not mention, tagged `:e2e` |
 | `test/forecastle/added_apps_upgrade_test.exs` | A hot upgrade that adds applications and the downgrade that removes them: the order the relup starts and stops them in, and what a booted release has running after each. Tagged `:e2e` |
+| `test/forecastle/removed_apps_upgrade_test.exs` | The reverse: a hot upgrade that removes applications and the downgrade that adds them back, asserting on the code path and on whether each `.app` can still be found. Tagged `:e2e` |
 | `test/forecastle/restart_upgrade_test.exs` | The same shape through an emulator restart: the OS pid changes, an uncommitted release rolls back when killed, and a commit makes it what an ordinary start boots. Tagged `:e2e` |
 | `test/forecastle/downstream_upgrade_test.exs` | The upgrade test a project outside this repository writes, written that way: `upgrade_from:`, a `tar:` deployment and nothing but shipped API below the build. Tagged `:e2e` |
 

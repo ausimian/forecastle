@@ -72,6 +72,9 @@ defmodule Forecastle.ReleaseCase do
     * `:into` - directory to assemble into, relative to the workspace
     * `:vsn`  - fixture version to build, defaults to `"0.1.0"`
     * `:env`  - extra environment for the build
+    * `:build_root` - build root, relative to the workspace. Defaults to one
+      per version; a suite building a version with a different set of
+      dependencies from the one every other suite builds gives it its own
   """
   def assemble!(opts \\ []) do
     workspace = Fixture.workspace()
@@ -83,7 +86,7 @@ defmodule Forecastle.ReleaseCase do
         {"SAMPLE_VSN", vsn},
         # A build root per version, so that the fixture's compile-time version
         # tag is genuinely recompiled rather than served from a stale artefact.
-        {"MIX_BUILD_ROOT", Path.join(workspace, "_build-#{vsn}")}
+        {"MIX_BUILD_ROOT", Path.join(workspace, Keyword.get(opts, :build_root, "_build-#{vsn}"))}
       ] ++ Keyword.get(opts, :env, [])
 
     # --overwrite lets Mix write into a non-empty directory but does not clear

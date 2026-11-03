@@ -32,7 +32,7 @@ defmodule Forecastle.AddedAppsUpgradeTest do
   # builds the fixture without the added applications.
   @to "0.2.0"
 
-  @added [:sample_a, :sample_b, :sample_c]
+  @added [:sample_a, :sample_b, :sample_c, :sample_d]
 
   setup_all do
     deploy = deployment(assemble!(into: "added-from", vsn: @from))
@@ -68,7 +68,13 @@ defmodule Forecastle.AddedAppsUpgradeTest do
 
     downgraded = %{
       started: started(deploy),
-      stops: Deployment.rpc!(deploy, "IO.inspect(:persistent_term.get(:sample_added_stops))")
+      stops: Deployment.rpc!(deploy, "IO.inspect(:persistent_term.get(:sample_added_stops))"),
+      on_path:
+        deploy
+        |> Deployment.rpc!(
+          "IO.inspect(for a <- #{inspect(@added)}, :code.where_is_file(~c\"\#{a}.app\") != :non_existing, do: a)"
+        )
+        |> Code.string_to_quoted!()
     }
 
     {:ok, up: up, down: down, installed: installed, downgraded: downgraded}
@@ -76,7 +82,7 @@ defmodule Forecastle.AddedAppsUpgradeTest do
 
   describe "the generated relup" do
     test "starts each added application after the ones it depends on", %{up: up} do
-      assert started_in(up) == [:sample_b, :sample_a, :sample_c]
+      assert started_in(up) == [:sample_b, :sample_a, :sample_c, :sample_d]
     end
 
     test "starts them only once every added module is loaded", %{up: up} do
@@ -91,8 +97,24 @@ defmodule Forecastle.AddedAppsUpgradeTest do
       assert Enum.all?(loads, &(&1 < first_start))
     end
 
+    # The others get one from their own modules; `:sample_d` has none, and
+    # without one it would be added with no code path.
+    test "names every added library in a load_object_code before the point of no return",
+         %{up: up} do
+      ponr = Enum.find_index(up, &(&1 == :point_of_no_return))
+
+      named =
+        for {{:load_object_code, {app, _, _}}, index} <- Enum.with_index(up),
+            index < ponr,
+            app in @added,
+            do: app
+
+      assert Enum.sort(named) == @added
+      assert {:load_object_code, {:sample_d, ~c"0.1.0", []}} in up
+    end
+
     test "stops each removed application before the ones it depends on", %{down: down} do
-      assert stopped_in(down) == [:sample_a, :sample_c, :sample_b]
+      assert stopped_in(down) == [:sample_a, :sample_c, :sample_b, :sample_d]
     end
 
     test "stops them before any removed module is gone", %{down: down} do
@@ -126,6 +148,12 @@ defmodule Forecastle.AddedAppsUpgradeTest do
 
     test "stops dependents before their dependency", %{downgraded: downgraded} do
       assert downgraded.stops == "[:sample_a, :sample_c, :sample_b]"
+    end
+
+    # The other direction of `Forecastle.RemovedAppsUpgradeTest`: a removal
+    # leaves nothing on the code path for an optional dependency to find.
+    test "takes them off the code path", %{downgraded: downgraded} do
+      assert downgraded.on_path == []
     end
   end
 
